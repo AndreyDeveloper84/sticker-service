@@ -23,11 +23,16 @@ services:
 
   backend:
     build: .
-    env_file:
-      - .env
     environment:
       DJANGO_SETTINGS_MODULE: config.settings.local
+      DJANGO_SECRET_KEY: ${DJANGO_SECRET_KEY:-local-development-key}
+      DJANGO_DEBUG: ${DJANGO_DEBUG:-1}
+      DJANGO_ALLOWED_HOSTS: ${DJANGO_ALLOWED_HOSTS:-localhost,127.0.0.1}
+      POSTGRES_DB: ${POSTGRES_DB:-stickers}
+      POSTGRES_USER: ${POSTGRES_USER:-stickers}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-stickers}
       POSTGRES_HOST: db
+      POSTGRES_PORT: 5432
       REDIS_URL: redis://redis:6379/0
     volumes:
       - .:/app
