@@ -2,7 +2,11 @@
 
 Статус: DRAFT
 
-## User
+## Основные сущности
+
+### User
+Внутренний пользователь сервиса.
+
 ```text
 User
 - id
@@ -10,7 +14,9 @@ User
 - status
 ```
 
-## ChannelIdentity
+### ChannelIdentity
+Связь пользователя с Telegram или MAX.
+
 ```text
 ChannelIdentity
 - id
@@ -24,7 +30,8 @@ ChannelIdentity
 
 Один User потенциально может иметь несколько ChannelIdentity.
 
-## Product
+### Product
+
 ```text
 Product
 - id
@@ -35,7 +42,8 @@ Product
 - configuration
 ```
 
-## Style
+### Style
+
 ```text
 Style
 - id
@@ -46,7 +54,8 @@ Style
 - generation_recipe_version
 ```
 
-## Order
+### Order
+
 ```text
 Order
 - id
@@ -61,7 +70,8 @@ Order
 - updated_at
 ```
 
-## OrderPhoto
+### OrderPhoto
+
 ```text
 OrderPhoto
 - id
@@ -71,7 +81,8 @@ OrderPhoto
 - metadata
 ```
 
-## Payment
+### Payment
+
 ```text
 Payment
 - id
@@ -84,7 +95,8 @@ Payment
 - created_at
 ```
 
-## GenerationJob
+### GenerationJob
+
 ```text
 GenerationJob
 - id
@@ -97,7 +109,8 @@ GenerationJob
 - created_at
 ```
 
-## GeneratedAsset
+### GeneratedAsset
+
 ```text
 GeneratedAsset
 - id
@@ -108,7 +121,8 @@ GeneratedAsset
 - status
 ```
 
-## Revision
+### Revision
+
 ```text
 Revision
 - id
@@ -119,7 +133,8 @@ Revision
 - created_at
 ```
 
-## Delivery
+### Delivery
+
 ```text
 Delivery
 - id
@@ -132,4 +147,6 @@ Delivery
 
 ## Главный принцип
 
-Telegram и MAX не создают отдельные доменные модели заказа. Канал — способ взаимодействия и доставки, а не отдельная бизнес-сущность продукта.
+Telegram и MAX не должны создавать отдельные доменные модели заказа.
+
+Канал — это способ взаимодействия и доставки, а не отдельная бизнес-сущность продукта.

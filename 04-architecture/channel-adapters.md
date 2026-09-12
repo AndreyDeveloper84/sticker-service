@@ -46,7 +46,9 @@ ChannelAdapter
 
 ## Правило
 
-ChannelAdapter переводит внешние события во внутренние команды.
+ChannelAdapter переводит внешние события в внутренние команды.
+
+Пример:
 
 ```text
 Telegram callback

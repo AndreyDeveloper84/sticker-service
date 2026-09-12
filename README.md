@@ -1,6 +1,6 @@
 # Sticker Service — Product & Architecture Docs
 
-Документация для сервиса персонализированных стикеров и аватаров.
+Текущий пакет документации для сервиса персонализированных стикеров и аватаров.
 
 ## Зафиксированные решения
 
@@ -39,20 +39,22 @@
 
 ## Следующие документы
 
-- telegram/screen-inventory.md
-- telegram/dialogs.md
-- max/screen-inventory.md
-- max/dialogs.md
-- commercial-rules.md
-- generation-pipeline.md
-- prompt-style-playbook.md
-- qc-spec.md
-- integrations.md
-- data-storage-and-privacy.md
-- acceptance-criteria.md
+Нужно сформировать:
+- telegram/screen-inventory.md;
+- telegram/dialogs.md;
+- max/screen-inventory.md;
+- max/dialogs.md;
+- commercial-rules.md;
+- generation-pipeline.md;
+- prompt-style-playbook.md;
+- qc-spec.md;
+- integrations.md;
+- data-storage-and-privacy.md;
+- acceptance-criteria.md.
 
 ## Статусы документов
 
-- DRAFT
-- REVIEWED
-- FROZEN
+Используются:
+- DRAFT;
+- REVIEWED;
+- FROZEN.
