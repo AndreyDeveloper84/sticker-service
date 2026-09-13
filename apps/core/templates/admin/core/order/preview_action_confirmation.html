@@ -1,0 +1,12 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+  <div id="content-main">
+    <p><strong>Order #{{ order.pk }}</strong> · {{ order.get_status_display }}</p>
+    <p>{{ detail }}</p>
+    <form method="post" action="{{ action_url }}">
+      {% csrf_token %}
+      <input type="submit" value="Подтвердить">
+      <a href="{% url 'admin:core_order_change' order.pk %}">Отмена</a>
+    </form>
+  </div>
+{% endblock %}
