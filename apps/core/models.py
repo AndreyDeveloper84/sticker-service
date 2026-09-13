@@ -198,3 +198,32 @@ class GeneratedAsset(TimestampedModel):
 
     def __str__(self) -> str:
         return f"GeneratedAsset #{self.pk} for order #{self.order_id}"
+
+
+class Revision(TimestampedModel):
+    class Category(models.TextChoices):
+        FACE = "face", "Face"
+        HAIR = "hair", "Hair"
+        BODY = "body", "Body"
+        DETAIL = "detail", "Detail"
+        COLORS = "colors", "Colors"
+        STYLE_EXPECTATION = "style_expectation", "Style expectation"
+        OTHER = "other", "Other"
+
+    class Status(models.TextChoices):
+        REQUESTED = "requested", "Requested"
+        GENERATING = "generating", "Generating"
+        COMPLETED = "completed", "Completed"
+
+    order = models.OneToOneField(Order, on_delete=models.PROTECT, related_name="revision")
+    source_preview = models.ForeignKey(
+        GeneratedAsset,
+        on_delete=models.PROTECT,
+        related_name="revision_requests",
+    )
+    category = models.CharField(max_length=32, choices=Category.choices)
+    customer_text = models.TextField(blank=True)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.REQUESTED)
+
+    def __str__(self) -> str:
+        return f"Revision #{self.pk} for order #{self.order_id}"
