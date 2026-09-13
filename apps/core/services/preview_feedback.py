@@ -25,14 +25,13 @@ class PreviewFeedbackService:
     def approve(cls, *, order: Order):
         locked = Order.objects.select_for_update().get(pk=order.pk)
         if locked.status != Order.Status.PREVIEW_REVIEW:
-            if locked.generated_assets.filter(metadata__customer_approved=True).exists():
-                return cls._delivered_preview(locked)
             raise PreviewFeedbackError("Order is not awaiting preview feedback")
         asset = cls._delivered_preview(locked)
         metadata = dict(asset.metadata or {})
-        metadata["customer_approved"] = True
-        asset.metadata = metadata
-        asset.save(update_fields=["metadata", "updated_at"])
+        if not metadata.get("customer_approved"):
+            metadata["customer_approved"] = True
+            asset.metadata = metadata
+            asset.save(update_fields=["metadata", "updated_at"])
         return asset
 
     @classmethod
@@ -41,7 +40,12 @@ class PreviewFeedbackService:
         locked = Order.objects.select_for_update().get(pk=order.pk)
         existing = Revision.objects.filter(order=locked).first()
         if existing:
-            return existing
+            if locked.status in {
+                Order.Status.REVISION_REQUESTED,
+                Order.Status.REVISION_GENERATING,
+            }:
+                return existing
+            raise PreviewFeedbackError("Included preview revision has already been used")
         if locked.status != Order.Status.PREVIEW_REVIEW:
             raise PreviewFeedbackError("Order is not awaiting preview feedback")
         valid_categories = {value for value, _ in Revision.Category.choices}
