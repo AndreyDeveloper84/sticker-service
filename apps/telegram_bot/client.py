@@ -86,7 +86,6 @@ class TelegramBotClient:
                 "title": title,
                 "description": description,
                 "payload": payload,
-                "provider_token": "",
                 "currency": "XTR",
                 "prices": [{"label": title, "amount": amount_stars}],
             },
