@@ -30,7 +30,6 @@ def health(request):
 
 
 @staff_member_required
-
 def order_photo_file(request, photo_id):
     try:
         photo = OrderPhoto.objects.get(pk=photo_id)
