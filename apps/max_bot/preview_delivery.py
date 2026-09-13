@@ -16,13 +16,30 @@ class MaxPreviewDeliveryAdapter:
             mime_type=mime_type,
             caption=caption,
         )
+        controls = self.client.send_message(
+            user_id=recipient_id,
+            text="Как вам превью?",
+            buttons=[[{
+                "text": "Нравится",
+                "payload": "preview_approve",
+            }, {
+                "text": "Нужно исправить",
+                "payload": "preview_revision",
+            }]],
+        )
         message_id = (
             (message or {}).get("body", {}).get("mid")
             or (message or {}).get("message", {}).get("mid")
             or (message or {}).get("mid")
             or ""
         )
+        controls_id = (
+            (controls or {}).get("body", {}).get("mid")
+            or (controls or {}).get("message", {}).get("mid")
+            or (controls or {}).get("mid")
+            or ""
+        )
         return DeliveryResult(
             message_id=str(message_id),
-            metadata={"user_id": recipient_id},
+            metadata={"user_id": recipient_id, "controls_message_id": str(controls_id)},
         )
