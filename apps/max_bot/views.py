@@ -1,8 +1,8 @@
 import json
+import os
 from mimetypes import guess_type
 from urllib.parse import urlparse
 
-from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
@@ -15,7 +15,7 @@ def webhook(request):
     if request.method != "POST":
         return HttpResponse(status=405)
 
-    secret = settings.MAX_WEBHOOK_SECRET
+    secret = os.getenv("MAX_WEBHOOK_SECRET", "")
     if secret and request.headers.get("X-Max-Bot-Api-Secret") != secret:
         return HttpResponse(status=403)
 
@@ -25,7 +25,7 @@ def webhook(request):
         return HttpResponse(status=400)
 
     adapter = MaxAdapter()
-    client = MaxBotClient(settings.MAX_BOT_TOKEN)
+    client = MaxBotClient(os.getenv("MAX_BOT_TOKEN", ""))
     try:
         _handle_update(update, adapter=adapter, client=client)
     except MaxFlowError as exc:
