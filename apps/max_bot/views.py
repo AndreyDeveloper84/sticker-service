@@ -7,6 +7,7 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from apps.max_bot.adapter import MaxAdapter, MaxFlowError
+from apps.max_bot.checkout import start_checkout
 from apps.max_bot.client import MaxBotClient
 
 
@@ -122,10 +123,7 @@ def _handle_callback(update, *, adapter, client):
         )
     elif payload == "photos_done":
         adapter.complete_photos(identity)
-        client.send_message(
-            user_id=identity.external_user_id,
-            text="Фотографии приняты. Заказ готов к следующему шагу.",
-        )
+        start_checkout(identity=identity, client=client)
 
     callback_id = callback.get("callback_id")
     if callback_id:
