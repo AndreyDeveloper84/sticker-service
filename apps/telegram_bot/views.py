@@ -6,6 +6,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
 from apps.telegram_bot.client import TelegramBotClient
+from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
 
 
 @csrf_exempt
@@ -23,27 +24,46 @@ def webhook(request):
         return HttpResponse(status=400)
 
     adapter = TelegramAdapter()
+    payment_adapter = TelegramStarsPaymentAdapter()
     client = TelegramBotClient(settings.TELEGRAM_BOT_TOKEN)
 
     try:
-        _handle_update(update, adapter=adapter, client=client)
+        _handle_update(update, adapter=adapter, payment_adapter=payment_adapter, client=client)
+    except TelegramPaymentError as exc:
+        return JsonResponse({"ok": False, "error": str(exc)})
     except TelegramFlowError as exc:
         return JsonResponse({"ok": False, "error": str(exc)}, status=409)
 
     return JsonResponse({"ok": True})
 
 
-def _handle_update(update, *, adapter, client):
+def _handle_update(update, *, adapter, payment_adapter, client):
+    if "pre_checkout_query" in update:
+        return _handle_pre_checkout(update["pre_checkout_query"], adapter=adapter, payment_adapter=payment_adapter, client=client)
     if "message" in update:
-        return _handle_message(update["message"], adapter=adapter, client=client)
+        return _handle_message(update["message"], adapter=adapter, payment_adapter=payment_adapter, client=client)
     if "callback_query" in update:
-        return _handle_callback(update["callback_query"], adapter=adapter, client=client)
+        return _handle_callback(update["callback_query"], adapter=adapter, payment_adapter=payment_adapter, client=client)
     return None
 
 
-def _handle_message(message, *, adapter, client):
+def _handle_pre_checkout(query, *, adapter, payment_adapter, client):
+    identity = adapter.get_or_create_identity(query["from"])
+    try:
+        payment_adapter.validate_pre_checkout(identity=identity, query=query)
+    except TelegramPaymentError as exc:
+        return client.answer_pre_checkout_query(pre_checkout_query_id=query["id"], ok=False, error_message=str(exc))
+    return client.answer_pre_checkout_query(pre_checkout_query_id=query["id"], ok=True)
+
+
+def _handle_message(message, *, adapter, payment_adapter, client):
     identity = adapter.get_or_create_identity(message["from"])
     chat_id = message["chat"]["id"]
+
+    successful_payment = message.get("successful_payment")
+    if successful_payment:
+        payment_adapter.confirm_successful_payment(identity=identity, successful_payment=successful_payment)
+        return client.send_message(chat_id=chat_id, text="Оплата получена. Начинаем подготовку превью.")
 
     if (message.get("text") or "").startswith("/start"):
         buttons = [[{"text": p.name, "callback_data": f"product:{p.code}"}] for p in adapter.active_products()]
@@ -55,20 +75,11 @@ def _handle_message(message, *, adapter, client):
         file_path = file_info["file_path"]
         content = client.download_file(file_path)
         mime_type = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
-        adapter.save_photo_bytes(
-            identity=identity,
-            content=content,
-            filename=file_path.rsplit("/", 1)[-1],
-            mime_type=mime_type,
-        )
-        return client.send_message(
-            chat_id=chat_id,
-            text="Фото сохранено. Отправьте ещё или нажмите «Фото загружены».",
-            reply_markup={"inline_keyboard": [[{"text": "Фото загружены", "callback_data": "photos_done"}]]},
-        )
+        adapter.save_photo_bytes(identity=identity, content=content, filename=file_path.rsplit("/", 1)[-1], mime_type=mime_type)
+        return client.send_message(chat_id=chat_id, text="Фото сохранено. Отправьте ещё или нажмите «Фото загружены».", reply_markup={"inline_keyboard": [[{"text": "Фото загружены", "callback_data": "photos_done"}]]})
 
 
-def _handle_callback(callback, *, adapter, client):
+def _handle_callback(callback, *, adapter, payment_adapter, client):
     identity = adapter.get_or_create_identity(callback["from"])
     chat_id = callback["message"]["chat"]["id"]
     data = callback.get("data") or ""
@@ -85,6 +96,9 @@ def _handle_callback(callback, *, adapter, client):
         client.send_message(chat_id=chat_id, text="Отправьте несколько хороших фотографий человека.")
     elif data == "photos_done":
         adapter.complete_photos(identity)
-        client.send_message(chat_id=chat_id, text="Фотографии приняты. Заказ готов к следующему шагу.")
+        client.send_message(chat_id=chat_id, text="Фотографии приняты. Можно переходить к оплате.", reply_markup={"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]})
+    elif data == "pay":
+        payment = payment_adapter.payment_for_identity(identity)
+        client.send_invoice(chat_id=chat_id, title=payment.order.product.name, description="Персональный цифровой заказ", payload=payment_adapter.payload(payment), amount_stars=payment.amount_minor)
 
     return client.answer_callback_query(callback_query_id=callback["id"])
