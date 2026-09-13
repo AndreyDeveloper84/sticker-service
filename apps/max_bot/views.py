@@ -6,6 +6,8 @@ from urllib.parse import urlparse
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from apps.core.models import Order, Revision
+from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.max_bot.adapter import MaxAdapter, MaxFlowError
 from apps.max_bot.checkout import start_checkout
 from apps.max_bot.client import MaxBotClient
@@ -29,7 +31,7 @@ def webhook(request):
     client = MaxBotClient(os.getenv("MAX_BOT_TOKEN", ""))
     try:
         _handle_update(update, adapter=adapter, client=client)
-    except MaxFlowError as exc:
+    except (MaxFlowError, PreviewFeedbackError) as exc:
         return JsonResponse({"ok": False, "error": str(exc)}, status=409)
 
     return JsonResponse({"ok": True})
@@ -99,6 +101,26 @@ def _image_url(attachment):
     return None
 
 
+def _feedback_order(identity):
+    order = identity.orders.filter(status=Order.Status.PREVIEW_REVIEW).order_by("-created_at").first()
+    if not order:
+        raise PreviewFeedbackError("Нет превью, ожидающего вашей оценки")
+    return order
+
+
+def _revision_buttons():
+    labels = {
+        Revision.Category.FACE: "Лицо",
+        Revision.Category.HAIR: "Волосы",
+        Revision.Category.BODY: "Тело",
+        Revision.Category.DETAIL: "Детали",
+        Revision.Category.COLORS: "Цвета",
+        Revision.Category.STYLE_EXPECTATION: "Стиль",
+        Revision.Category.OTHER: "Другое",
+    }
+    return [[{"text": label, "payload": f"preview_revision:{value}"}] for value, label in labels.items()]
+
+
 def _handle_callback(update, *, adapter, client):
     user = update.get("user") or (update.get("message") or {}).get("sender")
     identity = adapter.get_or_create_identity(user)
@@ -124,6 +146,25 @@ def _handle_callback(update, *, adapter, client):
     elif payload == "photos_done":
         adapter.complete_photos(identity)
         start_checkout(identity=identity, client=client)
+    elif payload == "preview_approve":
+        PreviewFeedbackService.approve(order=_feedback_order(identity))
+        client.send_message(user_id=identity.external_user_id, text="Превью принято. Спасибо!")
+    elif payload == "preview_revision":
+        client.send_message(
+            user_id=identity.external_user_id,
+            text="Что нужно исправить? Выберите основную причину.",
+            buttons=_revision_buttons(),
+        )
+    elif payload.startswith("preview_revision:"):
+        category = payload.split(":", 1)[1]
+        PreviewFeedbackService.request_revision(
+            order=_feedback_order(identity),
+            category=category,
+        )
+        client.send_message(
+            user_id=identity.external_user_id,
+            text="Правка принята. Мы подготовим обновлённое превью.",
+        )
 
     callback_id = callback.get("callback_id")
     if callback_id:

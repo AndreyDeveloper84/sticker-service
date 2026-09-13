@@ -5,8 +5,10 @@ from pathlib import Path
 from django.test import TestCase, override_settings
 
 from apps.core.image_providers import ImageGenerationResult
-from apps.core.models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Product, Style, User
+from apps.core.models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Product, Revision, Style, User
 from apps.core.services.generation import GenerationError, GenerationService
+from apps.core.services.order_state import OrderStateService
+from apps.core.services.preview_feedback import PreviewFeedbackService
 from apps.core.storage import LocalMediaStorage
 
 
@@ -79,3 +81,32 @@ class GenerationServiceTests(TestCase):
             with self.assertRaises(GenerationError):
                 GenerationService(provider=FakeProvider(), storage=storage).generate_preview(order=self.order)
             self.assertFalse(GenerationJob.objects.filter(order=self.order).exists())
+
+    def test_revision_generation_returns_to_internal_review(self):
+        with tempfile.TemporaryDirectory() as root, override_settings(MEDIA_ROOT=Path(root)):
+            storage = LocalMediaStorage()
+            self.add_photo(storage)
+            service = GenerationService(provider=FakeProvider(), storage=storage)
+            source = service.generate_preview(order=self.order)
+            self.order.refresh_from_db()
+            metadata = dict(source.metadata or {})
+            metadata.update({
+                "internal_approved": True,
+                "deliveries": [{"status": "sent", "channel": "telegram", "message_id": "1"}],
+            })
+            source.metadata = metadata
+            source.save(update_fields=["metadata", "updated_at"])
+            OrderStateService.transition(order=self.order, to_status=Order.Status.PREVIEW_REVIEW)
+            revision = PreviewFeedbackService.request_revision(
+                order=self.order,
+                category=Revision.Category.FACE,
+                customer_text="Make the face closer to the reference",
+            )
+            self.order.refresh_from_db()
+            revised = service.generate_revision(order=self.order)
+            self.order.refresh_from_db()
+            revision.refresh_from_db()
+            self.assertEqual(self.order.status, Order.Status.INTERNAL_PREVIEW_REVIEW)
+            self.assertEqual(revision.status, Revision.Status.COMPLETED)
+            self.assertEqual(revised.job.task_type, GenerationJob.TaskType.REVISION)
+            self.assertIn("Make the face closer", service.provider.requests[-1].prompt)
