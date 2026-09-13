@@ -1,5 +1,4 @@
 import json
-from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 
@@ -30,6 +29,26 @@ class TelegramBotClient:
         if reply_markup is not None:
             payload["reply_markup"] = reply_markup
         return self._post("sendMessage", payload)
+
+    def send_invoice(self, *, chat_id, title, description, payload, amount_stars):
+        return self._post(
+            "sendInvoice",
+            {
+                "chat_id": chat_id,
+                "title": title,
+                "description": description,
+                "payload": payload,
+                "provider_token": "",
+                "currency": "XTR",
+                "prices": [{"label": title, "amount": amount_stars}],
+            },
+        )
+
+    def answer_pre_checkout_query(self, *, pre_checkout_query_id, ok, error_message=None):
+        payload = {"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}
+        if error_message:
+            payload["error_message"] = error_message
+        return self._post("answerPreCheckoutQuery", payload)
 
     def answer_callback_query(self, *, callback_query_id, text=None):
         payload = {"callback_query_id": callback_query_id}
