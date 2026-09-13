@@ -60,6 +60,10 @@ DATABASES = {
 }
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
+ORDER_PHOTO_MAX_BYTES = int(os.getenv("ORDER_PHOTO_MAX_BYTES", str(20 * 1024 * 1024)))
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
+TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 
 AUTH_PASSWORD_VALIDATORS = []
 LANGUAGE_CODE = "ru-ru"
