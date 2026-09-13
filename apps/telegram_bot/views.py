@@ -4,6 +4,8 @@ from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+from apps.core.models import Order, Revision
+from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
 from apps.telegram_bot.client import TelegramBotClient
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
@@ -29,7 +31,7 @@ def webhook(request):
 
     try:
         _handle_update(update, adapter=adapter, payment_adapter=payment_adapter, client=client)
-    except TelegramPaymentError as exc:
+    except (TelegramPaymentError, PreviewFeedbackError) as exc:
         return JsonResponse({"ok": False, "error": str(exc)})
     except TelegramFlowError as exc:
         return JsonResponse({"ok": False, "error": str(exc)}, status=409)
@@ -79,6 +81,26 @@ def _handle_message(message, *, adapter, payment_adapter, client):
         return client.send_message(chat_id=chat_id, text="Фото сохранено. Отправьте ещё или нажмите «Фото загружены».", reply_markup={"inline_keyboard": [[{"text": "Фото загружены", "callback_data": "photos_done"}]]})
 
 
+def _feedback_order(identity):
+    order = identity.orders.filter(status=Order.Status.PREVIEW_REVIEW).order_by("-created_at").first()
+    if not order:
+        raise PreviewFeedbackError("Нет превью, ожидающего вашей оценки")
+    return order
+
+
+def _revision_buttons():
+    labels = {
+        Revision.Category.FACE: "Лицо",
+        Revision.Category.HAIR: "Волосы",
+        Revision.Category.BODY: "Тело",
+        Revision.Category.DETAIL: "Детали",
+        Revision.Category.COLORS: "Цвета",
+        Revision.Category.STYLE_EXPECTATION: "Стиль",
+        Revision.Category.OTHER: "Другое",
+    }
+    return [[{"text": label, "callback_data": f"preview_revision:{value}"}] for value, label in labels.items()]
+
+
 def _handle_callback(callback, *, adapter, payment_adapter, client):
     identity = adapter.get_or_create_identity(callback["from"])
     chat_id = callback["message"]["chat"]["id"]
@@ -100,5 +122,21 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
     elif data == "pay":
         payment = payment_adapter.payment_for_identity(identity)
         client.send_invoice(chat_id=chat_id, title=payment.order.product.name, description="Персональный цифровой заказ", payload=payment_adapter.payload(payment), amount_stars=payment.amount_minor)
+    elif data == "preview_approve":
+        PreviewFeedbackService.approve(order=_feedback_order(identity))
+        client.send_message(chat_id=chat_id, text="Превью принято. Спасибо!")
+    elif data == "preview_revision":
+        client.send_message(
+            chat_id=chat_id,
+            text="Что нужно исправить? Выберите основную причину.",
+            reply_markup={"inline_keyboard": _revision_buttons()},
+        )
+    elif data.startswith("preview_revision:"):
+        category = data.split(":", 1)[1]
+        PreviewFeedbackService.request_revision(
+            order=_feedback_order(identity),
+            category=category,
+        )
+        client.send_message(chat_id=chat_id, text="Правка принята. Мы подготовим обновлённое превью.")
 
     return client.answer_callback_query(callback_query_id=callback["id"])
