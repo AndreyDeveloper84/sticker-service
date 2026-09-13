@@ -132,7 +132,7 @@ class ProductionConsolePreviewTests(TestCase):
             [1, 2],
         )
 
-    def test_approve_marks_exact_asset_and_moves_order_to_customer_review(self):
+    def test_approve_marks_exact_asset_and_waits_for_delivery(self):
         first = self.service().generate_preview(order=self.order)
         self.order.refresh_from_db()
         OrderStateService.transition(
@@ -152,7 +152,7 @@ class ProductionConsolePreviewTests(TestCase):
         self.order.refresh_from_db()
         first.refresh_from_db()
         second.refresh_from_db()
-        self.assertEqual(self.order.status, Order.Status.PREVIEW_REVIEW)
+        self.assertEqual(self.order.status, Order.Status.INTERNAL_PREVIEW_REVIEW)
         self.assertTrue(first.metadata.get("internal_approved"))
         self.assertFalse(second.metadata.get("internal_approved", False))
 
