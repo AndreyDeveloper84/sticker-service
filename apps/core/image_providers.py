@@ -39,7 +39,7 @@ class OpenAIImageProvider:
 
     def __init__(self, *, client=None, model: str | None = None):
         self._client = client
-        self.model = model or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2.5-sunburst")
+        self.model = model or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
 
     @property
     def client(self):

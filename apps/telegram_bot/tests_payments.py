@@ -61,12 +61,12 @@ class TelegramStarsPaymentTests(TestCase):
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.AWAITING_PAYMENT)
 
-    def test_send_invoice_uses_xtr_and_empty_provider_token(self):
+    def test_send_invoice_uses_xtr_without_provider_token(self):
         client = TelegramBotClient("test-token")
         client._post = Mock(return_value={"message_id": 1})
         client.send_invoice(chat_id=1001, title="Sticker Pack", description="Digital order", payload="order:1:payment:1", amount_stars=150)
         method, payload = client._post.call_args.args
         self.assertEqual(method, "sendInvoice")
         self.assertEqual(payload["currency"], "XTR")
-        self.assertEqual(payload["provider_token"], "")
+        self.assertNotIn("provider_token", payload)
         self.assertEqual(payload["prices"], [{"label": "Sticker Pack", "amount": 150}])
