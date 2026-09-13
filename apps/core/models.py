@@ -68,6 +68,13 @@ class Order(TimestampedModel):
         DRAFT = "draft", "Draft"
         AWAITING_PHOTOS = "awaiting_photos", "Awaiting photos"
         READY_FOR_CHECKOUT = "ready_for_checkout", "Ready for checkout"
+        AWAITING_PAYMENT = "awaiting_payment", "Awaiting payment"
+        PAID = "paid", "Paid"
+        PREVIEW_GENERATING = "preview_generating", "Preview generating"
+        INTERNAL_PREVIEW_REVIEW = "internal_preview_review", "Internal preview review"
+        PREVIEW_REVIEW = "preview_review", "Preview review"
+        REVISION_REQUESTED = "revision_requested", "Revision requested"
+        REVISION_GENERATING = "revision_generating", "Revision generating"
         CANCELLED = "cancelled", "Cancelled"
         FAILED = "failed", "Failed"
 
@@ -111,3 +118,32 @@ class OrderPhoto(TimestampedModel):
 
     def __str__(self) -> str:
         return f"OrderPhoto #{self.pk} for order #{self.order_id}"
+
+
+class Payment(TimestampedModel):
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        CONFIRMED = "confirmed", "Confirmed"
+        FAILED = "failed", "Failed"
+        CANCELLED = "cancelled", "Cancelled"
+        REFUNDED = "refunded", "Refunded"
+
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="payments")
+    provider = models.CharField(max_length=64)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
+    amount_minor = models.PositiveBigIntegerField()
+    currency = models.CharField(max_length=8)
+    external_payment_id = models.CharField(max_length=255, null=True, blank=True)
+    metadata = models.JSONField(default=dict, blank=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["provider", "external_payment_id"],
+                name="uniq_payment_provider_external_id",
+            )
+        ]
+
+    def __str__(self) -> str:
+        return f"Payment #{self.pk} for order #{self.order_id}"
