@@ -5,7 +5,8 @@ from django.conf import settings
 
 class LocalMediaStorage:
     def __init__(self, root=None):
-        self.root = Path(root or settings.MEDIA_ROOT)
+        default_root = Path(settings.BASE_DIR) / "var" / "media"
+        self.root = Path(root or getattr(settings, "MEDIA_ROOT", default_root))
 
     def _path(self, key):
         root = self.root.resolve()
