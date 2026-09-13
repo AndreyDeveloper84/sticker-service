@@ -27,9 +27,20 @@ class TelegramPreviewDeliveryAdapter:
             mime_type=mime_type,
             caption=caption,
         )
+        controls = self.client.send_message(
+            chat_id=recipient_id,
+            text="Как вам превью?",
+            reply_markup={
+                "inline_keyboard": [[
+                    {"text": "Нравится", "callback_data": "preview_approve"},
+                    {"text": "Нужно исправить", "callback_data": "preview_revision"},
+                ]]
+            },
+        )
         return DeliveryResult(
             message_id=str((message or {}).get("message_id") or ""),
             metadata={
                 "chat_id": str((message or {}).get("chat", {}).get("id") or recipient_id),
+                "controls_message_id": str((controls or {}).get("message_id") or ""),
             },
         )
