@@ -13,7 +13,10 @@ ALLOWED_IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
 class MediaService:
     def __init__(self, storage=None):
-        self.storage = storage or LocalMediaStorage()
+        self.storage = storage
+
+    def _storage(self):
+        return self.storage or LocalMediaStorage()
 
     def save_order_photo(self, *, order, file, original_filename=None, mime_type=None):
         mime_type = (mime_type or getattr(file, "content_type", "") or "").lower()
@@ -37,7 +40,7 @@ class MediaService:
 
         if hasattr(file, "seek"):
             file.seek(0)
-        self.storage.save(storage_key, file)
+        self._storage().save(storage_key, file)
 
         return OrderPhoto.objects.create(
             order=order,
