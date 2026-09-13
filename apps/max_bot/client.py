@@ -2,6 +2,8 @@ import json
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+from apps.max_bot.client_payment_link import render_button
+
 
 class MaxBotClient:
     base_url = "https://platform-api2.max.ru"
@@ -35,10 +37,7 @@ class MaxBotClient:
                     "type": "inline_keyboard",
                     "payload": {
                         "buttons": [
-                            [
-                                {"type": "callback", "text": button["text"], "payload": button["payload"]}
-                                for button in row
-                            ]
+                            [render_button(button) for button in row]
                             for row in buttons
                         ]
                     },
