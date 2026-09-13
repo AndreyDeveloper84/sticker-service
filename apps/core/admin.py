@@ -1,6 +1,9 @@
 from django.contrib import admin
+from django.http import FileResponse, Http404
+from django.urls import path
 
 from .models import ChannelIdentity, Order, OrderPhoto, Product, Style, User
+from .storage import LocalMediaStorage
 
 
 @admin.register(User)
@@ -49,3 +52,28 @@ class OrderPhotoAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "status", "mime_type", "size_bytes", "created_at")
     list_filter = ("status", "mime_type")
     search_fields = ("storage_key", "original_filename")
+
+    def get_urls(self):
+        urls = super().get_urls()
+        custom = [
+            path(
+                "<int:photo_id>/file/",
+                self.admin_site.admin_view(self.file_view),
+                name="core_orderphoto_file",
+            )
+        ]
+        return custom + urls
+
+    def file_view(self, request, photo_id):
+        try:
+            photo = OrderPhoto.objects.get(pk=photo_id)
+        except OrderPhoto.DoesNotExist as exc:
+            raise Http404 from exc
+        storage = LocalMediaStorage()
+        if not storage.exists(photo.storage_key):
+            raise Http404
+        return FileResponse(
+            storage.open(photo.storage_key),
+            filename=photo.original_filename or f"photo-{photo.pk}",
+            content_type=photo.mime_type or "application/octet-stream",
+        )
