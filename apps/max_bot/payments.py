@@ -142,6 +142,13 @@ class MaxExternalPaymentAdapter:
         )
         if existing:
             payment = existing
+            metadata = payment.metadata or {}
+            checkout_url = str(metadata.get("checkout_url") or "")
+            if checkout_url:
+                return payment, CheckoutSession(
+                    checkout_url=checkout_url,
+                    provider_reference=str(metadata.get("provider_reference") or ""),
+                )
         else:
             config = order.product.config or {}
             amount_minor = int(config.get("price_minor") or 0)
