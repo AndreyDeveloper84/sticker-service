@@ -147,3 +147,54 @@ class Payment(TimestampedModel):
 
     def __str__(self) -> str:
         return f"Payment #{self.pk} for order #{self.order_id}"
+
+
+class GenerationJob(TimestampedModel):
+    class TaskType(models.TextChoices):
+        PREVIEW = "preview", "Preview"
+        REVISION = "revision", "Revision"
+
+    class Status(models.TextChoices):
+        PENDING = "pending", "Pending"
+        RUNNING = "running", "Running"
+        SUCCEEDED = "succeeded", "Succeeded"
+        FAILED = "failed", "Failed"
+
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="generation_jobs")
+    task_type = models.CharField(max_length=32, choices=TaskType.choices)
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
+    attempt = models.PositiveIntegerField()
+    provider = models.CharField(max_length=64)
+    input_metadata = models.JSONField(default=dict, blank=True)
+    output_metadata = models.JSONField(default=dict, blank=True)
+    error = models.TextField(blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["order", "task_type", "attempt"],
+                name="uniq_generation_attempt",
+            )
+        ]
+        ordering = ["order_id", "task_type", "attempt"]
+
+    def __str__(self) -> str:
+        return f"GenerationJob #{self.pk} {self.task_type} attempt {self.attempt}"
+
+
+class GeneratedAsset(TimestampedModel):
+    class Kind(models.TextChoices):
+        PREVIEW = "preview", "Preview"
+
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="generated_assets")
+    job = models.ForeignKey(GenerationJob, on_delete=models.PROTECT, related_name="assets")
+    kind = models.CharField(max_length=32, choices=Kind.choices, default=Kind.PREVIEW)
+    storage_key = models.CharField(max_length=512, unique=True)
+    mime_type = models.CharField(max_length=127, default="image/png")
+    size_bytes = models.PositiveBigIntegerField(default=0)
+    metadata = models.JSONField(default=dict, blank=True)
+
+    def __str__(self) -> str:
+        return f"GeneratedAsset #{self.pk} for order #{self.order_id}"
