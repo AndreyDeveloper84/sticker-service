@@ -25,7 +25,38 @@ class OrderStateService:
             Order.Status.FAILED,
         },
         Order.Status.READY_FOR_CHECKOUT: {
+            Order.Status.AWAITING_PAYMENT,
             Order.Status.CANCELLED,
+            Order.Status.FAILED,
+        },
+        Order.Status.AWAITING_PAYMENT: {
+            Order.Status.PAID,
+            Order.Status.CANCELLED,
+            Order.Status.FAILED,
+        },
+        Order.Status.PAID: {
+            Order.Status.PREVIEW_GENERATING,
+            Order.Status.FAILED,
+        },
+        Order.Status.PREVIEW_GENERATING: {
+            Order.Status.INTERNAL_PREVIEW_REVIEW,
+            Order.Status.FAILED,
+        },
+        Order.Status.INTERNAL_PREVIEW_REVIEW: {
+            Order.Status.PREVIEW_GENERATING,
+            Order.Status.PREVIEW_REVIEW,
+            Order.Status.FAILED,
+        },
+        Order.Status.PREVIEW_REVIEW: {
+            Order.Status.REVISION_REQUESTED,
+            Order.Status.FAILED,
+        },
+        Order.Status.REVISION_REQUESTED: {
+            Order.Status.REVISION_GENERATING,
+            Order.Status.FAILED,
+        },
+        Order.Status.REVISION_GENERATING: {
+            Order.Status.INTERNAL_PREVIEW_REVIEW,
             Order.Status.FAILED,
         },
         Order.Status.CANCELLED: set(),
@@ -39,6 +70,12 @@ class OrderStateService:
     @classmethod
     @transaction.atomic
     def transition(cls, *, order: Order, to_status: str) -> Order:
+        if to_status == Order.Status.PAID:
+            raise InvalidOrderTransition("PAID can only be reached through PaymentService")
+        return cls._transition(order=order, to_status=to_status)
+
+    @classmethod
+    def _transition(cls, *, order: Order, to_status: str) -> Order:
         valid_statuses = {value for value, _label in Order.Status.choices}
         if to_status not in valid_statuses:
             raise InvalidOrderTransition(f"Unknown target status: {to_status}")
