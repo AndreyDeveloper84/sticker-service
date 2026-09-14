@@ -18,6 +18,12 @@ if STAGING_DOMAIN and STAGING_DOMAIN not in _allowed_hosts:
 if _allowed_hosts:
     ALLOWED_HOSTS = _allowed_hosts
 
+# Loopback is always allowed: container and deploy healthchecks reach Django
+# via 127.0.0.1/localhost regardless of the public domain.
+for _loopback in ("127.0.0.1", "localhost"):
+    if _loopback not in ALLOWED_HOSTS:
+        ALLOWED_HOSTS.append(_loopback)
+
 CSRF_TRUSTED_ORIGINS = [
     o.strip()
     for o in os.getenv("DJANGO_CSRF_TRUSTED_ORIGINS", "").split(",")
