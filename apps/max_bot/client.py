@@ -51,8 +51,28 @@ def _api_base() -> str:
     return os.getenv("MAX_API_BASE", DEFAULT_API_BASE).rstrip("/")
 
 
+_SHARED_CLIENT: httpx.Client | None = None
+
+
+def _shared_client() -> httpx.Client:
+    """Process-wide httpx client with keep-alive.
+
+    A cold TCP connect to botapi.max.ru from the staging VPS costs ~5 s
+    (measured 2026-09-14); a module-level ``httpx.request`` pays it on EVERY
+    send, which under load exceeded the webhook-time budget and caused MAX
+    to retry deliveries (duplicate messages). Connection reuse makes warm
+    sends ~0.1 s. Gunicorn sync workers are separate processes, so each
+    worker lazily gets its own client — no cross-thread sharing concerns
+    beyond what httpx already handles.
+    """
+    global _SHARED_CLIENT
+    if _SHARED_CLIENT is None:
+        _SHARED_CLIENT = httpx.Client()
+    return _SHARED_CLIENT
+
+
 class MaxBotClient:
-    def __init__(self, token: str, *, timeout: float = 10.0, api_base: str | None = None):
+    def __init__(self, token: str, *, timeout: float = 30.0, api_base: str | None = None):
         self.token = token
         self.timeout = timeout
         self.base_url = (api_base or _api_base()).rstrip("/")
@@ -68,7 +88,7 @@ class MaxBotClient:
     def _request(self, method: str, path: str, *, query=None, body=None):
         url = f"{self.base_url}{path}"
         try:
-            response = httpx.request(
+            response = _shared_client().request(
                 method,
                 url,
                 params=query,
@@ -143,7 +163,7 @@ class MaxBotClient:
             ]
         )
         try:
-            response = httpx.post(
+            response = _shared_client().post(
                 upload_url,
                 content=payload,
                 headers={"Content-Type": f"multipart/form-data; boundary={boundary}"},
