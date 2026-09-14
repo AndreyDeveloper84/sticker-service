@@ -13,10 +13,21 @@ if [ ! -f .env.staging ]; then
     exit 1
 fi
 
-echo "[deploy] fetching latest main"
-git fetch origin main
-git checkout main
-git pull --ff-only origin main
+# DEPLOY_REF controls what gets deployed:
+#   unset  -> latest origin/main (git checkout main && git pull --ff-only)
+#   <sha>  -> that exact commit (used for rollback; no pull is performed)
+DEPLOY_REF="${DEPLOY_REF:-}"
+
+if [ -z "$DEPLOY_REF" ]; then
+    echo "[deploy] fetching latest main"
+    git fetch origin main
+    git checkout main
+    git pull --ff-only origin main
+else
+    echo "[deploy] deploying pinned ref ${DEPLOY_REF}"
+    git fetch origin
+    git checkout --detach "$DEPLOY_REF"
+fi
 
 echo "[deploy] building images"
 $COMPOSE build
@@ -24,7 +35,7 @@ $COMPOSE build
 echo "[deploy] backing up database before migrations"
 ./deploy/scripts/backup.sh
 
-echo "[deploy] running migrations (non-destructive)"
+echo "[deploy] running migrations"
 $COMPOSE run --rm backend python manage.py migrate --noinput
 
 echo "[deploy] collecting static files"

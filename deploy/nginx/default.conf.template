@@ -27,12 +27,6 @@ server {
         add_header Cache-Control "public";
     }
 
-    location /media/ {
-        alias /usr/share/nginx/media/;
-        expires 1d;
-        add_header Cache-Control "public";
-    }
-
     location /health/ {
         proxy_pass http://sticker_backend;
         proxy_set_header Host $host;

@@ -81,10 +81,12 @@ services:
       - "443:443"
     environment:
       STAGING_DOMAIN: ${STAGING_DOMAIN:-_}
+    # media_data is intentionally NOT mounted here: order photos and generated
+    # assets must not be publicly reachable by URL. Delivery to customers goes
+    # through the bot APIs; operators use the authenticated Production Console.
     volumes:
       - ./deploy/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
       - static_data:/usr/share/nginx/static:ro
-      - media_data:/usr/share/nginx/media:ro
     depends_on:
       backend:
         condition: service_healthy

@@ -30,12 +30,16 @@ cd /opt/sticker-service
 ./deploy/scripts/deploy.sh
 ```
 
-The script checks out `main`, builds images, runs migrations (non-destructive
-`migrate --noinput` only), collects static files, starts the stack and waits
-for the backend healthcheck. It exits non-zero if the healthcheck fails.
+The script checks out `main`, builds images, runs `migrate --noinput`,
+collects static files, starts the stack and waits for the backend
+healthcheck. It exits non-zero if the healthcheck fails. Migration safety is
+not guaranteed by Django itself — it relies on migration review plus the
+mandatory pre-migration backup (see below).
 
-First run note: if the `db` container is not running yet, the pre-migration
-backup is skipped (nothing to back up).
+`deploy.sh` always takes a database backup before migrations. The backup is
+fail-closed: if the staging database already exists, a successful `pg_dump`
+is mandatory and the deploy aborts otherwise. The dump is skipped only when
+the database provably does not exist yet or has no tables (fresh install).
 
 ## Routine deploy
 
@@ -76,9 +80,24 @@ uncomment/add the `listen 443 ssl;` server block in
 (`SECURE_PROXY_SSL_HEADER`, `USE_X_FORWARDED_HOST`), so Django requires no
 changes.
 
+## Media files
+
+`/media/` is deliberately NOT served by nginx. Order photos and generated
+assets contain customer data and must not be reachable by URL without
+authentication. Delivery to customers goes through the bot APIs; operators
+use the authenticated Django admin / Production Console.
+
 ## Rollback
 
-1. `git checkout <previous-good-sha> && ./deploy/scripts/deploy.sh` — code rollback.
+`deploy.sh` supports a pinned ref via `DEPLOY_REF` (no checkout of main, no
+pull), so code rollback deploys an exact previous commit:
+
+```bash
+DEPLOY_REF=<previous-good-sha> ./deploy/scripts/deploy.sh
+```
+
+After a successful rollback, return the checkout to main:
+`git checkout main`.
 2. Data restore (only if a migration caused damage):
 
 ```bash
