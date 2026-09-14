@@ -1,0 +1,72 @@
+# Staging reverse proxy for sticker-service.
+#
+# Rendered by the official nginx image entrypoint via envsubst
+# (/etc/nginx/templates/*.template -> /etc/nginx/conf.d/). Only ${STAGING_DOMAIN}
+# is substituted; nginx $variables are left untouched.
+#
+# TLS: this config currently serves plain HTTP on :80. Once certificates are
+# issued (e.g. certbot/Let's Encrypt), add a `listen 443 ssl;` server block
+# (or convert this one), point ssl_certificate/_key at the mounted certs,
+# and redirect :80 -> :443. Port 443 is already published by
+# docker-compose.staging.yml, so no compose changes are needed.
+
+upstream sticker_backend {
+    server backend:8000;
+}
+
+server {
+    listen 80;
+    server_name ${STAGING_DOMAIN};
+
+    # Order photos can be up to ORDER_PHOTO_MAX_BYTES (20 MB by default).
+    client_max_body_size 25m;
+
+    location /static/ {
+        alias /usr/share/nginx/static/;
+        expires 7d;
+        add_header Cache-Control "public";
+    }
+
+    location /health/ {
+        proxy_pass http://sticker_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Webhook endpoints — listed explicitly so they keep working even if the
+    # catch-all below is ever restricted.
+    location /telegram/webhook/ {
+        proxy_pass http://sticker_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /max/webhook/ {
+        proxy_pass http://sticker_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /max/payment/webhook/ {
+        proxy_pass http://sticker_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    # Everything else (/admin/, DRF API, ...).
+    location / {
+        proxy_pass http://sticker_backend;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}

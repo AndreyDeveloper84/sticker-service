@@ -1,0 +1,103 @@
+# Staging stack for the sticker-service.
+#
+# Only nginx is published to the internet. db / redis / backend stay on the
+# internal compose network. Secrets come from a server-side .env.staging file
+# (never committed); run commands via:
+#   docker compose --env-file .env.staging -f docker-compose.staging.yml ...
+
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB}
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+    # no ports: PostgreSQL is not published outside the compose network
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 12
+    # no ports: Redis is not published outside the compose network
+
+  backend:
+    build: .
+    restart: unless-stopped
+    env_file:
+      # optional so `docker compose -f docker-compose.staging.yml config`
+      # validates without secrets; deploy.sh fails fast if the file is missing
+      - path: .env.staging
+        required: false
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.staging
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      MEDIA_ROOT: /app/media
+    volumes:
+      - media_data:/app/media
+      - static_data:/app/staticfiles
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: >
+      gunicorn config.wsgi:application
+      --bind 0.0.0.0:8000
+      --workers ${GUNICORN_WORKERS:-3}
+      --timeout 120
+      --access-logfile -
+      --error-logfile -
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/health/', timeout=5)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    # no ports: backend is reachable only through nginx
+
+  nginx:
+    image: nginx:1.27-alpine
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      STAGING_DOMAIN: ${STAGING_DOMAIN:-_}
+    # media_data is intentionally NOT mounted here: order photos and generated
+    # assets must not be publicly reachable by URL. Delivery to customers goes
+    # through the bot APIs; operators use the authenticated Production Console.
+    volumes:
+      - ./deploy/nginx/default.conf.template:/etc/nginx/templates/default.conf.template:ro
+      - static_data:/usr/share/nginx/static:ro
+    depends_on:
+      backend:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost/health/ || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 6
+      start_period: 10s
+
+volumes:
+  postgres_data:
+  media_data:
+  static_data:

@@ -1,4 +1,6 @@
 .env
+.env.staging
+backups/
 .venv/
 venv/
 __pycache__/
