@@ -55,9 +55,9 @@ for _ in $(seq 1 30); do
     status="$(docker inspect --format '{{if .State.Health}}{{.State.Health.Status}}{{else}}none{{end}}' "$backend_cid")"
     if [ "$status" = "healthy" ]; then
         echo "[deploy] backend is healthy"
-        echo "[deploy] verifying HTTP health through nginx"
-        if curl -fsS --max-time 10 "http://localhost/health/" > /dev/null; then
-            echo "[deploy] OK: /health/ responds through nginx"
+        echo "[deploy] verifying HTTP health through nginx (loopback)"
+        if curl -fsS --max-time 10 "http://127.0.0.1:8015/health/" > /dev/null; then
+            echo "[deploy] OK: /health/ responds on 127.0.0.1:8015"
             exit 0
         fi
         echo "[deploy] ERROR: /health/ through nginx failed" >&2

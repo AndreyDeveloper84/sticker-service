@@ -77,8 +77,9 @@ services:
     image: nginx:1.27-alpine
     restart: unless-stopped
     ports:
-      - "80:80"
-      - "443:443"
+      # shared VPS: host nginx owns 80/443 and proxies to this loopback port.
+      # TLS is terminated by host nginx later (once DNS is ready), never here.
+      - "127.0.0.1:8015:80"
     environment:
       STAGING_DOMAIN: ${STAGING_DOMAIN:-_}
     # media_data is intentionally NOT mounted here: order photos and generated
