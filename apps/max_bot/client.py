@@ -139,9 +139,20 @@ class MaxBotClient:
         query = {"chat_id": chat_id} if user_id is None else {"user_id": user_id}
         return self._request("POST", "/messages", query=query, body=body)
 
-    def answer_callback(self, *, callback_id: str):
-        """ACK an inline-keyboard callback: POST /answers?callback_id=..."""
-        return self._request("POST", "/answers", query={"callback_id": callback_id}, body={})
+    def answer_callback(self, *, callback_id: str, notification: str = ""):
+        """ACK an inline-keyboard callback: POST /answers?callback_id=...
+
+        The current MAX contract rejects an empty body with
+        400 ``proto.payload`` ("`message` or `notification` required"),
+        measured on staging 2026-09-14 — so a body with ``notification``
+        is always sent (empty string = no toast).
+        """
+        return self._request(
+            "POST",
+            "/answers",
+            query={"callback_id": callback_id},
+            body={"notification": notification},
+        )
 
     # -------------------------------------------------------------- uploads
 

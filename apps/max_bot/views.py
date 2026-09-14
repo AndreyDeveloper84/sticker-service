@@ -191,6 +191,16 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
         )
 
     # ACK the callback after successful handling (POST /answers?callback_id=).
+    # Best-effort: the reply above is already the user-visible answer; an ACK
+    # failure must not 502 the webhook — MAX would retry the update and the
+    # user would get the reply again (observed on staging 2026-09-14).
     if event.callback_id:
-        return client.answer_callback(callback_id=event.callback_id)
+        try:
+            return client.answer_callback(callback_id=event.callback_id)
+        except MaxAPIError as exc:
+            logger.warning(
+                "max.webhook.callback_ack_failed status=%s body=%r",
+                exc.status_code,
+                exc.body[:200],
+            )
     return None

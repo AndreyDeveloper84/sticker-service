@@ -122,3 +122,5 @@ class MaxBotClientTests(SimpleTestCase):
         self.assertEqual(args[0], "POST")
         self.assertEqual(args[1], f"{DEFAULT_API_BASE}/answers")
         self.assertEqual(kwargs["params"], {"callback_id": "cb-1"})
+        # current MAX contract rejects an empty body — notification is required
+        self.assertEqual(kwargs["json"], {"notification": ""})
