@@ -4,11 +4,10 @@
 # (/etc/nginx/templates/*.template -> /etc/nginx/conf.d/). Only ${STAGING_DOMAIN}
 # is substituted; nginx $variables are left untouched.
 #
-# TLS: this config currently serves plain HTTP on :80. Once certificates are
-# issued (e.g. certbot/Let's Encrypt), add a `listen 443 ssl;` server block
-# (or convert this one), point ssl_certificate/_key at the mounted certs,
-# and redirect :80 -> :443. Port 443 is already published by
-# docker-compose.staging.yml, so no compose changes are needed.
+# TLS: this config serves plain HTTP on the compose-internal network and is
+# published only on 127.0.0.1:8015. TLS is terminated by the HOST nginx once
+# the STAGING_DOMAIN DNS record resolves (server block + certbot on the host,
+# proxying to 127.0.0.1:8015). Nothing TLS-related belongs in this container.
 
 upstream sticker_backend {
     server backend:8000;

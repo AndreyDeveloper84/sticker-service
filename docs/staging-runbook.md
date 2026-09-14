@@ -1,8 +1,23 @@
 # Staging Runbook
 
-Staging deployment of sticker-service on an Ubuntu VPS. Only nginx is exposed
-to the internet; PostgreSQL, Redis and the Gunicorn backend stay on the
-internal compose network.
+Staging deployment of sticker-service on a **shared** Ubuntu VPS. Other
+projects already live on this host, and the host-level nginx owns ports
+80/443. This stack therefore exposes nothing to the internet directly:
+
+```
+host nginx :80/:443  (TLS terminator, added later — needs working DNS)
+    ↓
+127.0.0.1:8015       (compose nginx, loopback only)
+    ↓
+backend (Gunicorn) :8000  →  postgres / redis  (internal compose network)
+```
+
+PostgreSQL, Redis and the Gunicorn backend stay on the internal compose
+network. The compose nginx publishes **only** `127.0.0.1:8015:80`.
+
+Until the `STAGING_DOMAIN` DNS record resolves and the host nginx server
+block is installed, staging is reachable **only from the VPS itself** via
+`http://127.0.0.1:8015`.
 
 ## Files
 
@@ -65,20 +80,20 @@ $COMPOSE run --rm backend python manage.py createsuperuser
 ## Health verification
 
 ```bash
-curl -fsS http://localhost/health/          # via nginx on the server
-curl -fsS https://$STAGING_DOMAIN/health/   # externally, once TLS is set up
+curl -fsS http://127.0.0.1:8015/health/     # via compose nginx, on the VPS
+curl -fsS https://$STAGING_DOMAIN/health/   # externally, once DNS + host nginx + TLS are set up
 ```
 
-## TLS setup (next step, not yet configured)
+## TLS / public access (next step, not yet configured)
 
-Port 443 is already published and the nginx template documents where the SSL
-block goes. Typical flow: install certbot on the host, issue a certificate
-for `STAGING_DOMAIN`, mount `/etc/letsencrypt` into the nginx container,
-uncomment/add the `listen 443 ssl;` server block in
-`deploy/nginx/default.conf.template` and redirect :80 to :443.
-`config/settings/staging.py` already trusts `X-Forwarded-Proto`/`Host`
+The compose nginx speaks plain HTTP on loopback only. Once the
+`STAGING_DOMAIN` DNS record resolves, add a server block to the **host**
+nginx proxying to `http://127.0.0.1:8015` and issue a certificate with the
+host's certbot (same pattern as the existing sites on this VPS). The host
+nginx then terminates TLS and forwards `X-Forwarded-Proto`/`Host`;
+`config/settings/staging.py` already trusts those headers
 (`SECURE_PROXY_SSL_HEADER`, `USE_X_FORWARDED_HOST`), so Django requires no
-changes.
+changes. Do not create the server block or run certbot before DNS works.
 
 ## Media files
 
@@ -98,7 +113,8 @@ DEPLOY_REF=<previous-good-sha> ./deploy/scripts/deploy.sh
 
 After a successful rollback, return the checkout to main:
 `git checkout main`.
-2. Data restore (only if a migration caused damage):
+
+Data restore (only if a migration caused damage):
 
 ```bash
 gunzip -c backups/staging-<db>-<timestamp>.sql.gz | \
