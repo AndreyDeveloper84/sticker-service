@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 from mimetypes import guess_type
 from urllib.parse import urlparse
 
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+
+logger = logging.getLogger(__name__)
 
 from apps.core.models import Order, Revision
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
@@ -46,6 +49,13 @@ def webhook(request):
     except (MaxFlowError, PreviewFeedbackError) as exc:
         return JsonResponse({"ok": False, "error": str(exc)}, status=409)
     except MaxAPIError as exc:
+        # MAX error bodies carry a code/message pair, never secrets.
+        logger.warning(
+            "max.webhook.api_error update_type=%s status=%s body=%r",
+            event.update_type,
+            exc.status_code,
+            exc.body[:200],
+        )
         return JsonResponse({"ok": False, "error": "max api error", "status": exc.status_code}, status=502)
 
     return JsonResponse({"ok": True})
