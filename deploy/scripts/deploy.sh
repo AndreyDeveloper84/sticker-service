@@ -14,8 +14,9 @@ if [ ! -f .env.staging ]; then
 fi
 
 # DEPLOY_REF controls what gets deployed:
-#   unset  -> latest origin/main (git checkout main && git pull --ff-only)
-#   <sha>  -> that exact commit (used for rollback; no pull is performed)
+#   unset    -> latest origin/main (git checkout main && git pull --ff-only)
+#   <branch> -> latest origin/<branch> (e.g. DEPLOY_REF=dev for staging)
+#   <sha>    -> that exact commit (used for rollback; no pull is performed)
 DEPLOY_REF="${DEPLOY_REF:-}"
 
 if [ -z "$DEPLOY_REF" ]; then
@@ -24,9 +25,13 @@ if [ -z "$DEPLOY_REF" ]; then
     git checkout main
     git pull --ff-only origin main
 else
-    echo "[deploy] deploying pinned ref ${DEPLOY_REF}"
+    echo "[deploy] deploying ref ${DEPLOY_REF}"
     git fetch origin
-    git checkout --detach "$DEPLOY_REF"
+    if git show-ref --verify --quiet "refs/remotes/origin/${DEPLOY_REF}"; then
+        git checkout --detach "origin/${DEPLOY_REF}"
+    else
+        git checkout --detach "$DEPLOY_REF"
+    fi
 fi
 
 echo "[deploy] building images"

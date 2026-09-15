@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  pull_request:
+    branches:
+      - dev
+      - main
+  workflow_call:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: stickers
+          POSTGRES_USER: stickers
+          POSTGRES_PASSWORD: stickers
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U stickers -d stickers"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    env:
+      POSTGRES_HOST: localhost
+      POSTGRES_PORT: "5432"
+      POSTGRES_DB: stickers
+      POSTGRES_USER: stickers
+      POSTGRES_PASSWORD: stickers
+      REDIS_URL: redis://localhost:6379/0
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Run tests
+        run: python manage.py test
+
+      - name: Check for missing migrations
+        run: python manage.py makemigrations --check --dry-run
