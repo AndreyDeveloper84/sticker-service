@@ -47,13 +47,7 @@ jobs:
       - name: External health check
         run: |
           for i in $(seq 1 10); do
-            if curl -fsS --max-time 15 https://stg.stickme.art/health/ | python3 -c '
-              import json, sys
-              data = json.load(sys.stdin)
-              assert data.get("status") == "ok"
-              assert data.get("database") is True
-              assert data.get("redis") is True
-              '; then
+            if curl -fsS --max-time 15 https://stg.stickme.art/health/ | python3 -c 'import json, sys; data = json.load(sys.stdin); assert data.get("status") == "ok" and data.get("database") is True and data.get("redis") is True'; then
               echo "External health PASS"
               exit 0
             fi
