@@ -49,3 +49,6 @@ jobs:
 
       - name: Check for missing migrations
         run: python manage.py makemigrations --check --dry-run
+
+      - name: Test deploy-ref resolution
+        run: bash deploy/scripts/test-resolve-deploy-ref.sh
