@@ -32,6 +32,12 @@ class MaxStickerFlowRegressionTests(TestCase):
     def setUp(self):
         Product.objects.create(code="stickers", name="Sticker Pack")
         Style.objects.create(code="classic", name="Classic")
+        # The view enforces MAX_WEBHOOK_SECRET only when the env var is
+        # non-empty; staging has it set, so neutralise it for these tests
+        # (secret enforcement itself is covered by test_webhook_secret_enforced).
+        env = mock.patch.dict("os.environ", {"MAX_WEBHOOK_SECRET": ""})
+        env.start()
+        self.addCleanup(env.stop)
 
     def _post(self, payload):
         return self.client.post(
@@ -114,6 +120,18 @@ class MaxStickerFlowRegressionTests(TestCase):
             checkout_mock.assert_called_once()
             self.assertEqual(checkout_mock.call_args.kwargs["chat_id"], "9001")
             client.answer_callback.assert_called_once_with(callback_id="cb-9")
+
+    def test_callback_ack_failure_does_not_fail_webhook(self):
+        """A failed /answers ACK must not 502 the webhook: MAX would retry
+        the update and the user would get the reply twice."""
+        from apps.max_bot.client import MaxAPIError
+
+        with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls:
+            client = client_cls.return_value
+            client.answer_callback.side_effect = MaxAPIError(400, "bad callback")
+            response = self._post(_callback_payload(payload="product:stickers"))
+            self.assertEqual(response.status_code, 200)
+            client.send_message.assert_called_once()
 
     def test_malformed_webhook_returns_400_not_500(self):
         response = self._post({"update_type": "message_created", "message": {}})

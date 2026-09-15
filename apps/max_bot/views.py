@@ -1,10 +1,13 @@
 import json
+import logging
 import os
 from mimetypes import guess_type
 from urllib.parse import urlparse
 
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
+
+logger = logging.getLogger(__name__)
 
 from apps.core.models import Order, Revision
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
@@ -46,6 +49,13 @@ def webhook(request):
     except (MaxFlowError, PreviewFeedbackError) as exc:
         return JsonResponse({"ok": False, "error": str(exc)}, status=409)
     except MaxAPIError as exc:
+        # MAX error bodies carry a code/message pair, never secrets.
+        logger.warning(
+            "max.webhook.api_error update_type=%s status=%s body=%r",
+            event.update_type,
+            exc.status_code,
+            exc.body[:200],
+        )
         return JsonResponse({"ok": False, "error": "max api error", "status": exc.status_code}, status=502)
 
     return JsonResponse({"ok": True})
@@ -181,6 +191,16 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
         )
 
     # ACK the callback after successful handling (POST /answers?callback_id=).
+    # Best-effort: the reply above is already the user-visible answer; an ACK
+    # failure must not 502 the webhook — MAX would retry the update and the
+    # user would get the reply again (observed on staging 2026-09-14).
     if event.callback_id:
-        return client.answer_callback(callback_id=event.callback_id)
+        try:
+            return client.answer_callback(callback_id=event.callback_id)
+        except MaxAPIError as exc:
+            logger.warning(
+                "max.webhook.callback_ack_failed status=%s body=%r",
+                exc.status_code,
+                exc.body[:200],
+            )
     return None
