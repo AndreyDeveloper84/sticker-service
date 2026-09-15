@@ -1,7 +1,8 @@
-from apps.max_bot.payments import HttpExternalPaymentProvider, MaxExternalPaymentAdapter
+from apps.max_bot.payments import MaxExternalPaymentAdapter
+from apps.max_bot.payments_yookassa import YooKassaPaymentProvider
 
 def start_checkout(*, identity, client, chat_id=None):
-    adapter = MaxExternalPaymentAdapter(provider=HttpExternalPaymentProvider.from_env())
+    adapter = MaxExternalPaymentAdapter(provider=YooKassaPaymentProvider.from_env())
     _payment, session = adapter.create_checkout(identity=identity)
     kwargs = {
         "text": "Фотографии приняты. Перейдите к оплате заказа.",

@@ -1,12 +1,7 @@
 from __future__ import annotations
 
-import hashlib
-import hmac
-import json
-import os
 from dataclasses import dataclass
 from typing import Protocol
-from urllib.request import Request, urlopen
 
 from django.db import transaction
 
@@ -16,6 +11,14 @@ from apps.core.services.payment import PaymentError, PaymentService
 
 class MaxPaymentError(ValueError):
     pass
+
+
+class MaxPaymentIgnored(MaxPaymentError):
+    """Webhook is valid but needs no action; the provider must still be ACKed."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 @dataclass(frozen=True)
@@ -30,6 +33,8 @@ class PaymentConfirmation:
     external_payment_id: str
     status: str
     metadata: dict
+    amount_minor: int | None = None
+    currency: str = ""
 
 
 class ExternalPaymentProvider(Protocol):
@@ -38,75 +43,6 @@ class ExternalPaymentProvider(Protocol):
     def create_checkout(self, *, payment: Payment) -> CheckoutSession: ...
 
     def parse_webhook(self, *, body: bytes, signature: str) -> PaymentConfirmation: ...
-
-
-class HttpExternalPaymentProvider:
-    """Small provider gateway contract; vendor-specific logic stays outside OrderService."""
-
-    name = "external"
-
-    def __init__(self, *, create_url: str, api_token: str = "", webhook_secret: str = ""):
-        self.create_url = create_url.strip()
-        self.api_token = api_token.strip()
-        self.webhook_secret = webhook_secret.encode("utf-8")
-
-    @classmethod
-    def from_env(cls) -> "HttpExternalPaymentProvider":
-        return cls(
-            create_url=os.getenv("MAX_PAYMENT_PROVIDER_CREATE_URL", ""),
-            api_token=os.getenv("MAX_PAYMENT_PROVIDER_API_TOKEN", ""),
-            webhook_secret=os.getenv("MAX_PAYMENT_PROVIDER_WEBHOOK_SECRET", ""),
-        )
-
-    def create_checkout(self, *, payment: Payment) -> CheckoutSession:
-        if not self.create_url:
-            raise MaxPaymentError("External payment provider is not configured")
-
-        payload = {
-            "payment_id": payment.pk,
-            "order_id": payment.order_id,
-            "amount_minor": payment.amount_minor,
-            "currency": payment.currency,
-            "channel": "max",
-        }
-        headers = {"Content-Type": "application/json"}
-        if self.api_token:
-            headers["Authorization"] = f"Bearer {self.api_token}"
-        request = Request(
-            self.create_url,
-            data=json.dumps(payload).encode("utf-8"),
-            headers=headers,
-            method="POST",
-        )
-        with urlopen(request, timeout=10) as response:
-            data = json.loads(response.read().decode("utf-8"))
-
-        checkout_url = str(data.get("checkout_url") or "").strip()
-        if not checkout_url.startswith("https://"):
-            raise MaxPaymentError("Provider returned invalid checkout URL")
-        return CheckoutSession(
-            checkout_url=checkout_url,
-            provider_reference=str(data.get("provider_reference") or ""),
-        )
-
-    def parse_webhook(self, *, body: bytes, signature: str) -> PaymentConfirmation:
-        if not self.webhook_secret:
-            raise MaxPaymentError("Payment webhook secret is not configured")
-        expected = hmac.new(self.webhook_secret, body, hashlib.sha256).hexdigest()
-        if not signature or not hmac.compare_digest(expected, signature):
-            raise MaxPaymentError("Invalid payment webhook signature")
-
-        try:
-            data = json.loads(body)
-        except (TypeError, ValueError) as exc:
-            raise MaxPaymentError("Invalid payment webhook payload") from exc
-
-        return PaymentConfirmation(
-            payment_id=int(data["payment_id"]),
-            external_payment_id=str(data.get("external_payment_id") or "").strip(),
-            status=str(data.get("status") or "").strip().lower(),
-            metadata=data.get("metadata") or {},
-        )
 
 
 class MaxExternalPaymentAdapter:
@@ -181,7 +117,7 @@ class MaxExternalPaymentAdapter:
     def confirm_webhook(self, *, body: bytes, signature: str) -> Payment:
         confirmation = self.provider.parse_webhook(body=body, signature=signature)
         if confirmation.status != "succeeded":
-            raise MaxPaymentError("Payment is not confirmed by provider")
+            raise MaxPaymentIgnored(f"status {confirmation.status}")
         if not confirmation.external_payment_id:
             raise MaxPaymentError("Provider payment id is required")
 
@@ -191,7 +127,15 @@ class MaxExternalPaymentAdapter:
                 provider=self.provider.name,
             )
         except Payment.DoesNotExist as exc:
-            raise MaxPaymentError("Unknown payment") from exc
+            raise MaxPaymentIgnored("unknown payment") from exc
+
+        if (
+            confirmation.amount_minor is not None
+            and confirmation.amount_minor != payment.amount_minor
+        ):
+            raise MaxPaymentError("Provider payment amount mismatch")
+        if confirmation.currency and confirmation.currency != payment.currency:
+            raise MaxPaymentError("Provider payment currency mismatch")
 
         try:
             return PaymentService.confirm(
