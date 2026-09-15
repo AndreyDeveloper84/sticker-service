@@ -126,3 +126,31 @@ gunzip -c backups/staging-<db>-<timestamp>.sql.gz | \
 
 - `./deploy/scripts/backup.sh` → `./backups/staging-<db>-<UTC timestamp>.sql.gz`
 - `backups/` is git-ignored; copies off-server are the operator's job (out of scope here).
+
+## Telegram outbound transport (DRF-1870)
+
+The staging VPS cannot reach `api.telegram.org` directly (TCP timeout to
+149.154.166.110:443, IPv6 unreachable — measured from the backend container
+on 2026-09-15). All Telegram outbound (JSON calls, `sendPhoto` multipart,
+file downloads) goes through `apps/telegram_bot/client.py`, which supports
+three modes via `.env.staging` (never hardcode credentials in code):
+
+- **Direct mode (default):** all `TELEGRAM_*` transport vars empty →
+  `https://api.telegram.org`. Production-compatible.
+- **Relay/base mode:** `TELEGRAM_API_ORIGIN=https://<bot-api-relay>`
+  (and optionally `TELEGRAM_FILE_ORIGIN` if file downloads use a different
+  host; defaults to the API origin).
+- **Proxy mode:** `TELEGRAM_PROXY_URL=http://user:password@proxy:3128` —
+  applied to every Telegram call, upload and download. TLS verification
+  stays on; the proxy only tunnels CONNECT.
+
+Safe verification after changing transport env (token never printed):
+
+```bash
+docker compose --env-file .env.staging -f docker-compose.staging.yml run --rm backend python - <<'PY'
+import os
+from apps.telegram_bot.client import TelegramBotClient
+me = TelegramBotClient(os.environ["TELEGRAM_BOT_TOKEN"]).get_me()
+print("getMe ok:", me.get("username"))
+PY
+```
