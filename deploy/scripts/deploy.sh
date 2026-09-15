@@ -14,25 +14,11 @@ if [ ! -f .env.staging ]; then
 fi
 
 # DEPLOY_REF controls what gets deployed:
-#   unset    -> latest origin/main (git checkout main && git pull --ff-only)
+#   unset    -> latest origin/main
 #   <branch> -> latest origin/<branch> (e.g. DEPLOY_REF=dev for staging)
 #   <sha>    -> that exact commit (used for rollback; no pull is performed)
-DEPLOY_REF="${DEPLOY_REF:-}"
-
-if [ -z "$DEPLOY_REF" ]; then
-    echo "[deploy] fetching latest main"
-    git fetch origin main
-    git checkout main
-    git pull --ff-only origin main
-else
-    echo "[deploy] deploying ref ${DEPLOY_REF}"
-    git fetch origin
-    if git show-ref --verify --quiet "refs/remotes/origin/${DEPLOY_REF}"; then
-        git checkout --detach "origin/${DEPLOY_REF}"
-    else
-        git checkout --detach "$DEPLOY_REF"
-    fi
-fi
+# Resolution lives in resolve-deploy-ref.sh and prints the deployed sha.
+DEPLOY_REF="${DEPLOY_REF:-}" ./deploy/scripts/resolve-deploy-ref.sh
 
 echo "[deploy] building images"
 $COMPOSE build

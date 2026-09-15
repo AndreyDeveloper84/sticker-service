@@ -34,9 +34,15 @@ jobs:
           # ssh-keyscan — host key trust is provisioned, not discovered.
           printf '%s\n' "$STAGING_KNOWN_HOSTS" > ~/.ssh/known_hosts
           chmod 600 ~/.ssh/known_hosts
+          # Bootstrap: the deploy scripts on the server are the ones from the
+          # previous checkout — sync them from origin/dev first so changes to
+          # deploy.sh itself take effect on this run.
           ssh -p "${STAGING_SSH_PORT:-22}" -i ~/.ssh/staging_deploy_key \
             "${STAGING_USER}@${STAGING_HOST}" \
-            "cd /opt/sticker-service && DEPLOY_REF=dev ./deploy/scripts/deploy.sh"
+            "cd /opt/sticker-service \
+             && git fetch origin dev \
+             && git checkout origin/dev -- deploy/scripts/ \
+             && DEPLOY_REF=dev ./deploy/scripts/deploy.sh"
 
       - name: External health check
         run: |
