@@ -128,9 +128,11 @@ class TelegramBotClient:
             )
         except httpx.RequestError as exc:
             # NOTE: str(exc) embeds the URL, which contains the token — log
-            # and raise with the exception TYPE only.
+            # and raise with the exception TYPE only, and suppress the
+            # exception chain so the httpx error (with the token URL) can
+            # never surface via "During handling of..." in a traceback.
             logger.warning("telegram.network_error method=%s exc=%s", method, type(exc).__name__)
-            raise TelegramAPIError(method, description=f"network: {type(exc).__name__}") from exc
+            raise TelegramAPIError(method, description=f"network: {type(exc).__name__}") from None
         return self._unwrap(method, response)
 
     def _post_multipart(self, method: str, *, fields: dict, file_field: str, filename: str, content: bytes, mime_type: str):
@@ -143,7 +145,7 @@ class TelegramBotClient:
             )
         except httpx.RequestError as exc:
             logger.warning("telegram.network_error method=%s exc=%s", method, type(exc).__name__)
-            raise TelegramAPIError(method, description=f"network: {type(exc).__name__}") from exc
+            raise TelegramAPIError(method, description=f"network: {type(exc).__name__}") from None
         return self._unwrap(method, response)
 
     # --------------------------------------------------------------- methods
@@ -205,7 +207,7 @@ class TelegramBotClient:
             response = self._client().get(url, timeout=self.timeout)
         except httpx.RequestError as exc:
             logger.warning("telegram.network_error method=download_file exc=%s", type(exc).__name__)
-            raise TelegramAPIError("download_file", description=f"network: {type(exc).__name__}") from exc
+            raise TelegramAPIError("download_file", description=f"network: {type(exc).__name__}") from None
         if response.status_code >= 400:
             logger.warning("telegram.api_error method=download_file status=%s", response.status_code)
             raise TelegramAPIError("download_file", status_code=response.status_code, description="http error")

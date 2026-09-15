@@ -219,3 +219,38 @@ class TelegramClientErrorTests(SimpleTestCase):
             with self.assertRaises(TelegramAPIError) as ctx:
                 self.client.send_message(chat_id=1, text="x")
         self.assertNotIn(TOKEN, str(ctx.exception))
+
+    def _assert_token_free_traceback(self, ctx):
+        import traceback
+
+        exc = ctx.exception
+        # chain suppressed: no "During handling of the above" with the
+        # httpx error (which embeds the token URL)
+        self.assertTrue(exc.__suppress_context__)
+        self.assertIsNone(exc.__cause__)
+        formatted = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
+        self.assertNotIn(TOKEN, formatted)
+        self.assertNotIn(f"bot{TOKEN}", formatted)
+
+    def test_token_absent_from_traceback_chain_post(self):
+        patcher, _ = _fake_http(side_effect=httpx.ConnectError(f"boom {DEFAULT_API_ORIGIN}/bot{TOKEN}/sendMessage"))
+        with patcher:
+            with self.assertRaises(TelegramAPIError) as ctx:
+                self.client.send_message(chat_id=1, text="x")
+        self._assert_token_free_traceback(ctx)
+
+    def test_token_absent_from_traceback_chain_multipart(self):
+        patcher, _ = _fake_http(side_effect=httpx.ConnectError(f"boom {DEFAULT_API_ORIGIN}/bot{TOKEN}/sendPhoto"))
+        with patcher:
+            with self.assertRaises(TelegramAPIError) as ctx:
+                self.client.send_photo(
+                    chat_id=1, content=b"x", filename="a.png", mime_type="image/png"
+                )
+        self._assert_token_free_traceback(ctx)
+
+    def test_token_absent_from_traceback_chain_download(self):
+        patcher, _ = _fake_http(side_effect=httpx.ConnectError(f"boom {DEFAULT_API_ORIGIN}/file/bot{TOKEN}/photos/a.jpg"))
+        with patcher:
+            with self.assertRaises(TelegramAPIError) as ctx:
+                self.client.download_file("photos/a.jpg")
+        self._assert_token_free_traceback(ctx)
