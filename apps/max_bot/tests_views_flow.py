@@ -32,6 +32,12 @@ class MaxStickerFlowRegressionTests(TestCase):
     def setUp(self):
         Product.objects.create(code="stickers", name="Sticker Pack")
         Style.objects.create(code="classic", name="Classic")
+        # The view enforces MAX_WEBHOOK_SECRET only when the env var is
+        # non-empty; staging has it set, so neutralise it for these tests
+        # (secret enforcement itself is covered by test_webhook_secret_enforced).
+        env = mock.patch.dict("os.environ", {"MAX_WEBHOOK_SECRET": ""})
+        env.start()
+        self.addCleanup(env.stop)
 
     def _post(self, payload):
         return self.client.post(
