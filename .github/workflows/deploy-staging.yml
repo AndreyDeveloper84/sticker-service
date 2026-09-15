@@ -1,0 +1,58 @@
+name: Deploy staging
+
+on:
+  push:
+    branches:
+      - dev
+
+concurrency:
+  group: sticker-service-staging
+  cancel-in-progress: false
+
+jobs:
+  # Deploy is gated on green CI: the CI workflow is invoked as a reusable
+  # workflow and must succeed before the deploy job starts.
+  ci:
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: ci
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to staging over SSH
+        env:
+          STAGING_HOST: ${{ secrets.STAGING_HOST }}
+          STAGING_USER: ${{ secrets.STAGING_USER }}
+          STAGING_SSH_KEY: ${{ secrets.STAGING_SSH_KEY }}
+          STAGING_SSH_PORT: ${{ secrets.STAGING_SSH_PORT }}
+          STAGING_KNOWN_HOSTS: ${{ secrets.STAGING_KNOWN_HOSTS }}
+        run: |
+          mkdir -p ~/.ssh
+          echo "$STAGING_SSH_KEY" > ~/.ssh/staging_deploy_key
+          chmod 600 ~/.ssh/staging_deploy_key
+          # Pinned host keys from the STAGING_KNOWN_HOSTS secret; no runtime
+          # ssh-keyscan — host key trust is provisioned, not discovered.
+          printf '%s\n' "$STAGING_KNOWN_HOSTS" > ~/.ssh/known_hosts
+          chmod 600 ~/.ssh/known_hosts
+          ssh -p "${STAGING_SSH_PORT:-22}" -i ~/.ssh/staging_deploy_key \
+            "${STAGING_USER}@${STAGING_HOST}" \
+            "cd /opt/sticker-service && DEPLOY_REF=dev ./deploy/scripts/deploy.sh"
+
+      - name: External health check
+        run: |
+          for i in $(seq 1 10); do
+            if curl -fsS --max-time 15 https://stg.stickme.art/health/ | python3 -c '
+              import json, sys
+              data = json.load(sys.stdin)
+              assert data.get("status") == "ok"
+              assert data.get("database") is True
+              assert data.get("redis") is True
+              '; then
+              echo "External health PASS"
+              exit 0
+            fi
+            echo "attempt $i: https://stg.stickme.art/health/ not healthy yet"
+            sleep 10
+          done
+          echo "External health FAILED"
+          exit 1
