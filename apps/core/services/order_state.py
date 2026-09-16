@@ -49,6 +49,7 @@ class OrderStateService:
         },
         Order.Status.PREVIEW_REVIEW: {
             Order.Status.REVISION_REQUESTED,
+            Order.Status.PACK_GENERATING,
             Order.Status.FAILED,
         },
         Order.Status.REVISION_REQUESTED: {
@@ -57,6 +58,14 @@ class OrderStateService:
         },
         Order.Status.REVISION_GENERATING: {
             Order.Status.INTERNAL_PREVIEW_REVIEW,
+            Order.Status.FAILED,
+        },
+        Order.Status.PACK_GENERATING: {
+            Order.Status.QUALITY_CONTROL,
+            Order.Status.FAILED,
+        },
+        Order.Status.QUALITY_CONTROL: {
+            # QC exits (PASS/FAIL handling) belong to DRF-2052.
             Order.Status.FAILED,
         },
         Order.Status.CANCELLED: set(),
