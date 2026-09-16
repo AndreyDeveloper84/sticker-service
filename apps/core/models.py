@@ -87,6 +87,10 @@ class Order(TimestampedModel):
     product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="orders")
     style = models.ForeignKey(Style, on_delete=models.PROTECT, related_name="orders")
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.DRAFT)
+    # Channel-agnostic product selection captured during the bot flow.
+    # Canonical shape: {"emotions": [<emotion code>, ...]} — codes come from
+    # Product.config["emotions"]; the required count is Product.config["emotion_count"].
+    selection = models.JSONField(default=dict, blank=True)
     customer_notes = models.TextField(blank=True)
     operator_notes = models.TextField(blank=True)
 

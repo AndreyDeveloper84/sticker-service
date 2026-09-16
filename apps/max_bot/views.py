@@ -131,6 +131,39 @@ def _feedback_order(identity):
     return order
 
 
+PHOTO_PROMPT = "Отправьте несколько хороших фотографий человека."
+
+
+def _emotion_step(adapter, order):
+    """Emotion step text + buttons, driven entirely by Product.config.
+
+    A product whose deterministic emotion set matches the required count
+    (sticker pack) is confirmed as a whole; otherwise emotions are picked
+    one by one (single sticker).
+    """
+    options = adapter.emotion_options(product=order.product)
+    required = adapter.required_emotion_count(product=order.product)
+    if required == len(options):
+        labels = ", ".join(option["label"] for option in options)
+        text = f"В набор входят {required} эмоций: {labels}."
+        buttons = [[{"text": "Подтвердить набор", "payload": "emotions:confirm"}]]
+    else:
+        text = "Выберите эмоцию для стикера."
+        buttons = [[{"text": option["label"], "payload": f"emotion:{option['code']}"}] for option in options]
+    return text, buttons
+
+
+def _summary_text(summary):
+    lines = [f"Ваш заказ: {summary['product_name']}", f"Стиль: {summary['style_name']}"]
+    if summary["quantity"]:
+        lines.append(f"Стикеров: {summary['quantity']}")
+    if summary["emotions"]:
+        lines.append(f"Эмоции: {', '.join(summary['emotions'])}")
+    if summary["price_minor"]:
+        lines.append(f"Цена: {summary['price_minor'] // 100} ₽")
+    return "\n".join(lines)
+
+
 def _revision_buttons():
     labels = {
         Revision.Category.FACE: "Лицо",
@@ -159,14 +192,21 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
         _reply(client, event, text="Выберите стиль", buttons=buttons)
     elif payload.startswith("style:"):
         _, product_code, style_code = payload.split(":", 2)
-        adapter.create_or_get_order(identity=identity, product_code=product_code, style_code=style_code)
-        _reply(
-            client,
-            event,
-            text="Отправьте несколько хороших фотографий человека.",
-        )
+        order = adapter.create_or_get_order(identity=identity, product_code=product_code, style_code=style_code)
+        if adapter.required_emotion_count(product=order.product):
+            text, buttons = _emotion_step(adapter, order)
+            _reply(client, event, text=text, buttons=buttons)
+        else:
+            _reply(client, event, text=PHOTO_PROMPT)
+    elif payload.startswith("emotion:"):
+        adapter.select_emotion(identity=identity, emotion_code=payload.split(":", 1)[1])
+        _reply(client, event, text=PHOTO_PROMPT)
+    elif payload == "emotions:confirm":
+        adapter.confirm_emotions(identity=identity)
+        _reply(client, event, text=PHOTO_PROMPT)
     elif payload == "photos_done":
-        adapter.complete_photos(identity)
+        order = adapter.complete_photos(identity)
+        _reply(client, event, text=_summary_text(adapter.order_summary(order)))
         start_checkout(identity=identity, client=client, chat_id=event.chat_id)
     elif payload == "preview_approve":
         PreviewFeedbackService.approve(order=_feedback_order(identity))

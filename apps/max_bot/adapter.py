@@ -35,6 +35,21 @@ class MaxAdapter:
             style_code=style_code,
         )
 
+    def required_emotion_count(self, *, product):
+        return self.flow.required_emotion_count(product=product)
+
+    def emotion_options(self, *, product):
+        return self.flow.emotion_options(product=product)
+
+    def select_emotion(self, *, identity, emotion_code: str):
+        return self.flow.select_emotion(identity=identity, emotion_code=emotion_code)
+
+    def confirm_emotions(self, *, identity):
+        return self.flow.confirm_emotions(identity=identity)
+
+    def order_summary(self, order):
+        return self.flow.order_summary(order)
+
     def save_photo_bytes(self, *, identity, content: bytes, filename: str, mime_type: str):
         return self.flow.save_photo_bytes(
             identity=identity,
