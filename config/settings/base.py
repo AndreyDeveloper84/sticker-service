@@ -64,6 +64,12 @@ MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
 ORDER_PHOTO_MAX_BYTES = int(os.getenv("ORDER_PHOTO_MAX_BYTES", str(20 * 1024 * 1024)))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+# Telegram outbound transport (DRF-1870): defaults are production-compatible
+# direct api.telegram.org; set a Bot API relay and/or proxy on restricted
+# networks. Credentials only via env, never in code.
+TELEGRAM_API_ORIGIN = os.getenv("TELEGRAM_API_ORIGIN", "")
+TELEGRAM_FILE_ORIGIN = os.getenv("TELEGRAM_FILE_ORIGIN", "")
+TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "")
 
 AUTH_PASSWORD_VALIDATORS = []
 LANGUAGE_CODE = "ru-ru"
