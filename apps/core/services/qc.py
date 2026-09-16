@@ -12,13 +12,23 @@ from apps.core.services.channel_order_flow import (
     order_emotion_codes,
     product_emotion_count,
 )
-from apps.core.services.order_state import InvalidOrderTransition, OrderStateService
+from apps.core.services.order_state import (
+    PACK_GENERATING,
+    QUALITY_CONTROL,
+    InvalidOrderTransition,
+    OrderStateService,
+)
 from apps.core.storage import LocalMediaStorage
 
 
 class QcError(ValueError):
     pass
 
+
+# Value owned by DRF-2051 (canonical production contract): final assets are
+# GeneratedAsset rows with this kind. DRF-2052 references the value without
+# redefining GeneratedAsset.Kind.
+FINAL_ASSET_KIND = "final"
 
 # Objective messenger technical format checks (automated). Telegram static
 # sticker contract: PNG/WebP, one side exactly 512 px, other side <= 512 px,
@@ -62,13 +72,20 @@ CHECK_REASON_CODES = {
 
 
 class QcService:
+    """QC domain service (DRF-2052).
+
+    Canonical slot identity is GeneratedAsset.slot_key (owned by DRF-2051,
+    together with GenerationJob.TaskType.FULL, the FINAL asset kind, the
+    PACK_GENERATING / QUALITY_CONTROL status definitions and production
+    generation/re-generation itself). metadata may carry auxiliary data but
+    is never domain identity. Asset ids appear in reports strictly as
+    audit/reference.
+    """
+
     def __init__(self, *, storage=None):
         self.storage = storage or LocalMediaStorage()
 
-    # --- Domain contract shared with DRF-2051 (full generation) ---------
-    # Final assets are GeneratedAsset(kind=FINAL); slot/emotion identity is
-    # metadata["emotion"]; an asset replaced by a selective retry is marked
-    # metadata["superseded"] = True so re-entry never duplicates slots.
+    # --- Domain contract --------------------------------------------------
 
     @staticmethod
     def expected_asset_count(order: Order) -> int:
@@ -80,13 +97,21 @@ class QcService:
 
     @staticmethod
     def current_final_assets(order: Order) -> list[GeneratedAsset]:
-        return [
-            asset
-            for asset in order.generated_assets.filter(
-                kind=GeneratedAsset.Kind.FINAL,
-            ).order_by("created_at", "pk")
-            if not (asset.metadata or {}).get("superseded")
-        ]
+        """Current production set: latest asset per canonical slot_key.
+
+        Re-generation (DRF-2051) writes a new asset for the same slot_key,
+        so the newest row per slot wins and re-entry never duplicates slots.
+        """
+        by_slot: dict[str, GeneratedAsset] = {}
+        for asset in order.generated_assets.filter(kind=FINAL_ASSET_KIND).order_by(
+            "created_at", "pk"
+        ):
+            by_slot[str(asset.slot_key)] = asset
+        return list(by_slot.values())
+
+    @staticmethod
+    def current_slot_keys(order: Order) -> list[str]:
+        return [str(asset.slot_key) for asset in QcService.current_final_assets(order)]
 
     # --- Automated objective checks --------------------------------------
 
@@ -96,7 +121,10 @@ class QcService:
             "expected_count": len(assets) == self.expected_asset_count(order),
         }
         for asset in assets:
-            checks[str(asset.pk)] = self._check_asset(asset)
+            checks[str(asset.slot_key)] = {
+                "asset_id": asset.pk,  # audit/reference only
+                **self._check_asset(asset),
+            }
         return checks
 
     def _check_asset(self, asset: GeneratedAsset) -> dict:
@@ -131,24 +159,25 @@ class QcService:
     # --- QC lifecycle -----------------------------------------------------
 
     @transaction.atomic
-    def submit_for_qc(self, *, order: Order) -> QcReport:
-        """Enter QUALITY_CONTROL and open a new QC attempt.
+    def start_qc(self, *, order: Order) -> QcReport:
+        """Open a QC attempt for an order that DRF-2051 put into QC.
 
-        Idempotent: an order already in QC with an open report returns it.
+        Entry into QUALITY_CONTROL (production completion) is owned by
+        DRF-2051; this service only opens reports on orders already there.
+        Idempotent: an open report is returned as-is.
         """
         locked = Order.objects.select_for_update().select_related("product").get(pk=order.pk)
-        if locked.status == Order.Status.QUALITY_CONTROL:
-            existing = (
-                QcReport.objects.filter(order=locked, status=QcReport.Status.IN_PROGRESS)
-                .order_by("-attempt")
-                .first()
-            )
-            if existing:
-                return existing
-        if locked.status != Order.Status.PACK_GENERATING:
+        if locked.status != QUALITY_CONTROL:
             raise QcError(
-                f"Order #{locked.pk} cannot enter QC from {locked.status}"
+                f"Order #{locked.pk} is not in quality control: {locked.status}"
             )
+        existing = (
+            QcReport.objects.filter(order=locked, status=QcReport.Status.IN_PROGRESS)
+            .order_by("-attempt")
+            .first()
+        )
+        if existing:
+            return existing
         assets = self.current_final_assets(locked)
         attempt = (
             QcReport.objects.filter(order=locked).aggregate(max_attempt=Max("attempt"))[
@@ -156,21 +185,14 @@ class QcService:
             ]
             or 0
         ) + 1
-        report = QcReport.objects.create(
+        return QcReport.objects.create(
             order=locked,
             attempt=attempt,
             expected_count=self.expected_asset_count(locked),
+            slot_keys=[str(asset.slot_key) for asset in assets],
             asset_ids=[asset.pk for asset in assets],
             automated_checks=self.run_automated_checks(order=locked),
         )
-        try:
-            OrderStateService.transition(
-                order=locked,
-                to_status=Order.Status.QUALITY_CONTROL,
-            )
-        except InvalidOrderTransition as exc:
-            raise QcError(str(exc)) from exc
-        return report
 
     @transaction.atomic
     def finalize_report(self, *, report: QcReport, checklist: dict) -> QcReport:
@@ -185,10 +207,8 @@ class QcService:
         if locked.status != QcReport.Status.IN_PROGRESS:
             return locked
         order = Order.objects.select_for_update().get(pk=locked.order_id)
-        if order.status != Order.Status.QUALITY_CONTROL:
-            raise QcError(
-                f"Order #{order.pk} is not in QC: {order.status}"
-            )
+        if order.status != QUALITY_CONTROL:
+            raise QcError(f"Order #{order.pk} is not in quality control: {order.status}")
 
         unknown = set(checklist) - set(HUMAN_CRITERIA)
         if unknown:
@@ -201,14 +221,16 @@ class QcService:
         }
 
         reasons = set()
-        for check_name, passed in locked.automated_checks.items():
-            if check_name == "expected_count":
-                if not passed:
-                    reasons.add(CHECK_REASON_CODES[check_name])
+        for check_key, checks in (locked.automated_checks or {}).items():
+            if check_key == "expected_count":
+                if not checks:
+                    reasons.add(CHECK_REASON_CODES["expected_count"])
                 continue
-            for asset_check, ok in (passed or {}).items():
+            for check_name, ok in (checks or {}).items():
+                if check_name == "asset_id":
+                    continue
                 if not ok:
-                    reasons.add(CHECK_REASON_CODES[asset_check])
+                    reasons.add(CHECK_REASON_CODES[check_name])
         for criterion, item in locked.human_checklist.items():
             if not item["passed"]:
                 reasons.add(criterion)
@@ -233,47 +255,50 @@ class QcService:
         return locked
 
     @transaction.atomic
-    def request_retry(self, *, report: QcReport, asset_ids: list[int]) -> QcReport:
-        """Select concrete defective assets for selective retry.
+    def request_retry(self, *, report: QcReport, slot_keys: list[str]) -> QcReport:
+        """Fix the canonical slot_key set that DRF-2051 must regenerate.
 
         Only the selected slots are queued; other assets stay untouched.
-        The order returns to PACK_GENERATING so the DRF-2051 production
-        pipeline can regenerate exactly these slots.
+        asset_id is recorded for audit only — slot_key is the canonical
+        retry identity. The order returns to PACK_GENERATING (DRF-2051
+        status) for selective re-generation; until DRF-2051 lands this
+        transition target is unknown to the state machine and the retry is
+        rejected — blocked by design, not worked around.
         """
         locked = QcReport.objects.select_for_update().select_related("order").get(pk=report.pk)
         if locked.status != QcReport.Status.FAILED:
             raise QcError("Retry can be requested only for a FAILED QC report")
         order = Order.objects.select_for_update().get(pk=locked.order_id)
-        if order.status != Order.Status.QUALITY_CONTROL:
-            raise QcError(
-                f"Order #{order.pk} is not in QC: {order.status}"
-            )
-        current = {asset.pk: asset for asset in self.current_final_assets(order)}
+        if order.status != QUALITY_CONTROL:
+            raise QcError(f"Order #{order.pk} is not in quality control: {order.status}")
+        current = {
+            str(asset.slot_key): asset for asset in self.current_final_assets(order)
+        }
         selected = []
-        for asset_id in asset_ids:
-            asset = current.get(asset_id)
+        for slot_key in slot_keys:
+            asset = current.get(str(slot_key))
             if asset is None:
-                raise QcError(f"Asset #{asset_id} is not a current final asset")
-            checks = (locked.automated_checks or {}).get(str(asset.pk)) or {}
+                raise QcError(f"Slot {slot_key!r} is not a current final asset slot")
+            checks = (locked.automated_checks or {}).get(str(slot_key)) or {}
             selected.append(
                 {
-                    "asset_id": asset.pk,
-                    "emotion": str((asset.metadata or {}).get("emotion") or ""),
+                    "slot_key": str(slot_key),
+                    "asset_id": asset.pk,  # audit/reference only
                     "reason_codes": sorted(
                         CHECK_REASON_CODES[name]
                         for name, ok in checks.items()
-                        if not ok
+                        if name != "asset_id" and not ok
                     ),
                 }
             )
         if not selected:
-            raise QcError("No assets selected for retry")
+            raise QcError("No slots selected for retry")
         locked.retry_slots = selected
         locked.save(update_fields=["retry_slots", "updated_at"])
         try:
             OrderStateService.transition(
                 order=order,
-                to_status=Order.Status.PACK_GENERATING,
+                to_status=PACK_GENERATING,
             )
         except InvalidOrderTransition as exc:
             raise QcError(str(exc)) from exc
@@ -294,9 +319,6 @@ class QcService:
         )
         if report is None:
             raise QcError(f"Order #{order.pk} has no passed QC report")
-        current_ids = [asset.pk for asset in self.current_final_assets(order)]
-        if current_ids != list(report.asset_ids or []):
-            raise QcError(
-                "Final assets changed after QC PASS; QC must be repeated"
-            )
+        if self.current_slot_keys(order) != list(report.slot_keys or []):
+            raise QcError("Final assets changed after QC PASS; QC must be repeated")
         return report

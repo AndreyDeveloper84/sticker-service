@@ -8,16 +8,21 @@ from django.utils.html import format_html, format_html_join
 from apps.core.models import Order, QcReport
 from apps.core.preview_delivery_console import PreviewDeliveryOrderAdmin
 from apps.core.services.order_state import InvalidOrderTransition
-from apps.core.services.qc import HUMAN_CRITERIA, QcError, QcService
+from apps.core.services.qc import (
+    HUMAN_CRITERIA,
+    QUALITY_CONTROL,
+    QcError,
+    QcService,
+)
 
 
 class QcOrderAdmin(PreviewDeliveryOrderAdmin):
     """Production Console QC surface (DRF-2052).
 
     Оператор видит: что заказано (expected), сколько готово (generated),
-    дефект (reason codes), что retry (failed slots), можно ли deliver
+    дефект (reason codes), какие slot_key на retry, можно ли deliver
     (delivery gate). PASS возможен только для полного комплекта; delivery
-    заблокирован до QC PASS.
+    заблокирован до QC PASS. Canonical slot identity — slot_key (DRF-2051).
     """
 
     readonly_fields = PreviewDeliveryOrderAdmin.readonly_fields + ("qc_panel",)
@@ -46,39 +51,47 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
         retryable = (
             report is not None
             and report.status == QcReport.Status.FAILED
-            and order.status == Order.Status.QUALITY_CONTROL
+            and order.status == QUALITY_CONTROL
         )
-        retried = {
-            slot.get("asset_id") for slot in (report.retry_slots or [])
-        } if report else set()
+        retried = (
+            {slot.get("slot_key") for slot in (report.retry_slots or [])}
+            if report
+            else set()
+        )
         for asset in assets:
+            slot_key = str(asset.slot_key)
             open_url = reverse("admin:core_preview_asset_file", args=[asset.pk])
-            emotion = (asset.metadata or {}).get("emotion") or "—"
-            asset_checks = checks.get(str(asset.pk)) or {}
-            failed_checks = [name for name, ok in asset_checks.items() if not ok]
-            state = "OK" if asset_checks and not failed_checks else (
-                f"AUTO FAIL: {', '.join(failed_checks)}" if failed_checks else "нет auto-checks"
-            )
+            asset_checks = checks.get(slot_key) or {}
+            failed_checks = [
+                name
+                for name, ok in asset_checks.items()
+                if name != "asset_id" and not ok
+            ]
+            if asset_checks and not failed_checks:
+                state = "OK"
+            elif failed_checks:
+                state = f"AUTO FAIL: {', '.join(failed_checks)}"
+            else:
+                state = "нет auto-checks"
             retry = ""
             if retryable:
-                if asset.pk in retried:
+                if slot_key in retried:
                     retry = " · RETRY запрошен"
                 else:
                     retry_url = reverse(
-                        "admin:core_order_qc_retry", args=[order.pk, asset.pk]
+                        "admin:core_order_qc_retry", args=[order.pk, slot_key]
                     )
                     retry = format_html(
-                        ' · <a class="button" href="{}">Retry этот asset</a>', retry_url
+                        ' · <a class="button" href="{}">Retry этот slot</a>', retry_url
                     )
             lines.append(
                 format_html(
-                    '#{} · {} · <a href="{}" target="_blank" rel="noopener">Открыть</a> · {}{}{}',
+                    'slot {} · #{} · <a href="{}" target="_blank" rel="noopener">Открыть</a> · {}{}',
+                    slot_key,
                     asset.pk,
-                    emotion,
                     open_url,
                     state,
                     retry,
-                    "",
                 )
             )
         if not assets:
@@ -96,15 +109,17 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
             )
 
         actions = []
-        if order.status == Order.Status.PACK_GENERATING:
+        if order.status == QUALITY_CONTROL and (
+            report is None or report.status != QcReport.Status.IN_PROGRESS
+        ):
             actions.append(
                 (
-                    reverse("admin:core_order_qc_submit", args=[order.pk]),
-                    "Отправить на QC",
+                    reverse("admin:core_order_qc_start", args=[order.pk]),
+                    "Открыть QC report",
                 )
             )
         if (
-            order.status == Order.Status.QUALITY_CONTROL
+            order.status == QUALITY_CONTROL
             and report is not None
             and report.status == QcReport.Status.IN_PROGRESS
         ):
@@ -132,9 +147,9 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
     def get_urls(self):
         custom = [
             path(
-                "<int:order_id>/qc/submit/",
-                self.admin_site.admin_view(self.qc_submit_view),
-                name="core_order_qc_submit",
+                "<int:order_id>/qc/start/",
+                self.admin_site.admin_view(self.qc_start_view),
+                name="core_order_qc_start",
             ),
             path(
                 "<int:order_id>/qc/finalize/",
@@ -142,7 +157,7 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
                 name="core_order_qc_finalize",
             ),
             path(
-                "<int:order_id>/qc/retry/<int:asset_id>/",
+                "<int:order_id>/qc/retry/<str:slot_key>/",
                 self.admin_site.admin_view(self.qc_retry_view),
                 name="core_order_qc_retry",
             ),
@@ -156,21 +171,21 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
             .first()
         )
 
-    def qc_submit_view(self, request, order_id):
+    def qc_start_view(self, request, order_id):
         order = self.get_object(request, str(order_id))
         if order is None:
             raise Http404
-        action_url = reverse("admin:core_order_qc_submit", args=[order.pk])
+        action_url = reverse("admin:core_order_qc_start", args=[order.pk])
         if request.method != "POST":
             return self._confirmation(
                 request,
                 order=order,
-                title="Отправить на QC",
+                title="Открыть QC report",
                 action_url=action_url,
-                detail="Будут выполнены автоматические проверки формата финальных assets; заказ перейдёт в QUALITY_CONTROL.",
+                detail="Будут выполнены автоматические проверки формата финальных assets и открыта новая QC attempt.",
             )
         try:
-            report = self.get_qc_service().submit_for_qc(order=order)
+            report = self.get_qc_service().start_qc(order=order)
         except QcError as exc:
             self.message_user(request, str(exc), level=messages.ERROR)
         else:
@@ -228,23 +243,23 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
             else:
                 self.message_user(
                     request,
-                    f"QC FAIL: {', '.join(result.reason_codes)}. Выберите assets для retry.",
+                    f"QC FAIL: {', '.join(result.reason_codes)}. Выберите slots для retry.",
                     level=messages.WARNING,
                 )
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
-    def qc_retry_view(self, request, order_id, asset_id):
+    def qc_retry_view(self, request, order_id, slot_key):
         order = self.get_object(request, str(order_id))
         if order is None:
             raise Http404
-        action_url = reverse("admin:core_order_qc_retry", args=[order.pk, asset_id])
+        action_url = reverse("admin:core_order_qc_retry", args=[order.pk, slot_key])
         if request.method != "POST":
             return self._confirmation(
                 request,
                 order=order,
-                title=f"Retry asset #{asset_id}",
+                title=f"Retry slot {slot_key}",
                 action_url=action_url,
-                detail="Только выбранный asset будет отправлен на повторную генерацию (DRF-2051); остальные assets сохранятся.",
+                detail="Только выбранный slot_key будет отправлен на повторную генерацию (DRF-2051); остальные slots сохранятся.",
             )
         report = (
             QcReport.objects.filter(order=order, status=QcReport.Status.FAILED)
@@ -257,13 +272,13 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
             )
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
-            self.get_qc_service().request_retry(report=report, asset_ids=[asset_id])
+            self.get_qc_service().request_retry(report=report, slot_keys=[slot_key])
         except QcError as exc:
             self.message_user(request, str(exc), level=messages.ERROR)
         else:
             self.message_user(
                 request,
-                f"Asset #{asset_id} отправлен на selective retry.",
+                f"Slot {slot_key} отправлен на selective retry.",
                 level=messages.SUCCESS,
             )
         return redirect(reverse("admin:core_order_change", args=[order.pk]))

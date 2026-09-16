@@ -2,7 +2,7 @@
 {% block content %}
   <div id="content-main">
     <p><strong>Order #{{ order.pk }}</strong> · {{ order.get_status_display }} · QC attempt {{ report.attempt }}</p>
-    <p>Ожидается assets: {{ report.expected_count }} · Проверяется: {{ report.asset_ids|length }}</p>
+    <p>Ожидается assets: {{ report.expected_count }} · Проверяется slots: {{ report.slot_keys|length }}</p>
 
     <h3>Automated checks</h3>
     <ul>
@@ -11,8 +11,8 @@
           {% if key == "expected_count" %}
             expected_count: {{ checks }}
           {% else %}
-            asset #{{ key }}:
-            {% for name, ok in checks.items %}{{ name }}={% if ok %}OK{% else %}FAIL{% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}
+            slot {{ key }}:
+            {% for name, ok in checks.items %}{% if name != "asset_id" %}{{ name }}={% if ok %}OK{% else %}FAIL{% endif %}{% if not forloop.last %}, {% endif %}{% endif %}{% endfor %}
           {% endif %}
         </li>
       {% endfor %}

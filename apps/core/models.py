@@ -75,8 +75,9 @@ class Order(TimestampedModel):
         PREVIEW_REVIEW = "preview_review", "Preview review"
         REVISION_REQUESTED = "revision_requested", "Revision requested"
         REVISION_GENERATING = "revision_generating", "Revision generating"
-        PACK_GENERATING = "pack_generating", "Pack generating"
-        QUALITY_CONTROL = "quality_control", "Quality control"
+        # PACK_GENERATING / QUALITY_CONTROL are owned by DRF-2051 and are
+        # referenced by value (see services/order_state.py) until the
+        # canonical production contract lands in dev.
         READY_FOR_DELIVERY = "ready_for_delivery", "Ready for delivery"
         CANCELLED = "cancelled", "Cancelled"
         FAILED = "failed", "Failed"
@@ -203,7 +204,8 @@ class GenerationJob(TimestampedModel):
 class GeneratedAsset(TimestampedModel):
     class Kind(models.TextChoices):
         PREVIEW = "preview", "Preview"
-        FINAL = "final", "Final"
+        # FINAL is owned by DRF-2051 (canonical production contract);
+        # DRF-2052 references its value "final" without redefining it.
 
     order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="generated_assets")
     job = models.ForeignKey(GenerationJob, on_delete=models.PROTECT, related_name="assets")
@@ -224,7 +226,10 @@ class QcReport(TimestampedModel):
 
     PASS requires the full expected asset set, all automated format checks
     and the complete human checklist. FAIL persists reason codes; the
-    operator then selects concrete asset slots for selective retry.
+    operator then selects concrete slots for selective retry.
+
+    Canonical slot identity is GeneratedAsset.slot_key (owned by DRF-2051);
+    asset ids are stored for audit/reference only.
     """
 
     class Status(models.TextChoices):
@@ -236,15 +241,17 @@ class QcReport(TimestampedModel):
     attempt = models.PositiveIntegerField()
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.IN_PROGRESS)
     expected_count = models.PositiveIntegerField(default=0)
-    # Final asset ids evaluated by this report; delivery gate compares
-    # against the current set to catch post-PASS changes.
+    # Canonical identity of the evaluated set (slot_key list). The delivery
+    # gate compares it against the current set to catch post-PASS changes.
+    slot_keys = models.JSONField(default=list, blank=True)
+    # Audit/reference only — NOT domain identity.
     asset_ids = models.JSONField(default=list, blank=True)
-    # {str(asset_id): {check_name: bool}} plus set-level "expected_count".
+    # {slot_key: {check_name: bool}} plus set-level "expected_count".
     automated_checks = models.JSONField(default=dict, blank=True)
     # {criterion: {"passed": bool, "note": str}} — human QC only.
     human_checklist = models.JSONField(default=dict, blank=True)
     reason_codes = models.JSONField(default=list, blank=True)
-    # [{"asset_id": int, "emotion": str, "reason_codes": [...]}]
+    # [{"slot_key": str, "asset_id": int (audit), "reason_codes": [...]}]
     retry_slots = models.JSONField(default=list, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
 

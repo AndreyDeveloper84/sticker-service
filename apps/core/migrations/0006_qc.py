@@ -1,3 +1,7 @@
+# TEMPORARY numbering (DRF-2052): after DRF-2051 merges into dev this
+# migration must be recreated with a dependency on the DRF-2051 migration
+# (which owns PACK_GENERATING / QUALITY_CONTROL statuses, Kind.FINAL and
+# GeneratedAsset.slot_key). See PR #30 / orchestrator correction.
 from django.db import migrations, models
 import django.db.models.deletion
 
@@ -24,22 +28,11 @@ class Migration(migrations.Migration):
                     ("preview_review", "Preview review"),
                     ("revision_requested", "Revision requested"),
                     ("revision_generating", "Revision generating"),
-                    ("pack_generating", "Pack generating"),
-                    ("quality_control", "Quality control"),
                     ("ready_for_delivery", "Ready for delivery"),
                     ("cancelled", "Cancelled"),
                     ("failed", "Failed"),
                 ],
                 default="draft",
-                max_length=32,
-            ),
-        ),
-        migrations.AlterField(
-            model_name="generatedasset",
-            name="kind",
-            field=models.CharField(
-                choices=[("preview", "Preview"), ("final", "Final")],
-                default="preview",
                 max_length=32,
             ),
         ),
@@ -71,6 +64,7 @@ class Migration(migrations.Migration):
                     ),
                 ),
                 ("expected_count", models.PositiveIntegerField(default=0)),
+                ("slot_keys", models.JSONField(blank=True, default=list)),
                 ("asset_ids", models.JSONField(blank=True, default=list)),
                 ("automated_checks", models.JSONField(blank=True, default=dict)),
                 ("human_checklist", models.JSONField(blank=True, default=dict)),
