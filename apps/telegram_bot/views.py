@@ -88,6 +88,39 @@ def _feedback_order(identity):
     return order
 
 
+PHOTO_PROMPT = "Отправьте несколько хороших фотографий человека."
+
+
+def _emotion_step(adapter, order):
+    """Emotion step text + keyboard, driven entirely by Product.config.
+
+    A product whose deterministic emotion set matches the required count
+    (sticker pack) is confirmed as a whole; otherwise emotions are picked
+    one by one (single sticker).
+    """
+    options = adapter.emotion_options(product=order.product)
+    required = adapter.required_emotion_count(product=order.product)
+    if required == len(options):
+        labels = ", ".join(option["label"] for option in options)
+        text = f"В набор входят {required} эмоций: {labels}."
+        buttons = [[{"text": "Подтвердить набор", "callback_data": "emotions:confirm"}]]
+    else:
+        text = "Выберите эмоцию для стикера."
+        buttons = [[{"text": option["label"], "callback_data": f"emotion:{option['code']}"}] for option in options]
+    return text, {"inline_keyboard": buttons}
+
+
+def _summary_text(summary):
+    lines = [f"Ваш заказ: {summary['product_name']}", f"Стиль: {summary['style_name']}"]
+    if summary["quantity"]:
+        lines.append(f"Стикеров: {summary['quantity']}")
+    if summary["emotions"]:
+        lines.append(f"Эмоции: {', '.join(summary['emotions'])}")
+    if summary["price_stars"]:
+        lines.append(f"Цена: {summary['price_stars']} Stars")
+    return "\n".join(lines)
+
+
 def _revision_buttons():
     labels = {
         Revision.Category.FACE: "Лицо",
@@ -114,11 +147,21 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
         client.send_message(chat_id=chat_id, text="Выберите стиль", reply_markup={"inline_keyboard": buttons})
     elif data.startswith("style:"):
         _, product_code, style_code = data.split(":", 2)
-        adapter.create_or_get_order(identity=identity, product_code=product_code, style_code=style_code)
-        client.send_message(chat_id=chat_id, text="Отправьте несколько хороших фотографий человека.")
+        order = adapter.create_or_get_order(identity=identity, product_code=product_code, style_code=style_code)
+        if adapter.required_emotion_count(product=order.product):
+            text, reply_markup = _emotion_step(adapter, order)
+            client.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
+        else:
+            client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
+    elif data.startswith("emotion:"):
+        adapter.select_emotion(identity=identity, emotion_code=data.split(":", 1)[1])
+        client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
+    elif data == "emotions:confirm":
+        adapter.confirm_emotions(identity=identity)
+        client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
     elif data == "photos_done":
-        adapter.complete_photos(identity)
-        client.send_message(chat_id=chat_id, text="Фотографии приняты. Можно переходить к оплате.", reply_markup={"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]})
+        order = adapter.complete_photos(identity)
+        client.send_message(chat_id=chat_id, text=_summary_text(adapter.order_summary(order)), reply_markup={"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]})
     elif data == "pay":
         payment = payment_adapter.payment_for_identity(identity)
         client.send_invoice(chat_id=chat_id, title=payment.order.product.name, description="Персональный цифровой заказ", payload=payment_adapter.payload(payment), amount_stars=payment.amount_minor)

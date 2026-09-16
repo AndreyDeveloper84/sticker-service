@@ -3,27 +3,79 @@ from django.core.management.base import BaseCommand
 from apps.core.models import Product, Style
 
 
+# Deterministic pilot emotion set (00-product/product-catalog.md, Standard Pack).
+# Codes are the canonical identifiers stored in Order.selection["emotions"];
+# labels are user-facing and safe to change without data migration.
+PILOT_EMOTIONS = [
+    {"code": "hello", "label": "Привет"},
+    {"code": "bye", "label": "Пока"},
+    {"code": "thanks", "label": "Спасибо"},
+    {"code": "great", "label": "Отлично"},
+    {"code": "no", "label": "Нет"},
+    {"code": "love", "label": "Люблю"},
+    {"code": "laugh", "label": "Смеюсь"},
+    {"code": "angry", "label": "Злюсь"},
+    {"code": "surprised", "label": "Удивление"},
+]
+
+GENERATION_PROMPT = (
+    "Create one polished personalized sticker preview based on the reference photos. "
+    "Preserve the person's recognizable facial identity, key hairstyle, and distinctive features. "
+    "Use a clean sticker composition suitable for messaging apps."
+)
+
+PILOT_PRODUCTS = [
+    {
+        "code": "sticker-pack-9",
+        "name": "Стикерпак — 9 стикеров",
+        "config": {
+            "kind": "pack",
+            "quantity": 9,
+            "emotion_count": 9,
+            "emotions": PILOT_EMOTIONS,
+            "price_minor": 50000,
+            "price_stars": 500,
+            "currency": "RUB",
+            "generation_prompt": GENERATION_PROMPT,
+        },
+    },
+    {
+        "code": "single-sticker",
+        "name": "Один стикер",
+        "config": {
+            "kind": "single",
+            "quantity": 1,
+            "emotion_count": 1,
+            "emotions": PILOT_EMOTIONS,
+            "price_minor": 10000,
+            "price_stars": 100,
+            "currency": "RUB",
+            "generation_prompt": GENERATION_PROMPT,
+        },
+    },
+]
+
+
 class Command(BaseCommand):
-    help = "Create or update deterministic catalog data for the first live bot test."
+    help = "Create or update deterministic pilot catalog data (two products, one style)."
 
     def handle(self, *args, **options):
-        product, _ = Product.objects.update_or_create(
-            code="personal-sticker-pack",
-            defaults={
-                "name": "Персональный стикерпак",
-                "is_active": True,
-                "config": {
-                    "price_stars": 1,
-                    "price_minor": 100,
-                    "currency": "RUB",
-                    "generation_prompt": (
-                        "Create one polished personalized sticker preview based on the reference photos. "
-                        "Preserve the person's recognizable facial identity, key hairstyle, and distinctive features. "
-                        "Use a clean sticker composition suitable for messaging apps."
-                    ),
+        pilot_codes = []
+        for spec in PILOT_PRODUCTS:
+            product, _ = Product.objects.update_or_create(
+                code=spec["code"],
+                defaults={
+                    "name": spec["name"],
+                    "is_active": True,
+                    "config": spec["config"],
                 },
-            },
-        )
+            )
+            pilot_codes.append(product.code)
+
+        # The pilot ships exactly two products; anything else is hidden from
+        # the selectors but kept for historical orders (FK is PROTECT).
+        Product.objects.exclude(code__in=pilot_codes).update(is_active=False)
+
         style, _ = Style.objects.update_or_create(
             code="comic",
             defaults={
@@ -39,6 +91,6 @@ class Command(BaseCommand):
         )
         self.stdout.write(
             self.style.SUCCESS(
-                f"Live-test catalog ready: product={product.code}, style={style.code}"
+                f"Pilot catalog ready: products={', '.join(pilot_codes)}, style={style.code}"
             )
         )
