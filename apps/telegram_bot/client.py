@@ -15,8 +15,15 @@ constructor args, Django settings or env:
   compatible relay/base goes here (``{origin}/bot{token}/{method}``).
 - ``TELEGRAM_FILE_ORIGIN`` — file downloads; defaults to the API origin
   (``{origin}/file/bot{token}/{file_path}``).
-- ``TELEGRAM_PROXY_URL`` — optional outbound proxy applied to ALL Telegram
-  traffic (JSON calls, multipart, downloads). Never hardcode credentials.
+- ``TELEGRAM_PROXY_URL`` — optional single outbound proxy applied to ALL
+  Telegram traffic (JSON calls, multipart, downloads). Legacy explicit
+  override; never hardcode credentials.
+- Outbound proxy pool — when ``TELEGRAM_PROXY_URL`` is NOT set and the
+  shared pool is enabled (``OUTBOUND_PROXY_ENABLED=true`` +
+  ``OUTBOUND_PROXY_URLS_JSON``, see ``apps.core.outbound_proxy``), every
+  Telegram call goes through the pool with per-service health failover.
+  Transport failures rotate to the next proxy; upstream Telegram errors
+  (HTTP 4xx, ``ok=false``) never rotate.
 
 Defaults without overrides are production-compatible (direct api.telegram.org).
 
@@ -86,6 +93,7 @@ class TelegramBotClient:
         api_origin: str | None = None,
         file_origin: str | None = None,
         proxy_url: str | None = None,
+        proxy_pool=None,
         timeout: float = 30.0,
     ):
         if not token:
@@ -95,11 +103,58 @@ class TelegramBotClient:
         self.file_origin = (file_origin or _setting_or_env("TELEGRAM_FILE_ORIGIN") or self.api_origin).rstrip("/")
         self.proxy_url = proxy_url if proxy_url is not None else _setting_or_env("TELEGRAM_PROXY_URL")
         self.timeout = timeout
+        # Legacy explicit single proxy wins over the pool; otherwise use the
+        # given pool or the process-local shared one (None when disabled).
+        if self.proxy_url:
+            self._pool = None
+        elif proxy_pool is not None:
+            self._pool = proxy_pool
+        else:
+            from apps.core.outbound_proxy import get_proxy_pool
+
+            self._pool = get_proxy_pool()
 
     # ------------------------------------------------------------------ HTTP
 
     def _client(self) -> httpx.Client:
         return _shared_client(self.proxy_url, self.timeout)
+
+    def _transport(self, label: str, call) -> httpx.Response:
+        """Run ``call(client)`` via the fixed proxy/direct, or via pool failover.
+
+        Pool mode: transport-level failures (httpx.RequestError) cool down the
+        proxy for the telegram service and retry via the next eligible proxy.
+        Responses that came back from Telegram itself are returned to
+        ``_unwrap`` and never rotate the proxy.
+        """
+        if self._pool is None:
+            try:
+                return call(self._client())
+            except httpx.RequestError as exc:
+                # NOTE: str(exc) embeds the URL, which contains the token — log
+                # and raise with the exception TYPE only, and suppress the
+                # exception chain so the httpx error (with the token URL) can
+                # never surface via "During handling of..." in a traceback.
+                logger.warning("telegram.network_error method=%s exc=%s", label, type(exc).__name__)
+                raise TelegramAPIError(label, description=f"network: {type(exc).__name__}") from None
+        from apps.core.outbound_proxy import Service
+
+        for _ in range(len(self._pool)):
+            endpoint = self._pool.select(Service.TELEGRAM)
+            if endpoint is None:
+                break
+            try:
+                response = call(_shared_client(endpoint.url, self.timeout))
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "telegram.network_error method=%s exc=%s %s", label, type(exc).__name__, endpoint.identity
+                )
+                self._pool.report_failure(endpoint, Service.TELEGRAM, type(exc).__name__)
+                continue
+            self._pool.report_success(endpoint, Service.TELEGRAM)
+            return response
+        logger.warning("telegram.network_error method=%s all proxies unavailable", label)
+        raise TelegramAPIError(label, description="network: all proxies unavailable") from None
 
     def _api_url(self, method: str) -> str:
         return f"{self.api_origin}/bot{self.token}/{method}"
@@ -120,32 +175,22 @@ class TelegramBotClient:
         return data.get("result")
 
     def _post(self, method: str, payload: dict):
-        try:
-            response = self._client().post(
-                self._api_url(method),
-                json=payload,
-                timeout=self.timeout,
-            )
-        except httpx.RequestError as exc:
-            # NOTE: str(exc) embeds the URL, which contains the token — log
-            # and raise with the exception TYPE only, and suppress the
-            # exception chain so the httpx error (with the token URL) can
-            # never surface via "During handling of..." in a traceback.
-            logger.warning("telegram.network_error method=%s exc=%s", method, type(exc).__name__)
-            raise TelegramAPIError(method, description=f"network: {type(exc).__name__}") from None
+        response = self._transport(
+            method,
+            lambda client: client.post(self._api_url(method), json=payload, timeout=self.timeout),
+        )
         return self._unwrap(method, response)
 
     def _post_multipart(self, method: str, *, fields: dict, file_field: str, filename: str, content: bytes, mime_type: str):
-        try:
-            response = self._client().post(
+        response = self._transport(
+            method,
+            lambda client: client.post(
                 self._api_url(method),
                 data={key: str(value) for key, value in fields.items()},
                 files={file_field: (filename, content, mime_type)},
                 timeout=self.timeout,
-            )
-        except httpx.RequestError as exc:
-            logger.warning("telegram.network_error method=%s exc=%s", method, type(exc).__name__)
-            raise TelegramAPIError(method, description=f"network: {type(exc).__name__}") from None
+            ),
+        )
         return self._unwrap(method, response)
 
     # --------------------------------------------------------------- methods
@@ -203,11 +248,10 @@ class TelegramBotClient:
 
     def download_file(self, file_path: str) -> bytes:
         url = f"{self.file_origin}/file/bot{self.token}/{file_path}"
-        try:
-            response = self._client().get(url, timeout=self.timeout)
-        except httpx.RequestError as exc:
-            logger.warning("telegram.network_error method=download_file exc=%s", type(exc).__name__)
-            raise TelegramAPIError("download_file", description=f"network: {type(exc).__name__}") from None
+        response = self._transport(
+            "download_file",
+            lambda client: client.get(url, timeout=self.timeout),
+        )
         if response.status_code >= 400:
             logger.warning("telegram.api_error method=download_file status=%s", response.status_code)
             raise TelegramAPIError("download_file", status_code=response.status_code, description="http error")

@@ -254,3 +254,148 @@ class TelegramClientErrorTests(SimpleTestCase):
             with self.assertRaises(TelegramAPIError) as ctx:
                 self.client.download_file("photos/a.jpg")
         self._assert_token_free_traceback(ctx)
+
+
+class TelegramClientProxyPoolTests(SimpleTestCase):
+    """Pool integration: failover on transport errors, no rotation on
+    upstream Telegram answers, legacy TELEGRAM_PROXY_URL override intact."""
+
+    PROXY_A = "http://user-a:secret-a@proxy-a.example:3128"
+    PROXY_B = "http://user-b:secret-b@proxy-b.example:3128"
+
+    def _pool(self):
+        import json
+
+        from apps.core.outbound_proxy import ProxyPool, parse_proxy_urls
+
+        return ProxyPool(parse_proxy_urls(json.dumps([self.PROXY_A, self.PROXY_B])), cooldown_seconds=60.0)
+
+    def _clients(self, behavior_by_url):
+        """Patch _shared_client with per-proxy fake clients."""
+        fakes = {}
+        for url, behavior in behavior_by_url.items():
+            fake = mock.MagicMock(name=f"client:{url}")
+            for verb in ("post", "get"):
+                method_mock = getattr(fake, verb)
+                if isinstance(behavior, Exception):
+                    method_mock.side_effect = behavior
+                else:
+                    method_mock.return_value = behavior
+            fakes[url] = fake
+        patcher = mock.patch(
+            "apps.telegram_bot.client._shared_client",
+            side_effect=lambda proxy_url, timeout: fakes[proxy_url],
+        )
+        return patcher, fakes
+
+    def test_healthy_proxy_selected(self):
+        pool = self._pool()
+        ok = FakeResponse(payload={"ok": True, "result": {"done": True}})
+        patcher, fakes = self._clients({self.PROXY_A: ok, self.PROXY_B: ok})
+        client = TelegramBotClient(TOKEN, proxy_pool=pool)
+        with patcher:
+            client.send_message(chat_id=1, text="hi")
+        self.assertEqual(fakes[self.PROXY_A].post.call_count, 1)
+        self.assertEqual(fakes[self.PROXY_B].post.call_count, 0)
+        from apps.core.outbound_proxy import Service
+
+        self.assertEqual(pool.state(pool.endpoints[0], Service.TELEGRAM), "HEALTHY")
+
+    def test_first_proxy_transport_fail_fails_over_to_second(self):
+        pool = self._pool()
+        ok = FakeResponse(payload={"ok": True, "result": {"done": True}})
+        patcher, fakes = self._clients(
+            {self.PROXY_A: httpx.ConnectError("refused"), self.PROXY_B: ok}
+        )
+        client = TelegramBotClient(TOKEN, proxy_pool=pool)
+        with patcher:
+            result = client.send_message(chat_id=1, text="hi")
+        self.assertEqual(result, {"done": True})
+        self.assertEqual(fakes[self.PROXY_A].post.call_count, 1)
+        self.assertEqual(fakes[self.PROXY_B].post.call_count, 1)
+        from apps.core.outbound_proxy import Service
+
+        self.assertEqual(pool.state(pool.endpoints[0], Service.TELEGRAM), "COOLDOWN")
+        self.assertEqual(pool.state(pool.endpoints[1], Service.TELEGRAM), "HEALTHY")
+
+    def test_upstream_400_does_not_rotate(self):
+        pool = self._pool()
+        bad = FakeResponse(status_code=400, payload=None)
+        ok = FakeResponse(payload={"ok": True, "result": {}})
+        patcher, fakes = self._clients({self.PROXY_A: bad, self.PROXY_B: ok})
+        client = TelegramBotClient(TOKEN, proxy_pool=pool)
+        with patcher:
+            with self.assertRaises(TelegramAPIError) as ctx:
+                client.send_message(chat_id=1, text="hi")
+        self.assertEqual(ctx.exception.status_code, 400)
+        self.assertEqual(fakes[self.PROXY_A].post.call_count, 1)
+        self.assertEqual(fakes[self.PROXY_B].post.call_count, 0)
+        from apps.core.outbound_proxy import Service
+
+        self.assertEqual(pool.state(pool.endpoints[0], Service.TELEGRAM), "HEALTHY")
+
+    def test_upstream_401_does_not_rotate(self):
+        pool = self._pool()
+        unauthorized = FakeResponse(status_code=401, payload=None)
+        patcher, fakes = self._clients({self.PROXY_A: unauthorized, self.PROXY_B: unauthorized})
+        client = TelegramBotClient(TOKEN, proxy_pool=pool)
+        with patcher:
+            with self.assertRaises(TelegramAPIError):
+                client.get_me()
+        self.assertEqual(fakes[self.PROXY_A].post.call_count, 1)
+        self.assertEqual(fakes[self.PROXY_B].post.call_count, 0)
+
+    def test_all_proxies_down(self):
+        pool = self._pool()
+        patcher, _ = self._clients(
+            {
+                self.PROXY_A: httpx.ConnectError("refused"),
+                self.PROXY_B: httpx.ConnectTimeout("timeout"),
+            }
+        )
+        client = TelegramBotClient(TOKEN, proxy_pool=pool)
+        with patcher:
+            with self.assertRaises(TelegramAPIError) as ctx:
+                client.send_message(chat_id=1, text="hi")
+        self.assertNotIn(TOKEN, str(ctx.exception))
+        self.assertNotIn("secret-a", str(ctx.exception))
+        self.assertNotIn("secret-b", str(ctx.exception))
+
+    def test_download_file_failover(self):
+        pool = self._pool()
+        patcher, fakes = self._clients(
+            {
+                self.PROXY_A: httpx.ConnectError("refused"),
+                self.PROXY_B: FakeResponse(content=b"img"),
+            }
+        )
+        client = TelegramBotClient(TOKEN, proxy_pool=pool)
+        with patcher:
+            content = client.download_file("photos/a.jpg")
+        self.assertEqual(content, b"img")
+        self.assertEqual(fakes[self.PROXY_B].get.call_count, 1)
+
+    def test_legacy_proxy_url_overrides_pool(self):
+        pool = self._pool()
+        ok = FakeResponse(payload={"ok": True, "result": {}})
+        legacy = "http://legacy:secret-l@legacy-proxy.example:3128"
+        patcher, fakes = self._clients({legacy: ok})
+        client = TelegramBotClient(TOKEN, proxy_url=legacy, proxy_pool=pool)
+        self.assertIsNone(client._pool)
+        with patcher:
+            client.send_message(chat_id=1, text="hi")
+        self.assertEqual(fakes[legacy].post.call_count, 1)
+
+    def test_pool_logs_no_credentials(self):
+        pool = self._pool()
+        ok = FakeResponse(payload={"ok": True, "result": {}})
+        patcher, _ = self._clients(
+            {self.PROXY_A: httpx.ConnectError("refused"), self.PROXY_B: ok}
+        )
+        client = TelegramBotClient(TOKEN, proxy_pool=pool)
+        with patcher:
+            with self.assertLogs("apps.telegram_bot.client", level="WARNING") as captured:
+                client.send_message(chat_id=1, text="hi")
+        output = "\n".join(captured.output)
+        for leaked in (TOKEN, "secret-a", "secret-b", "user-a", "user-b"):
+            self.assertNotIn(leaked, output)

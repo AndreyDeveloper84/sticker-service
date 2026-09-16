@@ -144,6 +144,49 @@ three modes via `.env.staging` (never hardcode credentials in code):
   applied to every Telegram call, upload and download. TLS verification
   stays on; the proxy only tunnels CONNECT.
 
+## Outbound proxy pool (Telegram + OpenAI)
+
+Geo-blocked upstreams (Telegram: TCP unreachable; OpenAI:
+`403 unsupported_country_region_territory`) share one application-level
+proxy pool (`apps/core/outbound_proxy.py`). Only the Telegram and OpenAI
+clients use it — YooKassa, health checks and all other traffic stay direct.
+Nothing on the host (routing, firewall, global `HTTPS_PROXY`) is changed.
+
+```env
+OUTBOUND_PROXY_ENABLED=true
+OUTBOUND_PROXY_URLS_JSON=["http://user:password@proxy-a:3128","http://user:password@proxy-b:3128"]
+OUTBOUND_PROXY_COOLDOWN_SECONDS=60
+```
+
+- JSON list (not comma-separated) so credentials may contain any characters.
+- Selection is deterministic round-robin with per-service health: a
+  transport failure (connect/timeout/reset, proxy auth) cools the proxy
+  down for that service only; upstream API answers (Telegram 400/401,
+  OpenAI 400/401/429) never rotate the proxy. OpenAI geo 403 blocks the
+  proxy for OpenAI only. Cooldown recovers lazily on the next `select()`.
+- Pool state is **per process** (each Gunicorn worker has its own); there is
+  no shared circuit state across workers (MVP, by design).
+- Precedence for Telegram: `TELEGRAM_PROXY_URL` (legacy single proxy) →
+  pool → direct. For OpenAI: pool → direct.
+- OpenAI failover is cost-safe: connect-phase failures and definitive geo
+  rejections retry via the next proxy, but an ambiguous post-submit failure
+  (e.g. read timeout) fails closed — no blind duplicate billable generation.
+- HTTP/HTTPS CONNECT proxies work out of the box (httpx). `socks5://` URLs
+  additionally require `httpx[socks]` (socksio), which is intentionally not
+  installed until a SOCKS5 proxy is actually used.
+
+Health probe (no credentials in output):
+
+```bash
+docker compose --env-file .env.staging -f docker-compose.staging.yml run --rm backend \
+  python manage.py check_outbound_proxies
+```
+
+Expected output: per proxy `telegram: PASS/FAIL` and `openai: PASS/FAIL/GEO_BLOCKED`;
+exit code is non-zero unless at least one proxy passes each service.
+The Telegram probe hits `https://api.telegram.org/` (404 = transport OK);
+the OpenAI probe is the non-billable `models.list()`.
+
 Safe verification after changing transport env (token never printed):
 
 ```bash

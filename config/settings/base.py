@@ -71,6 +71,15 @@ TELEGRAM_API_ORIGIN = os.getenv("TELEGRAM_API_ORIGIN", "")
 TELEGRAM_FILE_ORIGIN = os.getenv("TELEGRAM_FILE_ORIGIN", "")
 TELEGRAM_PROXY_URL = os.getenv("TELEGRAM_PROXY_URL", "")
 
+# Centralized outbound proxy pool for geo-blocked upstreams (Telegram,
+# OpenAI). Application-level only: nothing else on the host is proxied.
+# Credentials only via env (.env.staging, mode 600), never in code/git.
+OUTBOUND_PROXY_ENABLED = os.getenv("OUTBOUND_PROXY_ENABLED", "").lower() in ("1", "true", "yes", "on")
+# JSON list so credentials may contain any characters:
+# OUTBOUND_PROXY_URLS_JSON=["http://user:pass@proxy-a:3128","http://user:pass@proxy-b:3128"]
+OUTBOUND_PROXY_URLS_JSON = os.getenv("OUTBOUND_PROXY_URLS_JSON", "")
+OUTBOUND_PROXY_COOLDOWN_SECONDS = os.getenv("OUTBOUND_PROXY_COOLDOWN_SECONDS", "60")
+
 AUTH_PASSWORD_VALIDATORS = []
 LANGUAGE_CODE = "ru-ru"
 TIME_ZONE = "Europe/Moscow"
