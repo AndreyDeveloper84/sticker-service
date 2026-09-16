@@ -77,6 +77,7 @@ class Order(TimestampedModel):
         REVISION_GENERATING = "revision_generating", "Revision generating"
         PACK_GENERATING = "pack_generating", "Pack generating"
         QUALITY_CONTROL = "quality_control", "Quality control"
+        READY_FOR_DELIVERY = "ready_for_delivery", "Ready for delivery"
         CANCELLED = "cancelled", "Cancelled"
         FAILED = "failed", "Failed"
 
@@ -216,6 +217,48 @@ class GeneratedAsset(TimestampedModel):
 
     def __str__(self) -> str:
         return f"GeneratedAsset #{self.pk} for order #{self.order_id}"
+
+
+class QcReport(TimestampedModel):
+    """QC result for the current set of final assets (DRF-2052).
+
+    PASS requires the full expected asset set, all automated format checks
+    and the complete human checklist. FAIL persists reason codes; the
+    operator then selects concrete asset slots for selective retry.
+    """
+
+    class Status(models.TextChoices):
+        IN_PROGRESS = "in_progress", "In progress"
+        PASSED = "passed", "Passed"
+        FAILED = "failed", "Failed"
+
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="qc_reports")
+    attempt = models.PositiveIntegerField()
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.IN_PROGRESS)
+    expected_count = models.PositiveIntegerField(default=0)
+    # Final asset ids evaluated by this report; delivery gate compares
+    # against the current set to catch post-PASS changes.
+    asset_ids = models.JSONField(default=list, blank=True)
+    # {str(asset_id): {check_name: bool}} plus set-level "expected_count".
+    automated_checks = models.JSONField(default=dict, blank=True)
+    # {criterion: {"passed": bool, "note": str}} — human QC only.
+    human_checklist = models.JSONField(default=dict, blank=True)
+    reason_codes = models.JSONField(default=list, blank=True)
+    # [{"asset_id": int, "emotion": str, "reason_codes": [...]}]
+    retry_slots = models.JSONField(default=list, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["order", "attempt"],
+                name="uniq_qc_report_attempt",
+            )
+        ]
+        ordering = ["order_id", "attempt"]
+
+    def __str__(self) -> str:
+        return f"QcReport #{self.pk} for order #{self.order_id} attempt {self.attempt}"
 
 
 class Revision(TimestampedModel):

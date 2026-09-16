@@ -1,0 +1,37 @@
+{% extends "admin/base_site.html" %}
+{% block content %}
+  <div id="content-main">
+    <p><strong>Order #{{ order.pk }}</strong> · {{ order.get_status_display }} · QC attempt {{ report.attempt }}</p>
+    <p>Ожидается assets: {{ report.expected_count }} · Проверяется: {{ report.asset_ids|length }}</p>
+
+    <h3>Automated checks</h3>
+    <ul>
+      {% for key, checks in automated_checks.items %}
+        <li>
+          {% if key == "expected_count" %}
+            expected_count: {{ checks }}
+          {% else %}
+            asset #{{ key }}:
+            {% for name, ok in checks.items %}{{ name }}={% if ok %}OK{% else %}FAIL{% endif %}{% if not forloop.last %}, {% endif %}{% endfor %}
+          {% endif %}
+        </li>
+      {% endfor %}
+    </ul>
+
+    <h3>Human checklist</h3>
+    <p>Отметьте только критерии, которые проходят. PASS возможен только при полном комплекте, зелёных automated checks и всех отмеченных критериях.</p>
+    <form method="post" action="{{ action_url }}">
+      {% csrf_token %}
+      {% for criterion in criteria %}
+        <p>
+          <label>
+            <input type="checkbox" name="{{ criterion }}" value="1">
+            {{ criterion }}
+          </label>
+        </p>
+      {% endfor %}
+      <input type="submit" value="Завершить QC">
+      <a href="{% url 'admin:core_order_change' order.pk %}">Отмена</a>
+    </form>
+  </div>
+{% endblock %}

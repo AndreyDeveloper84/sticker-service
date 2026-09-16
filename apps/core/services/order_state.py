@@ -65,7 +65,14 @@ class OrderStateService:
             Order.Status.FAILED,
         },
         Order.Status.QUALITY_CONTROL: {
-            # QC exits (PASS/FAIL handling) belong to DRF-2052.
+            Order.Status.READY_FOR_DELIVERY,
+            # QC FAIL selective retry: back to production for the failed
+            # slots only (regeneration itself is DRF-2051 scope).
+            Order.Status.PACK_GENERATING,
+            Order.Status.FAILED,
+        },
+        Order.Status.READY_FOR_DELIVERY: {
+            # DELIVERY_IN_PROGRESS / DELIVERED are added by DRF-2053.
             Order.Status.FAILED,
         },
         Order.Status.CANCELLED: set(),
