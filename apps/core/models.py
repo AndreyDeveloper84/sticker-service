@@ -75,9 +75,8 @@ class Order(TimestampedModel):
         PREVIEW_REVIEW = "preview_review", "Preview review"
         REVISION_REQUESTED = "revision_requested", "Revision requested"
         REVISION_GENERATING = "revision_generating", "Revision generating"
-        # PACK_GENERATING / QUALITY_CONTROL are owned by DRF-2051 and are
-        # referenced by value (see services/order_state.py) until the
-        # canonical production contract lands in dev.
+        PACK_GENERATING = "pack_generating", "Pack generating"
+        QUALITY_CONTROL = "quality_control", "Quality control"
         READY_FOR_DELIVERY = "ready_for_delivery", "Ready for delivery"
         CANCELLED = "cancelled", "Cancelled"
         FAILED = "failed", "Failed"
@@ -204,8 +203,7 @@ class GenerationJob(TimestampedModel):
 class GeneratedAsset(TimestampedModel):
     class Kind(models.TextChoices):
         PREVIEW = "preview", "Preview"
-        # FINAL is owned by DRF-2051 (canonical production contract);
-        # DRF-2052 references its value "final" without redefining it.
+        FINAL = "final", "Final"
 
     order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="generated_assets")
     job = models.ForeignKey(GenerationJob, on_delete=models.PROTECT, related_name="assets")
@@ -244,7 +242,9 @@ class QcReport(TimestampedModel):
     # Canonical identity of the evaluated set (slot_key list). The delivery
     # gate compares it against the current set to catch post-PASS changes.
     slot_keys = models.JSONField(default=list, blank=True)
-    # Audit/reference only — NOT domain identity.
+    # Concrete assets evaluated by this report (parallel to slot_keys).
+    # Not domain identity, but the delivery gate uses them to detect a slot
+    # regenerated after PASS (same slot_key, new current asset).
     asset_ids = models.JSONField(default=list, blank=True)
     # {slot_key: {check_name: bool}} plus set-level "expected_count".
     automated_checks = models.JSONField(default=dict, blank=True)

@@ -8,12 +8,7 @@ from django.utils.html import format_html, format_html_join
 from apps.core.models import Order, QcReport
 from apps.core.preview_delivery_console import PreviewDeliveryOrderAdmin
 from apps.core.services.order_state import InvalidOrderTransition
-from apps.core.services.qc import (
-    HUMAN_CRITERIA,
-    QUALITY_CONTROL,
-    QcError,
-    QcService,
-)
+from apps.core.services.qc import HUMAN_CRITERIA, QcError, QcService
 
 
 class QcOrderAdmin(PreviewDeliveryOrderAdmin):
@@ -51,7 +46,7 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
         retryable = (
             report is not None
             and report.status == QcReport.Status.FAILED
-            and order.status == QUALITY_CONTROL
+            and order.status == Order.Status.QUALITY_CONTROL
         )
         retried = (
             {slot.get("slot_key") for slot in (report.retry_slots or [])}
@@ -109,7 +104,7 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
             )
 
         actions = []
-        if order.status == QUALITY_CONTROL and (
+        if order.status == Order.Status.QUALITY_CONTROL and (
             report is None or report.status != QcReport.Status.IN_PROGRESS
         ):
             actions.append(
@@ -119,7 +114,7 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
                 )
             )
         if (
-            order.status == QUALITY_CONTROL
+            order.status == Order.Status.QUALITY_CONTROL
             and report is not None
             and report.status == QcReport.Status.IN_PROGRESS
         ):

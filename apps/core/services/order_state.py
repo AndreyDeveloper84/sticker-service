@@ -11,15 +11,6 @@ class InvalidOrderTransition(ValueError):
     pass
 
 
-# Status values owned by DRF-2051 (canonical production contract).
-# DRF-2052 references them by value for its QC outcome transitions; the
-# status definitions and the PREVIEW_REVIEW -> PACK_GENERATING /
-# PACK_GENERATING -> QUALITY_CONTROL transitions themselves belong to
-# DRF-2051 and are not redefined here.
-PACK_GENERATING = "pack_generating"
-QUALITY_CONTROL = "quality_control"
-
-
 @dataclass(frozen=True)
 class OrderStateService:
     transitions = {
@@ -58,8 +49,7 @@ class OrderStateService:
         },
         Order.Status.PREVIEW_REVIEW: {
             Order.Status.REVISION_REQUESTED,
-            # -> PACK_GENERATING is owned by DRF-2051 (full production
-            # starts after customer approval).
+            Order.Status.PACK_GENERATING,
             Order.Status.FAILED,
         },
         Order.Status.REVISION_REQUESTED: {
@@ -70,12 +60,16 @@ class OrderStateService:
             Order.Status.INTERNAL_PREVIEW_REVIEW,
             Order.Status.FAILED,
         },
-        # --- QC outcomes (DRF-2052 ownership) ---
-        QUALITY_CONTROL: {
+        Order.Status.PACK_GENERATING: {
+            Order.Status.QUALITY_CONTROL,
+            Order.Status.FAILED,
+        },
+        Order.Status.QUALITY_CONTROL: {
+            # QC exits (DRF-2052): PASS -> READY_FOR_DELIVERY; FAIL with
+            # selective retry -> PACK_GENERATING so DRF-2051 regenerates
+            # exactly the requested slot_keys.
             Order.Status.READY_FOR_DELIVERY,
-            # QC FAIL selective retry: back to production so DRF-2051 can
-            # regenerate exactly the requested slot_keys.
-            PACK_GENERATING,
+            Order.Status.PACK_GENERATING,
             Order.Status.FAILED,
         },
         Order.Status.READY_FOR_DELIVERY: {
