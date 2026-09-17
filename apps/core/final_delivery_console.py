@@ -136,7 +136,7 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
         return custom + super().get_urls()
 
     @staticmethod
-    def _plan_message(plan) -> str:
+    def _delivery_plan_message(plan) -> str:
         summary = ", ".join(f"{slot.slot_key}: {slot.status}" for slot in plan.slots)
         if plan.complete:
             return f"Final set delivered: {summary}"
@@ -181,7 +181,7 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
         except FinalDeliveryError as exc:
             self.message_user(request, str(exc), level=messages.ERROR)
         else:
-            self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
+            self.message_user(request, self._delivery_plan_message(plan), level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
     def resume_final_delivery_view(self, request, order_id):
@@ -208,7 +208,7 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
         except FinalDeliveryError as exc:
             self.message_user(request, str(exc), level=messages.ERROR)
         else:
-            self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
+            self.message_user(request, self._delivery_plan_message(plan), level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
 
