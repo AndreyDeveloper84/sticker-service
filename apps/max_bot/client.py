@@ -30,6 +30,26 @@ from apps.max_bot.client_payment_link import render_button
 DEFAULT_API_BASE = "https://botapi.max.ru"
 
 
+def uploaded_image_token(uploaded) -> str:
+    """Attachment token from the multipart upload answer of an image upload
+    URL (``POST /uploads?type=image`` → upload URL → multipart POST).
+
+    Real wire shape (measured on staging, synthetic PNG):
+    ``{"photos": {"<key>": {"token": "<str>"}}}`` — one entry whose key is
+    opaque; the token is the only inner field that matters. Returns "" when
+    the answer carries no photos/token.
+    """
+    if not isinstance(uploaded, dict):
+        return ""
+    photos = uploaded.get("photos")
+    if not isinstance(photos, dict):
+        return ""
+    for entry in photos.values():
+        if isinstance(entry, dict) and entry.get("token"):
+            return str(entry["token"])
+    return ""
+
+
 def created_message_id(response) -> str:
     """``mid`` of the message created by ``POST /messages`` (or ``/uploads``
     + send), or "" when the envelope carries none.
@@ -216,12 +236,15 @@ class MaxBotClient:
         except ValueError:
             uploaded = {}
 
-        token = str(
-            uploaded.get("token")
-            or uploaded.get("retval", {}).get("token")
-            or init.get("token")
-            or ""
-        )
+        token = uploaded_image_token(uploaded)
+        if not token:
+            # legacy / defensive fallbacks, never observed on the live API
+            token = str(
+                uploaded.get("token")
+                or (uploaded.get("retval") or {}).get("token")
+                or init.get("token")
+                or ""
+            )
         if not token:
             from urllib.parse import parse_qs, urlparse
 
