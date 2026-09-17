@@ -148,11 +148,24 @@ class MaxProductSelectorFlowTests(TestCase):
             with tempfile.TemporaryDirectory() as media_root:
                 self._send_photo(client, media_root)
 
+            # photos_done → consent screen only; checkout waits for consent:accept
             client.reset_mock()
             response = self._post(_callback("photos_done", callback_id="cb-done"))
             self.assertEqual(response.status_code, 200)
             order.refresh_from_db()
+            self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            self.assertEqual(
+                client.send_message.call_args.kwargs["buttons"],
+                [[{"text": "Принимаю", "payload": "consent:accept"}]],
+            )
+            checkout_mock.assert_not_called()
+
+            client.reset_mock()
+            response = self._post(_callback("consent:accept", callback_id="cb-consent"))
+            self.assertEqual(response.status_code, 200)
+            order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.READY_FOR_CHECKOUT)
+            self.assertTrue(order.consent_accepted)
 
             text = client.send_message.call_args.kwargs["text"]
             self.assertIn("Стикерпак — 9 стикеров", text)
@@ -192,11 +205,24 @@ class MaxProductSelectorFlowTests(TestCase):
             with tempfile.TemporaryDirectory() as media_root:
                 self._send_photo(client, media_root)
 
+            # photos_done → consent screen only; checkout waits for consent:accept
             client.reset_mock()
             response = self._post(_callback("photos_done", callback_id="cb-done"))
             self.assertEqual(response.status_code, 200)
             order.refresh_from_db()
+            self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            self.assertEqual(
+                client.send_message.call_args.kwargs["buttons"],
+                [[{"text": "Принимаю", "payload": "consent:accept"}]],
+            )
+            checkout_mock.assert_not_called()
+
+            client.reset_mock()
+            response = self._post(_callback("consent:accept", callback_id="cb-consent"))
+            self.assertEqual(response.status_code, 200)
+            order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.READY_FOR_CHECKOUT)
+            self.assertTrue(order.consent_accepted)
 
             text = client.send_message.call_args.kwargs["text"]
             self.assertIn("Один стикер", text)

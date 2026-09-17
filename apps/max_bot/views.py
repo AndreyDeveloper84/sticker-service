@@ -4,6 +4,7 @@ import os
 from mimetypes import guess_type
 from urllib.parse import urlparse
 
+from django.core.exceptions import ValidationError
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
@@ -109,12 +110,17 @@ def _handle_message(event: MaxEvent, *, adapter, client):
             return _reply(client, event, text="Не удалось загрузить фото. Отправьте его ещё раз.")
         filename = urlparse(image_url).path.rsplit("/", 1)[-1] or "photo.jpg"
         mime_type = guess_type(filename)[0] or "image/jpeg"
-        adapter.save_photo_bytes(
-            identity=identity,
-            content=content,
-            filename=filename,
-            mime_type=mime_type,
-        )
+        try:
+            adapter.save_photo_bytes(
+                identity=identity,
+                content=content,
+                filename=filename,
+                mime_type=mime_type,
+            )
+        except ValidationError:
+            # MediaService rejects unsupported MIME types / sizes; answer the
+            # customer instead of letting a 500 trigger MAX redelivery.
+            return _reply(client, event, text=PHOTO_REJECTED)
         return _reply(
             client,
             event,
@@ -131,7 +137,27 @@ def _feedback_order(identity):
     return order
 
 
-PHOTO_PROMPT = "Отправьте несколько хороших фотографий человека."
+PHOTO_PROMPT = (
+    "Отправьте несколько чётких фотографий человека: лицо должно быть хорошо "
+    "видно, лучше с разных ракурсов. Когда закончите, нажмите «Фото загружены»."
+)
+
+PHOTO_REJECTED = (
+    "Не удалось принять фото. Поддерживаются JPEG, PNG и WebP до 10 МБ. "
+    "Отправьте другое фото."
+)
+
+# Consent gate (MAX Pilot): shown after the photos are complete, before the
+# order summary and the YooKassa link. The accepted text version is persisted
+# on the order (PILOT_CONSENT_VERSION) so checkout can fail closed without it.
+CONSENT_TEXT = (
+    "Перед оплатой подтвердите:\n"
+    "• у вас есть право использовать загруженные фотографии;\n"
+    "• фотографии будут обработаны для создания заказанных стикеров;\n"
+    "• вы принимаете условия сервиса и заказа.\n\n"
+    "Нажмите «Принимаю», чтобы перейти к оплате."
+)
+CONSENT_BUTTONS = [[{"text": "Принимаю", "payload": "consent:accept"}]]
 
 
 def _emotion_step(adapter, order):
@@ -205,7 +231,16 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
         adapter.confirm_emotions(identity=identity)
         _reply(client, event, text=PHOTO_PROMPT)
     elif payload == "photos_done":
-        order = adapter.complete_photos(identity)
+        # Validate photos/selection now (same errors as before) but stay in
+        # AWAITING_PHOTOS: checkout is reachable only through consent:accept.
+        adapter.photos_ready(identity)
+        _reply(client, event, text=CONSENT_TEXT, buttons=CONSENT_BUTTONS)
+    elif payload == "consent:accept":
+        order = adapter.accept_consent(identity=identity)
+        if order.status == Order.Status.AWAITING_PHOTOS:
+            order = adapter.complete_photos(identity)
+        # Repeated accept is idempotent: consent is stored once, the pending
+        # checkout session (if any) is reused by start_checkout.
         _reply(client, event, text=_summary_text(adapter.order_summary(order)))
         start_checkout(identity=identity, client=client, chat_id=event.chat_id)
     elif payload == "preview_approve":

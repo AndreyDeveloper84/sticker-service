@@ -1,6 +1,8 @@
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.core.models import ChannelIdentity, Order, Payment, Product, Style, User
+from apps.core.services.channel_order_flow import PILOT_CONSENT_VERSION
 from apps.max_bot.client_payment_link import render_button
 from apps.max_bot.payments import (
     CheckoutSession,
@@ -48,6 +50,8 @@ class MaxExternalPaymentTests(TestCase):
             product=product,
             style=style,
             status=Order.Status.READY_FOR_CHECKOUT,
+            consent_version=PILOT_CONSENT_VERSION,
+            consent_accepted_at=timezone.now(),
         )
         self.provider = FakeProvider()
         self.adapter = MaxExternalPaymentAdapter(provider=self.provider)

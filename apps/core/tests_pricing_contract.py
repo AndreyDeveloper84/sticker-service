@@ -18,8 +18,10 @@ from unittest import mock
 
 from django.core.management import call_command
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from apps.core.models import ChannelIdentity, Order, Payment, Product, Style, User
+from apps.core.services.channel_order_flow import PILOT_CONSENT_VERSION
 from apps.max_bot.payments import CheckoutSession, MaxExternalPaymentAdapter
 from apps.telegram_bot.adapter import TelegramAdapter
 from apps.telegram_bot.client import TelegramBotClient
@@ -118,6 +120,9 @@ class TelegramStarsCheckoutPricingTests(TestCase):
             product=product,
             style=self.style,
             status=Order.Status.READY_FOR_CHECKOUT,
+            # consent gate (MAX Pilot) is orthogonal to the pricing contract
+            consent_version=PILOT_CONSENT_VERSION,
+            consent_accepted_at=timezone.now(),
         )
 
     def test_pack_payment_amount_is_explicit_stars_in_xtr(self):
@@ -234,6 +239,9 @@ class MaxRubPricingTests(TestCase):
             product=product,
             style=self.style,
             status=Order.Status.READY_FOR_CHECKOUT,
+            # consent gate (MAX Pilot) is orthogonal to the pricing contract
+            consent_version=PILOT_CONSENT_VERSION,
+            consent_accepted_at=timezone.now(),
         )
 
     def test_max_uses_rub_price_minor_not_stars(self):
@@ -299,6 +307,9 @@ class ApprovedPilotPricingTests(TestCase):
             product=product,
             style=self.style,
             status=Order.Status.READY_FOR_CHECKOUT,
+            # consent gate (MAX Pilot) is orthogonal to the pricing contract
+            consent_version=PILOT_CONSENT_VERSION,
+            consent_accepted_at=timezone.now(),
         )
 
     def test_telegram_charges_approved_stars(self):
