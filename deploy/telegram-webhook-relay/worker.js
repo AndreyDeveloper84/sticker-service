@@ -7,13 +7,15 @@
 //
 // Hard rules (see deploy/telegram-webhook-relay/README.md):
 // - zero business logic, transport only;
-// - POST only, exact secret path only, body <= 1 MiB;
-// - request body forwarded byte-for-byte (stream tee, no transforms);
+// - POST only, exact secret path only;
+// - request body streams upstream untouched — the worker never reads,
+//   parses or transforms the Telegram payload;
 // - the existing webhook secret header (X-Telegram-Bot-Api-Secret-Token)
 //   is forwarded untouched and validated by Django as before;
 // - 2xx to Telegram ONLY when upstream answered 2xx (no fire-and-forget);
 // - upstream timeout/network error -> 502 so Telegram keeps retrying;
-// - no payload/text/token/secret logging: update_id, status, latency only.
+// - logs carry only event, upstream HTTP status and latency — no update_id,
+//   message, chat/user data, payload, headers or secrets.
 
 const UPSTREAM_URL = "https://stg.stickme.art/telegram/webhook/";
 const MAX_BODY_BYTES = 1024 * 1024;
@@ -36,23 +38,13 @@ export default {
       return new Response("not found", { status: 404 });
     }
 
+    // Defensive guard: rejects requests that declare an oversized
+    // Content-Length. Streamed bodies without Content-Length are forwarded
+    // as-is — Telegram webhooks are small JSON, and we deliberately do not
+    // buffer the body just to enforce a hard limit.
     const length = Number(request.headers.get("content-length") || "0");
     if (length > MAX_BODY_BYTES) {
       return new Response("payload too large", { status: 413 });
-    }
-
-    // Tee the body: one copy streams upstream untouched, the other is parsed
-    // only to extract update_id for safe logging.
-    const [upstreamBody, logBody] = request.body ? request.body.tee() : [null, null];
-    let updateId = "";
-    if (logBody) {
-      new Response(logBody).text().then((text) => {
-        try {
-          updateId = String(JSON.parse(text).update_id ?? "");
-        } catch {
-          updateId = "";
-        }
-      });
     }
 
     const headers = new Headers(request.headers);
@@ -65,20 +57,20 @@ export default {
       upstream = await fetch(UPSTREAM_URL, {
         method: "POST",
         headers,
-        body: upstreamBody,
+        body: request.body,
         signal: AbortSignal.timeout(UPSTREAM_TIMEOUT_MS),
       });
     } catch {
       // Timeout / network error: update not delivered -> non-2xx so Telegram
       // retries with its own backoff.
       console.log(
-        JSON.stringify({ event: "upstream_error", status: 502, ms: Date.now() - started, update_id: updateId })
+        JSON.stringify({ event: "upstream_error", status: 502, ms: Date.now() - started })
       );
       return new Response("upstream unavailable", { status: 502 });
     }
 
     console.log(
-      JSON.stringify({ event: "relay", status: upstream.status, ms: Date.now() - started, update_id: updateId })
+      JSON.stringify({ event: "relay", status: upstream.status, ms: Date.now() - started })
     );
     return new Response(upstream.body, {
       status: upstream.status,

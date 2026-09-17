@@ -13,15 +13,20 @@ bot replies: Django → ProxyPool → Telegram API (unchanged)
 
 ## Contract
 
-- POST only; exact path `/tgwh/<RELAY_PATH_SECRET>/` only; body ≤ 1 MiB.
-- Body forwarded byte-for-byte (stream tee; no transforms).
+- POST only; exact path `/tgwh/<RELAY_PATH_SECRET>/` only.
+- Requests declaring `Content-Length` above 1 MiB are rejected early
+  (defensive guard; streamed bodies without Content-Length are forwarded
+  as-is — the body is never buffered just to enforce a hard limit).
+- Body streams upstream untouched: the worker never reads, parses or
+  transforms the Telegram payload.
 - `X-Telegram-Bot-Api-Secret-Token` forwarded untouched; Django validates it
   exactly as before (`apps/telegram_bot/views.py`). Backend auth model is
   unchanged — the path secret only hides/protects the relay endpoint.
 - 2xx to Telegram only when upstream answered 2xx. Upstream timeout (10 s),
   network error → 502 → Telegram retries with its own backoff; updates are
   not lost or silently dropped.
-- No payload/text/token/secret in logs — only `update_id`, status, latency.
+- Logs carry only event, upstream HTTP status and latency — no update_id,
+  message text, chat/user data, payload, headers or secrets.
 - Not a general proxy: fixed upstream, fixed path, fixed method.
 - Zero changes in sticker-service code.
 
