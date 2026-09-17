@@ -4,7 +4,6 @@ import base64
 import logging
 import os
 from dataclasses import dataclass, field
-from io import BytesIO
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
@@ -101,6 +100,28 @@ def _optional_choice(env_name: str, value: str | None, allowed: frozenset) -> st
     return raw
 
 
+# Multipart content-type is taken from the explicit tuple, never inferred
+# from the filename: MAX photos arrive without an extension, and the SDK
+# would otherwise send application/octet-stream -> HTTP 400 "unsupported
+# mimetype" (rejected before generation, no charge, but the job fails).
+REFERENCE_EXTENSIONS = {"image/jpeg": ".jpg", "image/png": ".png", "image/webp": ".webp"}
+REFERENCE_DEFAULT_MIME = "image/jpeg"
+
+
+def reference_upload(reference: ReferenceImage) -> tuple[str, bytes, str]:
+    """SDK file tuple (filename, content, mime_type) for one reference photo.
+
+    mime_type comes from the stored ReferenceImage (falls back to JPEG);
+    the filename keeps its own extension, or gets one matching the mime
+    type when it has none, so the name and the declared type never disagree.
+    """
+    mime_type = (reference.mime_type or "").strip().lower() or REFERENCE_DEFAULT_MIME
+    filename = (reference.filename or "").strip() or "reference"
+    if "." not in filename.rsplit("/", 1)[-1]:
+        filename += REFERENCE_EXTENSIONS.get(mime_type, "")
+    return filename, reference.content, mime_type
+
+
 class OpenAIImageProvider:
     name = "openai"
 
@@ -190,11 +211,7 @@ class OpenAIImageProvider:
         if not request.reference_images:
             raise ValueError("At least one reference image is required")
 
-        images = []
-        for reference in request.reference_images:
-            buffer = BytesIO(reference.content)
-            buffer.name = reference.filename or "reference.png"
-            images.append(buffer)
+        images = [reference_upload(reference) for reference in request.reference_images]
 
         if self._pool is None:
             return self._generate(self.client, images, request.prompt)

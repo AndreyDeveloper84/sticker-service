@@ -231,3 +231,67 @@ class OpenAIProxyPoolFailoverTests(SimpleTestCase):
         # proxy_pool=None resolves the (disabled-by-default) process pool
         result = provider.generate_preview(self._request())
         self.assertEqual(result.content, b"img")
+
+
+class OpenAIReferenceUploadTests(SimpleTestCase):
+    """Hotfix: reference photos must carry their stored mime type explicitly.
+
+    MAX photos have no filename extension; the SDK infers the multipart
+    content-type from the name and sent application/octet-stream -> 400
+    "unsupported mimetype" (Order 8, GenerationJob 3). The tuple form
+    (filename, content, mime_type) makes the declared type authoritative.
+    """
+
+    def _edit_call(self, *references):
+        class Images:
+            def __init__(self):
+                self.kwargs = None
+
+            def edit(self, **kwargs):
+                self.kwargs = kwargs
+                encoded = base64.b64encode(b"img").decode("ascii")
+                return SimpleNamespace(data=[SimpleNamespace(b64_json=encoded)])
+
+        images = Images()
+        provider = OpenAIImageProvider(
+            client=SimpleNamespace(images=images), model="test-model", proxy_pool=None
+        )
+        provider.generate_preview(ImageGenerationRequest(prompt="p", reference_images=list(references)))
+        return images.kwargs["image"]
+
+    def test_filename_without_extension_gets_jpeg_extension_and_mime(self):
+        parts = self._edit_call(ReferenceImage("photo-7", "image/jpeg", b"jpg-bytes"))
+        self.assertEqual(parts, [("photo-7.jpg", b"jpg-bytes", "image/jpeg")])
+
+    def test_filename_with_extension_is_preserved(self):
+        parts = self._edit_call(
+            ReferenceImage("selfie.JPG", "image/jpeg", b"a"),
+            ReferenceImage("mask.png", "image/png", b"b"),
+            ReferenceImage("dir.name/no-ext", "image/webp", b"c"),
+        )
+        self.assertEqual(
+            parts,
+            [
+                ("selfie.JPG", b"a", "image/jpeg"),
+                ("mask.png", b"b", "image/png"),
+                ("dir.name/no-ext.webp", b"c", "image/webp"),
+            ],
+        )
+
+    def test_missing_mime_and_name_fall_back_to_jpeg(self):
+        parts = self._edit_call(ReferenceImage("", "", b"x"))
+        self.assertEqual(parts, [("reference.jpg", b"x", "image/jpeg")])
+
+    def test_mime_is_normalised_and_unknown_mime_keeps_bare_name(self):
+        parts = self._edit_call(ReferenceImage("photo", " IMAGE/PNG ", b"x"))
+        self.assertEqual(parts, [("photo.png", b"x", "image/png")])
+        parts = self._edit_call(ReferenceImage("scan", "image/heic", b"y"))
+        self.assertEqual(parts, [("scan", b"y", "image/heic")])
+
+    def test_tuple_is_accepted_by_sdk_multipart_encoder(self):
+        from openai._files import to_httpx_files
+
+        from apps.core.image_providers import reference_upload
+
+        part = reference_upload(ReferenceImage("photo-7", "image/jpeg", b"jpg-bytes"))
+        self.assertEqual(to_httpx_files({"image": part})["image"], part)
