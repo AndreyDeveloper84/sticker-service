@@ -6,6 +6,7 @@ class CoreConfig(AppConfig):
     name = "apps.core"
 
     def ready(self):
+        from .final_delivery_console import install_final_delivery_console
         from .preview_delivery_console import install_preview_delivery_console
         from .production_console import install_production_console
         from .qc_console import install_qc_console
@@ -13,3 +14,4 @@ class CoreConfig(AppConfig):
         install_production_console()
         install_preview_delivery_console()
         install_qc_console()
+        install_final_delivery_console()

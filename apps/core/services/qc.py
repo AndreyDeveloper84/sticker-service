@@ -317,6 +317,13 @@ class QcService:
 
     # --- Delivery gate (consumed by DRF-2053) ------------------------------
 
+    # Statuses in which sending final assets is legal at all: the QC PASS
+    # exit and the delivery run DRF-2053 enters from it (resume re-checks
+    # the gate before every send, so a set changed mid-delivery is caught).
+    DELIVERY_STATUSES = frozenset(
+        {Order.Status.READY_FOR_DELIVERY, Order.Status.DELIVERY_IN_PROGRESS}
+    )
+
     def assert_delivery_allowed(self, *, order: Order) -> QcReport:
         """Raise QcError unless QC PASS covers the current final asset set.
 
@@ -324,7 +331,7 @@ class QcService:
         were evaluated: a slot regenerated after PASS keeps its slot_key
         but gets a new current asset, which must go through QC again.
         """
-        if order.status != Order.Status.READY_FOR_DELIVERY:
+        if order.status not in self.DELIVERY_STATUSES:
             raise QcError(
                 f"Delivery is forbidden before QC PASS (order #{order.pk}: {order.status})"
             )

@@ -286,12 +286,30 @@ class QcDomainContractTests(QcTestCase):
             Order.Status.PREVIEW_REVIEW,
             Order.Status.PACK_GENERATING,
             Order.Status.QUALITY_CONTROL,
+            Order.Status.DELIVERED,
             Order.Status.CANCELLED,
             Order.Status.FAILED,
         ):
             order = self.make_order(SINGLE_CONFIG, status=status)
             with self.assertRaises(QcError):
                 service.assert_delivery_allowed(order=order)
+
+    def test_gate_covers_delivery_in_progress_for_resume(self):
+        # DRF-2053 re-checks the gate on resume; the delivery-owned state is
+        # accepted, but only while the PASS still covers the current set.
+        storage = LocalMediaStorage()
+        order = self.make_order(SINGLE_CONFIG, status=Order.Status.QUALITY_CONTROL)
+        self.add_final_asset(storage, order, 1, "wow")
+        service = QcService(storage=storage)
+        report = service.start_qc(order=order)
+        service.finalize_report(report=report, checklist=all_pass_checklist())
+        order.refresh_from_db()
+        order.status = Order.Status.DELIVERY_IN_PROGRESS
+        order.save(update_fields=["status"])
+        self.assertEqual(service.assert_delivery_allowed(order=order).pk, report.pk)
+        self.add_final_asset(storage, order, 2, "wow")
+        with self.assertRaises(QcError):
+            service.assert_delivery_allowed(order=order)
 
     def test_ready_for_delivery_without_passed_report_is_rejected(self):
         order = self.make_order(SINGLE_CONFIG, status=Order.Status.READY_FOR_DELIVERY)
@@ -312,9 +330,10 @@ class QcOrderStateTests(TestCase):
                 Order.Status.FAILED,
             },
         )
+        # DRF-2053 adds the delivery entry to the QC exit state.
         self.assertEqual(
             OrderStateService.allowed_targets(Order.Status.READY_FOR_DELIVERY),
-            {Order.Status.FAILED},
+            {Order.Status.DELIVERY_IN_PROGRESS, Order.Status.FAILED},
         )
 
     def test_transition_keys_are_status_members_without_duplicates(self):

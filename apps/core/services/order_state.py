@@ -73,9 +73,19 @@ class OrderStateService:
             Order.Status.FAILED,
         },
         Order.Status.READY_FOR_DELIVERY: {
-            # DELIVERY_IN_PROGRESS / DELIVERED are added by DRF-2053.
+            # QC PASS exit (DRF-2052); delivery entry is DRF-2053.
+            Order.Status.DELIVERY_IN_PROGRESS,
             Order.Status.FAILED,
         },
+        # --- Final delivery (DRF-2053 ownership) ---
+        Order.Status.DELIVERY_IN_PROGRESS: {
+            # Recovery after a partial/failed run is an operator "resume"
+            # from DELIVERY_IN_PROGRESS itself (already-sent slots stay
+            # sent); there is no way back to READY_FOR_DELIVERY.
+            Order.Status.DELIVERED,
+            Order.Status.FAILED,
+        },
+        Order.Status.DELIVERED: set(),
         Order.Status.CANCELLED: set(),
         Order.Status.FAILED: set(),
     }
