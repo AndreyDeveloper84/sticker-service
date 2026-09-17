@@ -558,6 +558,13 @@ class QcRetryAndGateTests(QcTestCase):
             with self.assertRaises(QcError):
                 service.start_qc(order=order)
             OrderStateService.transition(order=order, to_status=Order.Status.QUALITY_CONTROL)
+            # DRF-2079: the set the FAILED report sent to retry is unchanged —
+            # a new attempt on it can only fail again and is refused.
+            with self.assertRaisesMessage(QcError, "Nothing was regenerated"):
+                service.start_qc(order=order)
+            self.assertEqual(QcReport.objects.filter(order=order).count(), 1)
+            # A regenerated slot (new current asset) reopens QC as attempt 2.
+            self.add_final_asset(storage, order, attempt=2, slot_key="wow")
             second = service.start_qc(order=order)
             self.assertEqual(second.attempt, 2)
 

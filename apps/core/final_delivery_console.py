@@ -4,8 +4,9 @@ from django.contrib import admin, messages
 from django.http import Http404
 from django.shortcuts import redirect
 from django.urls import path, reverse
-from django.utils.html import format_html, format_html_join
+from django.utils.html import format_html
 
+from apps.core.console_html import buttons_html, lines_html
 from apps.core.models import Order
 from apps.core.qc_console import QcOrderAdmin
 from apps.core.services.final_delivery import (
@@ -116,9 +117,9 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
             )
         if actions:
             lines.append(
-                format_html_join(" &nbsp; ", '<a class="button" href="{}">{}</a>', actions)
+                buttons_html(actions)
             )
-        return format_html_join("<br>", "{}", ((line,) for line in lines))
+        return lines_html(lines)
 
     def get_urls(self):
         custom = [

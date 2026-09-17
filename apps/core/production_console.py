@@ -10,7 +10,9 @@ from django.utils.html import format_html, format_html_join
 
 from .image_providers import get_image_provider
 from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
+from .console_html import LINE_BREAK, buttons_html, lines_html
 from .services.full_production import FullProductionError, FullProductionService
+from .services.qc import QcService
 from .services.generation import GenerationError, GenerationService
 from .services.order_state import InvalidOrderTransition, OrderStateService
 from .storage import LocalMediaStorage
@@ -158,11 +160,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             )
         if not links:
             return "Нет доступных действий для текущего статуса."
-        return format_html_join(
-            " &nbsp; ",
-            '<a class="button" href="{}">{}</a>',
-            links,
-        )
+        return buttons_html(links)
 
     @admin.display(description="Revision (запрос клиента)")
     def revision_request(self, order):
@@ -195,7 +193,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         if not jobs:
             return "Generation jobs пока нет."
         return format_html_join(
-            "<br>",
+            LINE_BREAK,
             "<span>attempt {} · {} · {} {}</span>",
             (
                 (
@@ -218,11 +216,20 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             return "—"
         if not any(slot.attempts or slot.asset_id for slot in plan):
             return "Full production пока не запускалась."
+        pending_retry = set(self.pending_retry_slots(order))
         rows = []
         for slot in plan:
             action = ""
             if order.status == Order.Status.PACK_GENERATING:
-                if slot.status == "failed" and slot.retryable:
+                if slot.slot_key in pending_retry:
+                    # QC FAIL retry (DRF-2052): the slot is succeeded, its
+                    # current asset was rejected — only Regenerate helps.
+                    action = format_html(
+                        ' · QC RETRY pending · <a class="button" href="{}">Regenerate</a>',
+                        reverse("admin:core_order_regenerate_slots", args=[order.pk])
+                        + f"?slots={slot.slot_key}",
+                    )
+                elif slot.status == "failed" and slot.retryable:
                     action = format_html(
                         ' · <a class="button" href="{}">Regenerate</a>',
                         reverse("admin:core_order_regenerate_slots", args=[order.pk])
@@ -247,7 +254,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     action,
                 )
             )
-        return format_html_join("<br>", "{}", ((row,) for row in rows))
+        return lines_html(rows)
 
     @admin.display(description="Preview assets")
     def preview_assets(self, order):
@@ -283,7 +290,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     approve_link,
                 )
             )
-        return format_html_join("<br>", "{}", ((row,) for row in rows))
+        return lines_html(rows)
 
     def get_queryset(self, request):
         return (
@@ -352,6 +359,26 @@ class ProductionOrderAdmin(admin.ModelAdmin):
 
     def get_full_production_service(self):
         return FullProductionService(provider=get_image_provider())
+
+    def pending_retry_slots(self, order):
+        """slot_keys a FAILED QC report sent to retry whose current asset is
+        still the rejected one (DRF-2079)."""
+        if not order or not order.pk or order.status != Order.Status.PACK_GENERATING:
+            return []
+        return QcService().pending_retry_slots(order)
+
+    def _regenerate_pending_retry(self, request, *, order, service, pending, instead_of):
+        """QC-retry slots are succeeded slots: start()/retry_failed() would keep
+        their rejected asset and re-enter QC with the same set. Route them to
+        regenerate_slots() (DRF-2051 semantics untouched)."""
+        plan = service.regenerate_slots(order=order, slot_keys=pending)
+        self.message_user(
+            request,
+            f"QC retry ожидает регенерации slots {', '.join(pending)}: выполнен "
+            f"Regenerate вместо «{instead_of}». {self._plan_message(plan)}",
+            level=messages.WARNING,
+        )
+        return plan
 
     def _confirmation(self, request, *, order, title, action_url, detail, **extra):
         return TemplateResponse(
@@ -575,12 +602,20 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 ),
             )
         service = self.get_full_production_service()
+        pending = self.pending_retry_slots(order)
         try:
-            plan = service.start(order=order)
+            if pending:
+                plan = self._regenerate_pending_retry(
+                    request, order=order, service=service, pending=pending,
+                    instead_of="Start / Resume Full Production",
+                )
+            else:
+                plan = service.start(order=order)
         except (InvalidOrderTransition, FullProductionError) as exc:
             self.message_user(request, str(exc), level=messages.ERROR)
         else:
-            self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
+            if not pending:
+                self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
             # Production is committed; the customer notice is best-effort,
             # at most once per order, and never affects the outcome above.
             order.refresh_from_db()
@@ -612,12 +647,18 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 ),
             )
         service = self.get_full_production_service()
+        pending = self.pending_retry_slots(order)
         try:
-            plan = service.retry_failed(order=order)
+            if pending:
+                self._regenerate_pending_retry(
+                    request, order=order, service=service, pending=pending,
+                    instead_of="Retry Failed Slots",
+                )
+            else:
+                plan = service.retry_failed(order=order)
+                self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
         except (InvalidOrderTransition, FullProductionError) as exc:
             self.message_user(request, str(exc), level=messages.ERROR)
-        else:
-            self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
     def regenerate_slots_view(self, request, order_id):
@@ -628,6 +669,9 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         slot_keys_value = request.POST.get(
             "slot_keys", request.GET.get("slots", "")
         )
+        if request.method != "POST" and not slot_keys_value.strip():
+            # Prefill from the latest FAILED QC report's pending retry_slots.
+            slot_keys_value = ", ".join(self.pending_retry_slots(order))
         if request.method != "POST":
             return self._confirmation(
                 request,

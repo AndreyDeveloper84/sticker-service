@@ -5,8 +5,9 @@ from django.http import Http404
 from django.shortcuts import redirect
 from django.urls import path, reverse
 from django.utils import timezone
-from django.utils.html import format_html, format_html_join
+from django.utils.html import format_html
 
+from apps.core.console_html import lines_html
 from apps.core.models import GeneratedAsset, GenerationJob, Order
 from apps.core.production_console import ProductionOrderAdmin
 from apps.core.services.preview_delivery import PreviewDeliveryError, PreviewDeliveryService
@@ -62,7 +63,7 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
                     action,
                 )
             )
-        return format_html_join("<br>", "{}", ((row,) for row in rows))
+        return lines_html(rows)
 
     def get_urls(self):
         custom = [
