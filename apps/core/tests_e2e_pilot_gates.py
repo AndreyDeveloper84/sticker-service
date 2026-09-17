@@ -29,6 +29,7 @@ from apps.core.models import (
     QcReport,
     Revision,
 )
+from apps.core.services.final_delivery import FinalDeliveryError
 from apps.core.services.full_production import FullProductionError, FullProductionService
 from apps.core.services.generation import GenerationError, GenerationService
 from apps.core.services.preview_delivery import PreviewDeliveryError, PreviewDeliveryService
@@ -178,14 +179,11 @@ class PilotNegativeGateTests(PilotE2ECase):
             QcService(storage=self.storage).assert_delivery_allowed(order=order)
         self._console("core_order_qc_start", order.pk)
         self.assertFalse(QcReport.objects.filter(order=order).exists())
-        if FinalDeliveryService is not None:
-            from apps.core.services.final_delivery import FinalDeliveryError
-
-            with self.assertRaises(FinalDeliveryError):
-                FinalDeliveryService(
-                    adapter=FakeFinalDeliveryAdapter(driver.channel), storage=self.storage
-                ).deliver(order=order, max_items=None)
-            self.assertFalse(order.final_deliveries.exists())
+        with self.assertRaises(FinalDeliveryError):
+            FinalDeliveryService(
+                adapter=FakeFinalDeliveryAdapter(driver.channel), storage=self.storage
+            ).deliver(order=order, max_items=None)
+        self.assertFalse(order.final_deliveries.exists())
 
     def test_G6_qc_fails_non_sticker_output_and_keeps_delivery_closed(self):
         """Known live risk (DRF-2052 comment): FULL output that is not

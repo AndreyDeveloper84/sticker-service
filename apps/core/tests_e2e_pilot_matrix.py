@@ -14,7 +14,7 @@ catalog (`seed_live_test`):
     → preview (operator) → internal approve + deliver (console)
     → customer approve | 1 revision → approve → full generation (console,
     one slot per request) → QC (console) → delivery gate → final delivery
-    (DRF-2053, executed only when PR #35 is on the branch).
+    (DRF-2053) → DELIVERED.
 
 Engineering vs live: only the external boundaries are faked — Telegram Bot
 API client, MAX Bot API client, YooKassa provider, OpenAI image provider.
@@ -60,10 +60,7 @@ from apps.core.tests_qc import make_image
 from apps.max_bot.payments import CheckoutSession, PaymentConfirmation
 from apps.telegram_bot.payments import TelegramStarsPaymentAdapter
 
-try:  # DRF-2053 (PR #35) — final delivery lands after this module.
-    from apps.core.services.final_delivery import FinalDeliveryError, FinalDeliveryService
-except ImportError:  # pragma: no cover - depends on merge order
-    FinalDeliveryError = FinalDeliveryService = None
+from apps.core.services.final_delivery import FinalDeliveryError, FinalDeliveryService
 
 try:  # DRF-2055 (PR #34) — metrics snapshot consumes the same orders.
     from apps.core.services.pilot_metrics import PilotMetricsService
@@ -540,9 +537,7 @@ class PilotE2ECase(TestCase):
         return report
 
     def final_delivery(self, driver, order):
-        """DRF-2053 stage; runs only once PR #35 is on the branch."""
-        if FinalDeliveryService is None:
-            return None
+        """DRF-2053 stage: every cell must end DELIVERED, never silently skipped."""
         adapter = FakeFinalDeliveryAdapter(driver.channel)
         plan = FinalDeliveryService(adapter=adapter, storage=self.storage).deliver(order=order, max_items=None)
         self.assertTrue(plan.complete)
