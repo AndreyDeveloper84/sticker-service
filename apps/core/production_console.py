@@ -1,3 +1,5 @@
+import os
+
 from django.contrib import admin, messages
 from django.http import FileResponse, Http404
 from django.shortcuts import redirect
@@ -7,11 +9,13 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
 from .image_providers import get_image_provider
-from .models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
+from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
 from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
 from .services.order_state import InvalidOrderTransition, OrderStateService
 from .storage import LocalMediaStorage
+from apps.max_bot.client import MaxBotClient
+from apps.max_bot.production_notice import notify_customer_production_started
 
 
 class ProductionOrderPhotoInline(admin.TabularInline):
@@ -577,7 +581,19 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             self.message_user(request, str(exc), level=messages.ERROR)
         else:
             self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
+            # Production is committed; the customer notice is best-effort,
+            # at most once per order, and never affects the outcome above.
+            order.refresh_from_db()
+            self.notify_production_started(order)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
+
+    def notify_production_started(self, order):
+        """MAX-only "in production" notice (DRF-2056 gap 4); other channels no-op."""
+        if order.channel_identity.channel != ChannelIdentity.Channel.MAX:
+            return False
+        return notify_customer_production_started(
+            order=order, client=MaxBotClient(os.getenv("MAX_BOT_TOKEN", ""))
+        )
 
     def retry_failed_production_view(self, request, order_id):
         order = self.get_object(request, str(order_id))
