@@ -138,6 +138,45 @@ class QcService:
     def current_asset_ids(order: Order) -> list[int]:
         return [asset.pk for asset in QcService.current_final_assets(order)]
 
+    # --- QC retry bookkeeping (DRF-2079) ----------------------------------
+
+    @staticmethod
+    def latest_report(order: Order):
+        return QcReport.objects.filter(order=order).order_by("-attempt").first()
+
+    def pending_retry_slots(self, order: Order) -> list[str]:
+        """slot_keys the operator sent to retry that still show the SAME
+        current asset the FAILED report evaluated — i.e. nothing has been
+        regenerated for them yet. Empty once a slot gets a new current asset
+        or when the latest report is not a FAILED one with retry_slots."""
+        report = self.latest_report(order)
+        if report is None or report.status != QcReport.Status.FAILED:
+            return []
+        current = {str(asset.slot_key): asset.pk for asset in self.current_final_assets(order)}
+        pending = []
+        for item in report.retry_slots or []:
+            slot_key = str(item.get("slot_key") or "")
+            if slot_key and current.get(slot_key) == item.get("asset_id"):
+                pending.append(slot_key)
+        return pending
+
+    def assert_set_changed_since_fail(self, order: Order) -> None:
+        """Refuse a new QC attempt on exactly the set the last FAILED report
+        sent to retry: a report on unchanged assets can only fail again
+        (live evidence DRF-2079: 3 reports on one asset, no new FULL job)."""
+        report = self.latest_report(order)
+        if (
+            report is not None
+            and report.status == QcReport.Status.FAILED
+            and (report.retry_slots or [])
+            and self.current_asset_ids(order) == list(report.asset_ids or [])
+        ):
+            slots = ", ".join(str(item.get("slot_key")) for item in report.retry_slots)
+            raise QcError(
+                f"Nothing was regenerated since QC attempt {report.attempt} FAIL; "
+                f"regenerate slots {slots} before opening a new report"
+            )
+
     # --- Automated objective checks --------------------------------------
 
     def run_automated_checks(self, *, order: Order) -> dict:
@@ -320,6 +359,7 @@ class QcService:
         )
         if existing:
             return existing
+        self.assert_set_changed_since_fail(locked)
         assets = self.current_final_assets(locked)
         if normalization_enabled():
             # Same transaction as the report: a normalization failure raises

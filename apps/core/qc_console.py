@@ -3,8 +3,9 @@ from django.http import Http404
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
 from django.urls import path, reverse
-from django.utils.html import format_html, format_html_join
+from django.utils.html import format_html
 
+from apps.core.console_html import buttons_html, lines_html
 from apps.core.models import Order, QcReport
 from apps.core.preview_delivery_console import PreviewDeliveryOrderAdmin
 from apps.core.services.order_state import InvalidOrderTransition
@@ -125,9 +126,19 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
                 )
             )
         if actions:
+            lines.append(buttons_html(actions))
+        pending = (
+            service.pending_retry_slots(order)
+            if order.status == Order.Status.PACK_GENERATING
+            else []
+        )
+        if pending:
             lines.append(
-                format_html_join(
-                    " &nbsp; ", '<a class="button" href="{}">{}</a>', actions
+                format_html(
+                    'QC retry ожидает регенерации slots: {} · <a class="button" href="{}">Regenerate</a>',
+                    ", ".join(pending),
+                    reverse("admin:core_order_regenerate_slots", args=[order.pk])
+                    + "?slots=" + ",".join(pending),
                 )
             )
 
@@ -137,7 +148,7 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
             lines.append(format_html("DELIVERY: заблокирован ({})", exc))
         else:
             lines.append("DELIVERY: разрешён (QC PASS)")
-        return format_html_join("<br>", "{}", ((line,) for line in lines))
+        return lines_html(lines)
 
     def get_urls(self):
         custom = [
