@@ -4,8 +4,12 @@ Product.config["price_minor"] + "currency" is the RUB price (MAX/YooKassa).
 Product.config["price_stars"] is the Telegram Stars (XTR) price.
 The two are independent: no conversion, no fallback in either direction.
 
-XTR values here are arbitrary test fixtures deliberately unequal to the RUB
-amounts; they are not commercial prices.
+Owner-approved pilot prices (DRF-2057):
+  pack   9 stickers — 500 RUB / 460 XTR
+  single 1 sticker  — 100 RUB / 100 XTR
+
+PACK_TEST_STARS/SINGLE_TEST_STARS below are arbitrary override fixtures used to
+prove independence from the RUB price; they are not commercial prices.
 """
 
 import json
@@ -22,6 +26,11 @@ from apps.telegram_bot.client import TelegramBotClient
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter, configured_stars_price
 from apps.telegram_bot.views import _summary_stars_price, _summary_text
 
+# Owner-approved pilot contract.
+PACK_RUB_MINOR, PACK_STARS = 50000, 460
+SINGLE_RUB_MINOR, SINGLE_STARS = 10000, 100
+
+# Independence fixtures: arbitrary XTR values, unrelated to any RUB amount.
 PACK_TEST_STARS = 777
 SINGLE_TEST_STARS = 333
 
@@ -259,13 +268,65 @@ class PilotSeedPricingTests(TestCase):
 
         self.assertEqual(first, second)
         self.assertEqual(Product.objects.count(), 2)
-        expected = {"sticker-pack-9": (9, 9, 50000), "single-sticker": (1, 1, 10000)}
-        for code, (quantity, emotion_count, rub_minor) in expected.items():
+        expected = {
+            "sticker-pack-9": (9, 9, PACK_RUB_MINOR, PACK_STARS),
+            "single-sticker": (1, 1, SINGLE_RUB_MINOR, SINGLE_STARS),
+        }
+        for code, (quantity, emotion_count, rub_minor, stars) in expected.items():
             with self.subTest(code=code):
                 config = second[code]
                 self.assertEqual((config["quantity"], config["emotion_count"]), (quantity, emotion_count))
                 self.assertEqual(len(config["emotions"]), 9)
                 self.assertEqual((config["price_minor"], config["currency"]), (rub_minor, "RUB"))
                 # price_stars is its own explicit key and passes the strict XTR contract.
-                self.assertIn("price_stars", config)
+                self.assertEqual(config["price_stars"], stars)
                 self.assertEqual(configured_stars_price(Product.objects.get(code=code)), config["price_stars"])
+
+
+class ApprovedPilotPricingTests(TestCase):
+    """The approved pilot prices as they are actually charged per channel."""
+
+    def setUp(self):
+        call_command("seed_live_test", stdout=StringIO())
+        self.pack = Product.objects.get(code="sticker-pack-9")
+        self.single = Product.objects.get(code="single-sticker")
+        self.style = Style.objects.get(code="comic")
+
+    def _order(self, product, identity):
+        return Order.objects.create(
+            user=identity.user,
+            channel_identity=identity,
+            product=product,
+            style=self.style,
+            status=Order.Status.READY_FOR_CHECKOUT,
+        )
+
+    def test_telegram_charges_approved_stars(self):
+        for product, stars in [(self.pack, PACK_STARS), (self.single, SINGLE_STARS)]:
+            with self.subTest(product=product.code):
+                Payment.objects.all().delete()
+                Order.objects.all().delete()
+                identity = TelegramAdapter().get_or_create_identity({**TELEGRAM_USER, "id": f"tg-{product.code}"})
+                self._order(product, identity)
+                payment = TelegramStarsPaymentAdapter().payment_for_identity(identity)
+                self.assertEqual((payment.amount_minor, payment.currency), (stars, "XTR"))
+
+    def test_max_charges_approved_rub(self):
+        for product, rub_minor in [(self.pack, PACK_RUB_MINOR), (self.single, SINGLE_RUB_MINOR)]:
+            with self.subTest(product=product.code):
+                Payment.objects.all().delete()
+                Order.objects.all().delete()
+                identity = ChannelIdentity.objects.create(
+                    user=User.objects.create(),
+                    channel=ChannelIdentity.Channel.MAX,
+                    external_user_id=f"max-{product.code}",
+                )
+                self._order(product, identity)
+                payment, _ = MaxExternalPaymentAdapter(provider=FakeMaxProvider()).create_checkout(identity=identity)
+                self.assertEqual((payment.amount_minor, payment.currency), (rub_minor, "RUB"))
+
+    def test_pack_stars_price_is_not_the_rub_amount(self):
+        # 500 RUB is charged as 460 XTR: no conversion, no 1:1 assumption.
+        self.assertNotEqual(PACK_STARS, PACK_RUB_MINOR // 100)
+        self.assertEqual(self.pack.config["price_stars"], PACK_STARS)
+        self.assertEqual(self.pack.config["price_minor"], PACK_RUB_MINOR)
