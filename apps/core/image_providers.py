@@ -42,12 +42,16 @@ class ImageProvider(Protocol):
 
 
 def _usage_metadata(usage) -> dict:
-    """Token usage from an OpenAI images response, as plain ints (DRF-2055 cost evidence)."""
+    """Token usage from an images response, as plain ints (DRF-2055 cost evidence).
+
+    Accepts the OpenAI SDK usage object (attributes) or a decoded JSON dict
+    (OpenAI-compatible providers such as Nodule, DRF-2072).
+    """
     if usage is None:
         return {}
     result = {}
     for key in ("input_tokens", "output_tokens", "total_tokens"):
-        value = getattr(usage, key, None)
+        value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
         if isinstance(value, int) and not isinstance(value, bool):
             result[key] = value
     return result
@@ -191,3 +195,187 @@ class OpenAIImageProvider:
             mime_type="image/png",
             metadata=metadata,
         )
+
+
+# ---------------------------------------------------------------------------
+# Nodule — EXPERIMENTAL TEXT-TO-IMAGE provider (DRF-2072). NOT reference-
+# equivalent: Nodule exposes only /v1/images/generations (prompt -> image);
+# /v1/images/edits does not exist, so identity-preserving preview / revision /
+# FULL generation from customer photos is impossible through it.
+# ---------------------------------------------------------------------------
+
+NODULE_DEFAULT_MODEL = "gpt-image-2"
+NODULE_GENERATIONS_PATH = "/v1/images/generations"
+
+
+class ProviderConfigurationError(RuntimeError):
+    """Provider selection / credentials are missing or unknown: fail closed."""
+
+
+class ProviderCapabilityError(RuntimeError):
+    """The selected provider cannot perform the requested operation: fail closed.
+
+    Raised BEFORE any HTTP call, so nothing is charged.
+    """
+
+
+class NoduleImageProvider:
+    """Text-to-image over Nodule's OpenAI-compatible generations endpoint.
+
+    Contract (Agent B discovery, DRF-2044): ``POST {base_url}/v1/images/generations``
+    with ``Authorization: Bearer <NODULE_IMAGE_API_KEY>`` and JSON body
+    ``{"model", "prompt", "size", "n": 1}``; the answer carries
+    ``data[0].b64_json`` (a ``url`` item is also accepted and fetched).
+
+    Credentials come from NODULE_IMAGE_API_KEY / NODULE_IMAGE_BASE_URL only —
+    never from OPENAI_API_KEY. Any request that carries reference images is
+    refused with ProviderCapabilityError before a request is made; there is
+    no fallback to another provider and no retry (one POST per call, so an
+    ambiguous failure can never turn into a double charge).
+    """
+
+    name = "nodule"
+    supports_text_to_image = True
+    supports_reference_generation = False
+
+    def __init__(
+        self,
+        *,
+        api_key: str | None = None,
+        base_url: str | None = None,
+        model: str | None = None,
+        size: str = "1024x1024",
+        timeout: float = 120.0,
+        transport=None,
+    ):
+        self.api_key = api_key if api_key is not None else os.getenv("NODULE_IMAGE_API_KEY", "")
+        self.base_url = (
+            base_url if base_url is not None else os.getenv("NODULE_IMAGE_BASE_URL", "")
+        ).rstrip("/")
+        self.model = model or os.getenv("NODULE_IMAGE_MODEL", NODULE_DEFAULT_MODEL)
+        self.size = size
+        self.timeout = timeout
+        # httpx transport injectable for tests (httpx.MockTransport); the real
+        # client is built lazily so constructing the provider never connects.
+        self._transport = transport
+        if not self.api_key:
+            raise ProviderConfigurationError(
+                "NODULE_IMAGE_API_KEY is not set (the Nodule key is never read from OPENAI_API_KEY)"
+            )
+        if not self.base_url:
+            raise ProviderConfigurationError("NODULE_IMAGE_BASE_URL is not set")
+
+    # ------------------------------------------------------------ http
+
+    @property
+    def generations_url(self) -> str:
+        return f"{self.base_url}{NODULE_GENERATIONS_PATH}"
+
+    def _client(self):
+        import httpx
+
+        return httpx.Client(timeout=self.timeout, transport=self._transport)
+
+    @staticmethod
+    def classify_failure(exc: Exception) -> str:
+        """Same vocabulary as OpenAIImageProvider.classify_failure.
+
+        "transport": connect-level failure, request provably not accepted;
+        "ambiguous": failure after submit (read/write/pool timeout, dropped
+        connection) — the image may have been generated and charged;
+        "api": definitive HTTP answer from Nodule (4xx/5xx).
+        """
+        import httpx
+
+        if isinstance(exc, httpx.HTTPStatusError):
+            return "api"
+        if isinstance(exc, (httpx.ConnectTimeout, httpx.ConnectError)):
+            return "transport"
+        if isinstance(exc, httpx.TransportError):
+            return "ambiguous"
+        return "ambiguous"
+
+    # -------------------------------------------------------- contract
+
+    def generate_preview(self, request: ImageGenerationRequest) -> ImageGenerationResult:
+        """ImageProvider protocol entry used by GenerationService /
+        FullProductionService. Those flows are personalised (reference
+        photos), which Nodule cannot honour: fail closed, no HTTP call."""
+        if request.reference_images:
+            raise ProviderCapabilityError(
+                "Nodule provider is text-to-image only and cannot use reference "
+                "images; personalised generation is refused (no fallback)"
+            )
+        return self.generate_text_to_image(prompt=request.prompt, metadata=request.metadata)
+
+    def generate_text_to_image(
+        self, *, prompt: str, metadata: dict | None = None
+    ) -> ImageGenerationResult:
+        """One POST to /v1/images/generations; never retried."""
+        if not prompt or not prompt.strip():
+            raise ValueError("Prompt is required for text-to-image generation")
+        payload = {"model": self.model, "prompt": prompt, "size": self.size, "n": 1}
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        with self._client() as client:
+            response = client.post(self.generations_url, json=payload, headers=headers)
+            response.raise_for_status()
+            body = response.json()
+            data = body.get("data") if isinstance(body, dict) else None
+            if not data or not isinstance(data[0], dict):
+                raise RuntimeError("Nodule image provider returned no image")
+            item = data[0]
+            if item.get("b64_json"):
+                content = base64.b64decode(item["b64_json"])
+                mime_type = "image/png"
+            elif item.get("url"):
+                # The asset URL is a foreign location: fetch it WITHOUT the
+                # bearer token so the key is never sent to a third party.
+                fetched = client.get(item["url"])
+                fetched.raise_for_status()
+                content = fetched.content
+                mime_type = fetched.headers.get("content-type", "image/png").split(";")[0]
+            else:
+                raise RuntimeError("Nodule image provider returned no image")
+        if not content:
+            raise RuntimeError("Nodule image provider returned empty content")
+        result_metadata = {
+            "provider": self.name,
+            "model": self.model,
+            "size": self.size,
+            "endpoint": NODULE_GENERATIONS_PATH,
+            "experimental": True,
+            "reference_equivalent": False,
+        }
+        usage = _usage_metadata(body.get("usage") if isinstance(body.get("usage"), dict) else None)
+        if usage:
+            result_metadata["usage"] = usage
+        return ImageGenerationResult(content=content, mime_type=mime_type, metadata=result_metadata)
+
+
+# ---------------------------------------------------------------------------
+# Provider selection — deterministic, no fallback.
+# ---------------------------------------------------------------------------
+
+IMAGE_PROVIDER_ENV = "IMAGE_PROVIDER"
+IMAGE_PROVIDER_DEFAULT = "openai"
+
+
+def get_image_provider(name: str | None = None) -> ImageProvider:
+    """Build the configured image provider.
+
+    IMAGE_PROVIDER=openai (default) -> OpenAIImageProvider (reference-based,
+    the paid production path); IMAGE_PROVIDER=nodule -> NoduleImageProvider
+    (experimental text-to-image; personalised flows fail closed). Anything
+    else raises ProviderConfigurationError — there is deliberately no
+    "unknown -> openai" fallback so a misconfiguration cannot silently pick
+    a provider.
+    """
+    selected = (name if name is not None else os.getenv(IMAGE_PROVIDER_ENV, IMAGE_PROVIDER_DEFAULT))
+    selected = (selected or "").strip().lower()
+    if selected == "openai":
+        return OpenAIImageProvider()
+    if selected == "nodule":
+        return NoduleImageProvider()
+    raise ProviderConfigurationError(
+        f"Unknown IMAGE_PROVIDER {selected!r}; expected 'openai' or 'nodule'"
+    )

@@ -6,7 +6,7 @@ from django.urls import path, reverse
 from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
-from .image_providers import OpenAIImageProvider
+from .image_providers import get_image_provider
 from .models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
 from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
@@ -341,10 +341,13 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         return custom + urls
 
     def get_generation_service(self):
-        return GenerationService(provider=OpenAIImageProvider())
+        # IMAGE_PROVIDER env selects the provider deterministically (default
+        # openai); an experimental provider refuses personalised flows and
+        # nothing falls back to OpenAI — see image_providers.get_image_provider.
+        return GenerationService(provider=get_image_provider())
 
     def get_full_production_service(self):
-        return FullProductionService(provider=OpenAIImageProvider())
+        return FullProductionService(provider=get_image_provider())
 
     def _confirmation(self, request, *, order, title, action_url, detail, **extra):
         return TemplateResponse(
