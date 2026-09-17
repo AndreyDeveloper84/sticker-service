@@ -9,6 +9,7 @@ from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PI
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
 from apps.telegram_bot.client import TelegramBotClient
+from apps.telegram_bot.paid_notice import notify_customer_paid
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter, configured_stars_price
 
 
@@ -65,8 +66,13 @@ def _handle_message(message, *, adapter, payment_adapter, client):
 
     successful_payment = message.get("successful_payment")
     if successful_payment:
-        payment_adapter.confirm_successful_payment(identity=identity, successful_payment=successful_payment)
-        return client.send_message(chat_id=chat_id, text="Оплата получена. Начинаем подготовку превью.")
+        payment = payment_adapter.confirm_successful_payment(identity=identity, successful_payment=successful_payment)
+        # PAID is committed above. The confirmation is best-effort and at most
+        # once per payment (a redelivered update finds the claim and sends
+        # nothing); a Telegram send failure must not turn a confirmed payment
+        # into a non-2xx answer, which would only make Telegram redeliver.
+        notify_customer_paid(payment=payment, client=client, chat_id=chat_id)
+        return None
 
     if (message.get("text") or "").startswith("/start"):
         buttons = [[{"text": p.name, "callback_data": f"product:{p.code}"}] for p in adapter.active_products()]

@@ -61,6 +61,7 @@ from apps.core.tests_qc import make_image
 from apps.max_bot.paid_notice import PAID_NOTICE_TEXT
 from apps.max_bot.production_notice import PRODUCTION_NOTICE_TEXT
 from apps.max_bot.payments import CheckoutSession, PaymentConfirmation
+from apps.telegram_bot.paid_notice import PAID_NOTICE_TEXT as TELEGRAM_PAID_NOTICE_TEXT
 from apps.telegram_bot.payments import TelegramStarsPaymentAdapter
 
 from apps.core.services.final_delivery import FinalDeliveryError, FinalDeliveryService
@@ -296,7 +297,22 @@ class TelegramDriver:
         payment.refresh_from_db()
         t.assertEqual(order.status, Order.Status.PAID)
         t.assertEqual(payment.status, Payment.Status.CONFIRMED)
+        # PAID confirmation exactly once (DRF-2077 follow-up): a redelivered
+        # successful_payment update (Telegram retry) confirms idempotently and
+        # sends nothing more.
+        t.assertEqual(self.paid_notices(), 1)
+        t.assertEqual(self._post(successful).status_code, 200)
+        t.assertEqual(Payment.objects.filter(order=order, status=Payment.Status.CONFIRMED).count(), 1)
+        t.assertEqual(self.paid_notices(), 1)
         return payment
+
+    def paid_notices(self):
+        return sum(
+            1
+            for call in self.bot.send_message.call_args_list
+            if call.kwargs.get("text") == TELEGRAM_PAID_NOTICE_TEXT
+            and call.kwargs.get("chat_id") == self.chat_id
+        )
 
     def customer_approve(self):
         self.test.assertEqual(self._post(self._callback("preview_approve")).status_code, 200)
