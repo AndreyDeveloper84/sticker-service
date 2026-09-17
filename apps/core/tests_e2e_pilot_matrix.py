@@ -591,8 +591,10 @@ class PilotE2ECase(TestCase):
         full_requests = [r for r in self.provider.requests[before:] if r["task_type"] == GenerationJob.TaskType.FULL]
         self.assertEqual([r["slot_key"] for r in full_requests], emotions)
         for request in full_requests:
-            # identity lock: customer-approved preview is always the first reference
-            self.assertEqual(request["references"][0], f"approved-preview-{approved_preview.pk}.png")
+            # DRF-2080: customer photos carry identity and come first; the
+            # customer-approved preview is always the LAST reference (style only).
+            self.assertNotEqual(request["references"][0], f"approved-preview-{approved_preview.pk}.png")
+            self.assertEqual(request["references"][-1], f"approved-preview-{approved_preview.pk}.png")
         jobs = GenerationJob.objects.filter(order=order, task_type=GenerationJob.TaskType.FULL)
         self.assertEqual(jobs.count(), quantity)
         self.assertTrue(all(job.status == GenerationJob.Status.SUCCEEDED for job in jobs))

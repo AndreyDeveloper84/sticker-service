@@ -153,8 +153,13 @@ class GenerationService:
         if not references:
             raise GenerationError("Order has no usable reference photos")
 
+        # DRF-2080: persist the rendered prompt as live evidence.
+        prompt = "\n".join(part for part in prompt_parts if part)
+        job.input_metadata = {**(job.input_metadata or {}), "prompt": prompt}
+        job.save(update_fields=["input_metadata", "updated_at"])
+
         return ImageGenerationRequest(
-            prompt="\n".join(part for part in prompt_parts if part),
+            prompt=prompt,
             reference_images=references,
             metadata={
                 "order_id": order.pk,

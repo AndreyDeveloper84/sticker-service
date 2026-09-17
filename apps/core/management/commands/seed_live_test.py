@@ -23,6 +23,12 @@ GENERATION_PROMPT = (
     "Preserve the person's recognizable facial identity, key hairstyle, and distinctive features. "
     "Use a clean sticker composition suitable for messaging apps."
 )
+# FULL production wording (DRF-2080): "final sticker", never "preview".
+FULL_GENERATION_PROMPT = (
+    "Create one polished personalized final sticker of the person shown in the reference photos. "
+    "Preserve the person's recognizable facial identity, key hairstyle, and distinctive features. "
+    "Use a clean sticker composition with an isolated subject suitable for messaging apps."
+)
 
 # Pricing (DRF-2057): price_minor/currency is the RUB price used by the
 # MAX/YooKassa path; price_stars is the Telegram Stars (XTR) price used by the
@@ -41,6 +47,7 @@ PILOT_PRODUCTS = [
             "price_stars": 460,
             "currency": "RUB",
             "generation_prompt": GENERATION_PROMPT,
+            "full_generation_prompt": FULL_GENERATION_PROMPT,
         },
     },
     {
@@ -55,6 +62,7 @@ PILOT_PRODUCTS = [
             "price_stars": 100,
             "currency": "RUB",
             "generation_prompt": GENERATION_PROMPT,
+            "full_generation_prompt": FULL_GENERATION_PROMPT,
         },
     },
 ]

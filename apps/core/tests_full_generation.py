@@ -326,7 +326,9 @@ class FullProductionTestCase(TestCase):
         self.assertEqual(bye_jobs[1].status, GenerationJob.Status.SUCCEEDED)
         self.assertTrue(all(slot.status == "succeeded" for slot in plan))
 
-    def test_identity_lock_uses_approved_preview_as_first_reference(self):
+    def test_identity_source_is_photos_first_preview_last(self):
+        # DRF-2080: customer photos carry identity; the approved preview is
+        # passed last as a style/character reference only.
         order, preview = self._make_order()
         provider = FakeProvider()
         self._service(provider).start(order=order, max_slots=None)
@@ -338,9 +340,9 @@ class FullProductionTestCase(TestCase):
         for request in provider.requests:
             slot = request.metadata["slot_key"]
             self.assertEqual(request.metadata["task_type"], GenerationJob.TaskType.FULL)
-            self.assertIn(f"Emotion: {slot}", request.prompt)
-            self.assertEqual(request.reference_images[0].content, PREVIEW_BYTES)
-            self.assertEqual(request.reference_images[1].content, PHOTO_BYTES)
+            self.assertNotIn(f"Emotion: {slot}", request.prompt)
+            self.assertEqual(request.reference_images[0].content, PHOTO_BYTES)
+            self.assertEqual(request.reference_images[-1].content, PREVIEW_BYTES)
 
     def test_start_is_forbidden_without_payment_and_approval(self):
         forbidden_statuses = [
