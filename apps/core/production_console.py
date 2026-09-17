@@ -8,6 +8,7 @@ from django.utils.html import format_html, format_html_join
 
 from .image_providers import OpenAIImageProvider
 from .models import GeneratedAsset, GenerationJob, Order, OrderPhoto
+from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
 from .services.order_state import InvalidOrderTransition, OrderStateService
 from .storage import LocalMediaStorage
@@ -66,6 +67,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         "customer_notes",
         "preview_controls",
         "generation_history",
+        "production_plan",
         "preview_assets",
         "created_at",
         "updated_at",
@@ -80,6 +82,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         "operator_notes",
         "preview_controls",
         "generation_history",
+        "production_plan",
         "preview_assets",
         "created_at",
         "updated_at",
@@ -114,6 +117,26 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     "Regenerate Preview",
                 )
             )
+        if order.status in {Order.Status.PREVIEW_REVIEW, Order.Status.PACK_GENERATING}:
+            links.append(
+                (
+                    reverse("admin:core_order_start_full_production", args=[order.pk]),
+                    "Start / Resume Full Production",
+                )
+            )
+        if order.status == Order.Status.PACK_GENERATING:
+            links.append(
+                (
+                    reverse("admin:core_order_retry_failed_production", args=[order.pk]),
+                    "Retry Failed Slots",
+                )
+            )
+            links.append(
+                (
+                    reverse("admin:core_order_regenerate_slots", args=[order.pk]),
+                    "Regenerate Slots…",
+                )
+            )
         if not links:
             return "Нет доступных действий для текущего статуса."
         return format_html_join(
@@ -142,6 +165,47 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 for job in jobs
             ),
         )
+
+    @admin.display(description="Production plan (full generation)")
+    def production_plan(self, order):
+        if not order or not order.pk:
+            return "—"
+        try:
+            plan = self.get_full_production_service().production_plan(order)
+        except FullProductionError:
+            return "—"
+        if not any(slot.attempts or slot.asset_id for slot in plan):
+            return "Full production пока не запускалась."
+        rows = []
+        for slot in plan:
+            action = ""
+            if order.status == Order.Status.PACK_GENERATING:
+                if slot.status == "failed" and slot.retryable:
+                    action = format_html(
+                        ' · <a class="button" href="{}">Regenerate</a>',
+                        reverse("admin:core_order_regenerate_slots", args=[order.pk])
+                        + f"?slots={slot.slot_key}",
+                    )
+                elif slot.status == "failed" and not slot.retryable:
+                    action = format_html(
+                        ' · <a class="button" href="{}">Force retry (manual verify)</a>',
+                        reverse(
+                            "admin:core_order_force_retry_slot",
+                            args=[order.pk, slot.slot_key],
+                        ),
+                    )
+            rows.append(
+                format_html(
+                    "{} · {} · {} attempts{}{}{}",
+                    slot.slot_key,
+                    slot.status,
+                    slot.attempts,
+                    f" · current asset #{slot.asset_id}" if slot.asset_id else "",
+                    "" if slot.retryable or slot.status != "failed" else " · BLOCKED",
+                    action,
+                )
+            )
+        return format_html_join("<br>", "{}", ((row,) for row in rows))
 
     @admin.display(description="Preview assets")
     def preview_assets(self, order):
@@ -206,6 +270,26 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 name="core_order_approve_preview",
             ),
             path(
+                "<int:order_id>/start-full-production/",
+                self.admin_site.admin_view(self.start_full_production_view),
+                name="core_order_start_full_production",
+            ),
+            path(
+                "<int:order_id>/retry-failed-production/",
+                self.admin_site.admin_view(self.retry_failed_production_view),
+                name="core_order_retry_failed_production",
+            ),
+            path(
+                "<int:order_id>/regenerate-slots/",
+                self.admin_site.admin_view(self.regenerate_slots_view),
+                name="core_order_regenerate_slots",
+            ),
+            path(
+                "<int:order_id>/force-retry-slot/<str:slot_key>/",
+                self.admin_site.admin_view(self.force_retry_slot_view),
+                name="core_order_force_retry_slot",
+            ),
+            path(
                 "preview-asset/<int:asset_id>/file/",
                 self.admin_site.admin_view(self.preview_asset_file_view),
                 name="core_preview_asset_file",
@@ -216,7 +300,10 @@ class ProductionOrderAdmin(admin.ModelAdmin):
     def get_generation_service(self):
         return GenerationService(provider=OpenAIImageProvider())
 
-    def _confirmation(self, request, *, order, title, action_url, detail):
+    def get_full_production_service(self):
+        return FullProductionService(provider=OpenAIImageProvider())
+
+    def _confirmation(self, request, *, order, title, action_url, detail, **extra):
         return TemplateResponse(
             request,
             "admin/core/order/preview_action_confirmation.html",
@@ -227,6 +314,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 "action_url": action_url,
                 "detail": detail,
                 "opts": self.model._meta,
+                **extra,
             },
         )
 
@@ -363,6 +451,128 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 f"Preview #{asset.pk} approved for customer review.",
                 level=messages.SUCCESS,
             )
+        return redirect(reverse("admin:core_order_change", args=[order.pk]))
+
+    @staticmethod
+    def _plan_message(plan) -> str:
+        summary = ", ".join(f"{slot.slot_key}: {slot.status}" for slot in plan)
+        hint = ""
+        if any(slot.status != "succeeded" for slot in plan):
+            hint = " — запустите действие повторно, пока план не завершится."
+        return f"Full production plan: {summary}{hint}"
+
+    def start_full_production_view(self, request, order_id):
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        action_url = reverse("admin:core_order_start_full_production", args=[order.pk])
+        if request.method != "POST":
+            return self._confirmation(
+                request,
+                order=order,
+                title="Start / resume full production",
+                action_url=action_url,
+                detail=(
+                    "За один запуск обрабатывается один slot (защита от таймаута "
+                    "воркера). Уже успешные slots не перегенерируются; failed slots "
+                    "перезапускаются через Retry Failed Slots."
+                ),
+            )
+        service = self.get_full_production_service()
+        try:
+            plan = service.start(order=order)
+        except (InvalidOrderTransition, FullProductionError) as exc:
+            self.message_user(request, str(exc), level=messages.ERROR)
+        else:
+            self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
+        return redirect(reverse("admin:core_order_change", args=[order.pk]))
+
+    def retry_failed_production_view(self, request, order_id):
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        action_url = reverse("admin:core_order_retry_failed_production", args=[order.pk])
+        if request.method != "POST":
+            return self._confirmation(
+                request,
+                order=order,
+                title="Retry failed production slots",
+                action_url=action_url,
+                detail=(
+                    "Перезапускает только failed slots (один за запуск). "
+                    "Заблокированные (ambiguous) slots не затрагиваются."
+                ),
+            )
+        service = self.get_full_production_service()
+        try:
+            plan = service.retry_failed(order=order)
+        except (InvalidOrderTransition, FullProductionError) as exc:
+            self.message_user(request, str(exc), level=messages.ERROR)
+        else:
+            self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
+        return redirect(reverse("admin:core_order_change", args=[order.pk]))
+
+    def regenerate_slots_view(self, request, order_id):
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        action_url = reverse("admin:core_order_regenerate_slots", args=[order.pk])
+        slot_keys_value = request.POST.get(
+            "slot_keys", request.GET.get("slots", "")
+        )
+        if request.method != "POST":
+            return self._confirmation(
+                request,
+                order=order,
+                title="Regenerate production slots",
+                action_url=action_url,
+                detail=(
+                    "Новая attempt для каждого выбранного slot (QC FAIL path); "
+                    "новый asset заменяет текущий, старый сохраняется для аудита. "
+                    "Остальные slots не затрагиваются."
+                ),
+                slot_input=True,
+                slot_keys_value=slot_keys_value,
+            )
+        slot_keys = [
+            key.strip() for key in slot_keys_value.split(",") if key.strip()
+        ]
+        service = self.get_full_production_service()
+        try:
+            plan = service.regenerate_slots(order=order, slot_keys=slot_keys)
+        except (InvalidOrderTransition, FullProductionError) as exc:
+            self.message_user(request, str(exc), level=messages.ERROR)
+        else:
+            self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
+        return redirect(reverse("admin:core_order_change", args=[order.pk]))
+
+    def force_retry_slot_view(self, request, order_id, slot_key):
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        action_url = reverse(
+            "admin:core_order_force_retry_slot", args=[order.pk, slot_key]
+        )
+        if request.method != "POST":
+            return self._confirmation(
+                request,
+                order=order,
+                title=f"Force retry slot {slot_key}",
+                action_url=action_url,
+                detail=(
+                    "Slot заблокирован после неоднозначного ответа провайдера. "
+                    "Подтверждайте только если вы убедились, что генерация НЕ "
+                    "завершилась и НЕ была оплачена — иначе возможен дубль "
+                    "платной генерации."
+                ),
+            )
+        service = self.get_full_production_service()
+        try:
+            plan = service.force_retry_slot(order=order, slot_key=slot_key)
+        except (InvalidOrderTransition, FullProductionError) as exc:
+            self.message_user(request, str(exc), level=messages.ERROR)
+        else:
+            self.message_user(request, self._plan_message(plan), level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
     def preview_asset_file_view(self, request, asset_id):

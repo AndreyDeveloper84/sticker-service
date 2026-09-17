@@ -41,6 +41,20 @@ class ImageProvider(Protocol):
     def generate_preview(self, request: ImageGenerationRequest) -> ImageGenerationResult: ...
 
 
+def classify_provider_failure(provider, exc: Exception) -> str:
+    """Best-effort failure classification for retry/cost-safety decisions.
+
+    Providers may expose an optional ``classify_failure`` capability (see
+    ``OpenAIImageProvider``); unknown classes and providers without the
+    capability map to "unknown", which callers must treat as retryable
+    only where a blind retry cannot duplicate billable work.
+    """
+    classifier = getattr(provider, "classify_failure", None)
+    if callable(classifier):
+        return classifier(exc)
+    return "unknown"
+
+
 class OpenAIImageProvider:
     name = "openai"
 
@@ -79,7 +93,7 @@ class OpenAIImageProvider:
     # ----------------------------------------------------------- failover
 
     @staticmethod
-    def _classify_failure(exc: Exception) -> str:
+    def classify_failure(exc: Exception) -> str:
         """Classify an SDK failure for failover decisions.
 
         - "transport": safe pre-request/connect failure — request provably NOT
@@ -130,7 +144,7 @@ class OpenAIImageProvider:
             try:
                 result = self._generate(self._client_factory(endpoint.url), images, request.prompt)
             except Exception as exc:
-                kind = self._classify_failure(exc)
+                kind = self.classify_failure(exc)
                 if kind in ("transport", "geo"):
                     logger.warning(
                         "openai.failover %s class=%s", endpoint.identity, kind

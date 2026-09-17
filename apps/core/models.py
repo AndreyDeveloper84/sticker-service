@@ -75,6 +75,8 @@ class Order(TimestampedModel):
         PREVIEW_REVIEW = "preview_review", "Preview review"
         REVISION_REQUESTED = "revision_requested", "Revision requested"
         REVISION_GENERATING = "revision_generating", "Revision generating"
+        PACK_GENERATING = "pack_generating", "Pack generating"
+        QUALITY_CONTROL = "quality_control", "Quality control"
         CANCELLED = "cancelled", "Cancelled"
         FAILED = "failed", "Failed"
 
@@ -157,6 +159,7 @@ class GenerationJob(TimestampedModel):
     class TaskType(models.TextChoices):
         PREVIEW = "preview", "Preview"
         REVISION = "revision", "Revision"
+        FULL = "full", "Full production"
 
     class Status(models.TextChoices):
         PENDING = "pending", "Pending"
@@ -168,6 +171,9 @@ class GenerationJob(TimestampedModel):
     task_type = models.CharField(max_length=32, choices=TaskType.choices)
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.PENDING)
     attempt = models.PositiveIntegerField()
+    # Stable production slot (emotion code) for FULL jobs; empty for
+    # preview/revision jobs.
+    slot_key = models.CharField(max_length=64, blank=True)
     provider = models.CharField(max_length=64)
     input_metadata = models.JSONField(default=dict, blank=True)
     output_metadata = models.JSONField(default=dict, blank=True)
@@ -180,7 +186,12 @@ class GenerationJob(TimestampedModel):
             models.UniqueConstraint(
                 fields=["order", "task_type", "attempt"],
                 name="uniq_generation_attempt",
-            )
+            ),
+            models.UniqueConstraint(
+                fields=["order", "slot_key", "attempt"],
+                condition=models.Q(task_type="full"),
+                name="uniq_full_slot_attempt",
+            ),
         ]
         ordering = ["order_id", "task_type", "attempt"]
 
@@ -191,10 +202,13 @@ class GenerationJob(TimestampedModel):
 class GeneratedAsset(TimestampedModel):
     class Kind(models.TextChoices):
         PREVIEW = "preview", "Preview"
+        FINAL = "final", "Final"
 
     order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="generated_assets")
     job = models.ForeignKey(GenerationJob, on_delete=models.PROTECT, related_name="assets")
     kind = models.CharField(max_length=32, choices=Kind.choices, default=Kind.PREVIEW)
+    # Production slot (emotion code) for FINAL assets; empty for previews.
+    slot_key = models.CharField(max_length=64, blank=True)
     storage_key = models.CharField(max_length=512, unique=True)
     mime_type = models.CharField(max_length=127, default="image/png")
     size_bytes = models.PositiveBigIntegerField(default=0)

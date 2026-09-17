@@ -5,6 +5,12 @@
     <p>{{ detail }}</p>
     <form method="post" action="{{ action_url }}">
       {% csrf_token %}
+      {% if slot_input %}
+        <p>
+          <label for="slot_keys">Slot keys (через запятую):</label>
+          <input type="text" id="slot_keys" name="slot_keys" value="{{ slot_keys_value }}" size="40">
+        </p>
+      {% endif %}
       <input type="submit" value="Подтвердить">
       <a href="{% url 'admin:core_order_change' order.pk %}">Отмена</a>
     </form>
