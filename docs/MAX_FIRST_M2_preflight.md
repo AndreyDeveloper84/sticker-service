@@ -208,6 +208,32 @@ preview на существующем оплаченном Order 8 (DRF‑1871),
 4. ячейка в отчёте — `FAIL(QC, <reason codes>)`, но транспорт/оплата/генерация
    засчитываются как evidence ENGINEERING READY.
 
+### 5.1. Как включить параметры провайдера на staging (PR #42) и что ожидать в QC
+
+После PR #42 `OpenAIImageProvider` умеет передавать в `images.edit` параметры
+`OPENAI_IMAGE_SIZE` (`1024x1024|1024x1536|1536x1024|auto`),
+`OPENAI_IMAGE_BACKGROUND` (`transparent|opaque|auto`),
+`OPENAI_IMAGE_OUTPUT_FORMAT` (`png|webp|jpeg`). **По умолчанию все три absent**
+и ничего не передаётся — поведение до PR #42. На staging они остаются absent
+до первого реального FULL‑evidence (шаги 12–13); включает владелец по факту.
+
+Включение: добавить строки в `/opt/sticker-service/.env.staging` (например
+`OPENAI_IMAGE_BACKGROUND=transparent`, `OPENAI_IMAGE_OUTPUT_FORMAT=png`),
+перезапустить web/worker; невалидное значение → `ProviderConfigurationError`
+при старте генерации (fail closed, без платного вызова). Не править БД и код.
+
+Ожидание в `QcReport.automated_checks` (DRF‑2052, `apps/core/services/qc.py`):
+`mime_type` — PASS только для png/webp (`jpeg` → `bad_mime_type`);
+`alpha_channel` — `background=transparent` даёт RGBA только у моделей gpt‑image и
+только с png/webp (jpeg не несёт alpha; `opaque`/absent → `missing_alpha`);
+`dimensions` — требует одну сторону **ровно 512 px**, а API отдаёт минимум
+1024 px, поэтому `size=1024x1024` (и любой другой) всё равно даст
+`bad_dimensions` без post‑processing — это отдельное решение (issue D,
+resize/crop до 512 перед сохранением FINAL), параметры провайдера его не закрывают;
+`file_size` — ≤ 512 KB; 1024 px PNG с alpha может превышать → `file_too_large`.
+Итог: параметры снимают только alpha/mime‑половину риска; PASS в QC до issue D
+не ожидается, и это корректная работа gate, а не дефект.
+
 ---
 
 ## 6. Чек‑лист «GO» перед M2
