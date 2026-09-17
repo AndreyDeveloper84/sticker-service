@@ -19,6 +19,7 @@ from apps.core.services.channel_order_flow import (
     ChannelFlowError,
     ChannelOrderFlowService,
 )
+from apps.telegram_bot.paid_notice import PAID_NOTICE_TEXT
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
 
 WEBHOOK_URL = "/telegram/webhook/"
@@ -186,7 +187,7 @@ class TelegramConsentWebhookFlowTests(TestCase):
 
             order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.PAID)
-            self.assertEqual(client.send_message.call_args.kwargs["text"], "Оплата получена. Начинаем подготовку превью.")
+            self.assertEqual(client.send_message.call_args.kwargs["text"], PAID_NOTICE_TEXT)
 
 
 class TelegramConsentDomainTests(TestCase):
