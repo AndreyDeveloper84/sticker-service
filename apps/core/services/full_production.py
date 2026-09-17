@@ -506,7 +506,9 @@ class FullProductionService:
             metadata={"emotion": locked_job.slot_key},
         )
         locked_job.status = GenerationJob.Status.SUCCEEDED
-        locked_job.output_metadata = {"asset_id": asset.pk}
+        # Keep provider metadata (model, usage) next to the asset id, as
+        # GenerationService._complete does — pilot metrics read FULL cost here.
+        locked_job.output_metadata = {"asset_id": asset.pk, **(result.metadata or {})}
         locked_job.finished_at = timezone.now()
         locked_job.save(
             update_fields=["status", "output_metadata", "finished_at", "updated_at"]

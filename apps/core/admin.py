@@ -4,6 +4,7 @@ from django.urls import path
 
 from .models import ChannelIdentity, Order, OrderPhoto, Product, Style, User
 from .storage import LocalMediaStorage
+from . import pilot_metrics_console  # noqa: F401  (DRF-2055 admin registrations)
 
 
 @admin.register(User)

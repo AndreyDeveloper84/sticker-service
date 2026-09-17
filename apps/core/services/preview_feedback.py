@@ -1,6 +1,6 @@
 from django.db import transaction
 
-from apps.core.models import GeneratedAsset, Order, Revision
+from apps.core.models import GeneratedAsset, Order, OrderEvent, Revision
 from apps.core.services.order_state import OrderStateService
 
 
@@ -32,6 +32,14 @@ class PreviewFeedbackService:
             metadata["customer_approved"] = True
             asset.metadata = metadata
             asset.save(update_fields=["metadata", "updated_at"])
+            # DRF-2055: approval does not change order status, so it is the
+            # only preview-feedback fact not visible in the status log.
+            OrderEvent.objects.create(
+                order=locked,
+                event_type=OrderEvent.Type.PREVIEW_CUSTOMER_APPROVED,
+                actor_kind=OrderEvent.Actor.CUSTOMER,
+                payload={"asset_id": asset.pk},
+            )
         return asset
 
     @classmethod
