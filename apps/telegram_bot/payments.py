@@ -48,6 +48,10 @@ class TelegramStarsPaymentAdapter:
         )
         if order is None:
             raise TelegramPaymentError("No order is ready for payment")
+        if not order.consent_accepted:
+            # Pilot gate (parity with MAX, DRF-2069): no invoice and no Payment
+            # without the customer's recorded consent.
+            raise TelegramPaymentError("Customer consent is required before checkout")
 
         amount = configured_stars_price(order.product)
 

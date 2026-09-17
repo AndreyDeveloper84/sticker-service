@@ -3,9 +3,11 @@ from io import BytesIO
 from pathlib import Path
 
 from django.test import TestCase, override_settings
+from django.utils import timezone
 
 from apps.core.image_providers import ImageGenerationResult
 from apps.core.models import ChannelIdentity, Order, OrderPhoto, Product, Style, User
+from apps.core.services.channel_order_flow import PILOT_CONSENT_VERSION
 from apps.core.services.generation import GenerationService
 from apps.core.services.preview_delivery import DeliveryResult, PreviewDeliveryService
 from apps.core.services.preview_feedback import PreviewFeedbackService
@@ -54,6 +56,8 @@ class TelegramM2SmokeTests(TestCase):
             product=product,
             style=style,
             status=Order.Status.READY_FOR_CHECKOUT,
+            consent_version=PILOT_CONSENT_VERSION,
+            consent_accepted_at=timezone.now(),
         )
         key = f"orders/{self.order.pk}/source.jpg"
         self.storage.save(key, BytesIO(b"source"))

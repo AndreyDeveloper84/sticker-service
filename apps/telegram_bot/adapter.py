@@ -61,5 +61,11 @@ class TelegramAdapter:
             mime_type=mime_type,
         )
 
+    def photos_ready(self, identity):
+        return self.flow.photos_ready(identity)
+
+    def accept_consent(self, *, identity):
+        return self.flow.accept_consent(identity=identity)
+
     def complete_photos(self, identity):
         return self.flow.complete_photos(identity)

@@ -1,8 +1,10 @@
 from unittest.mock import Mock
 
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.core.models import Order, Payment, Product, Style
+from apps.core.services.channel_order_flow import PILOT_CONSENT_VERSION
 from apps.telegram_bot.adapter import TelegramAdapter
 from apps.telegram_bot.client import TelegramBotClient
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
@@ -15,7 +17,7 @@ class TelegramStarsPaymentTests(TestCase):
         self.telegram = TelegramAdapter()
         self.payments = TelegramStarsPaymentAdapter()
         self.identity = self.telegram.get_or_create_identity({"id": 1001, "username": "buyer", "first_name": "Buyer"})
-        self.order = Order.objects.create(user=self.identity.user, channel_identity=self.identity, product=self.product, style=self.style, status=Order.Status.READY_FOR_CHECKOUT)
+        self.order = Order.objects.create(user=self.identity.user, channel_identity=self.identity, product=self.product, style=self.style, status=Order.Status.READY_FOR_CHECKOUT, consent_version=PILOT_CONSENT_VERSION, consent_accepted_at=timezone.now())
 
     def test_pending_payment_uses_server_side_stars_price_and_is_reused(self):
         first = self.payments.payment_for_identity(self.identity)

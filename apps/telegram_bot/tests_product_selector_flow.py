@@ -147,7 +147,18 @@ class TelegramProductSelectorFlowTests(TestCase):
                 self._send_photo_and_finish(client, media_root)
 
             order.refresh_from_db()
+            # photos_done → consent screen only; checkout waits for consent:accept
+            self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
+            self.assertEqual(keyboard, [[{"text": "Принимаю", "callback_data": "consent:accept"}]])
+            client.send_invoice.assert_not_called()
+
+            client.reset_mock()
+            response = self._post(_callback("consent:accept", callback_id="cb-consent"))
+            self.assertEqual(response.status_code, 200)
+            order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.READY_FOR_CHECKOUT)
+            self.assertTrue(order.consent_accepted)
             text = client.send_message.call_args.kwargs["text"]
             self.assertIn("Стикерпак — 9 стикеров", text)
             self.assertIn("Стикеров: 9", text)
@@ -192,7 +203,18 @@ class TelegramProductSelectorFlowTests(TestCase):
                 self._send_photo_and_finish(client, media_root)
 
             order.refresh_from_db()
+            # photos_done → consent screen only; checkout waits for consent:accept
+            self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
+            self.assertEqual(keyboard, [[{"text": "Принимаю", "callback_data": "consent:accept"}]])
+            client.send_invoice.assert_not_called()
+
+            client.reset_mock()
+            response = self._post(_callback("consent:accept", callback_id="cb-consent"))
+            self.assertEqual(response.status_code, 200)
+            order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.READY_FOR_CHECKOUT)
+            self.assertTrue(order.consent_accepted)
             text = client.send_message.call_args.kwargs["text"]
             self.assertIn("Один стикер", text)
             self.assertIn("Стикеров: 1", text)

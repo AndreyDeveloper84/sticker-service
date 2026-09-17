@@ -189,6 +189,8 @@ class TelegramInvoiceWebhookPricingTests(TestCase):
             product=self.pack,
             style=Style.objects.get(code="comic"),
             status=Order.Status.READY_FOR_CHECKOUT,
+            consent_version=PILOT_CONSENT_VERSION,
+            consent_accepted_at=timezone.now(),
         )
 
     def _pay(self):

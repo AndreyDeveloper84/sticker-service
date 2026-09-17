@@ -235,9 +235,26 @@ class TelegramDriver:
 
         photo = self._message(photo=[{"file_id": "small"}, {"file_id": "big"}])
         t.assertEqual(self._post(photo).status_code, 200)
+        # photos_done → consent screen only (parity with MAX): the order stays
+        # in AWAITING_PHOTOS and no invoice/payment exists until accept.
         t.assertEqual(self._post(self._callback("photos_done", "cb-done")).status_code, 200)
         order.refresh_from_db()
+        t.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+        t.assertFalse(order.consent_accepted)
+        consent = self.bot.send_message.call_args.kwargs
+        t.assertIn("право использовать загруженные фотографии", consent["text"])
+        t.assertEqual(
+            consent["reply_markup"], {"inline_keyboard": [[{"text": "Принимаю", "callback_data": "consent:accept"}]]}
+        )
+        self.bot.send_invoice.assert_not_called()
+        t.assertFalse(Payment.objects.filter(order=order).exists())
+        # consent:accept → consent persisted → summary with the "Оплатить" button
+        t.assertEqual(self._post(self._callback("consent:accept", "cb-consent")).status_code, 200)
+        order.refresh_from_db()
         t.assertEqual(order.status, Order.Status.READY_FOR_CHECKOUT)
+        t.assertTrue(order.consent_accepted)
+        t.assertEqual(order.consent_version, PILOT_CONSENT_VERSION)
+        t.assertIsNotNone(order.consent_accepted_at)
         summary = self.bot.send_message.call_args.kwargs["text"]
         t.assertIn(f"Стикеров: {PRICES[product_code]['quantity']}", summary)
         t.assertIn(f"{PRICES[product_code]['stars']} Stars", summary)
