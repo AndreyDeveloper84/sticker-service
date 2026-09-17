@@ -7,7 +7,7 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 
 from .image_providers import OpenAIImageProvider
-from .models import GeneratedAsset, GenerationJob, Order, OrderPhoto
+from .models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
 from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
 from .services.order_state import InvalidOrderTransition, OrderStateService
@@ -65,6 +65,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         "style",
         "status",
         "customer_notes",
+        "revision_request",
         "preview_controls",
         "generation_history",
         "production_plan",
@@ -80,6 +81,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         "status",
         "customer_notes",
         "operator_notes",
+        "revision_request",
         "preview_controls",
         "generation_history",
         "production_plan",
@@ -117,6 +119,19 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     "Regenerate Preview",
                 )
             )
+        # DRF-2066: customer revision. GenerationService._start_job accepts
+        # REVISION_REQUESTED (entry) and REVISION_GENERATING (retry after a
+        # failed attempt), so the action is offered in both.
+        if order.status in {
+            Order.Status.REVISION_REQUESTED,
+            Order.Status.REVISION_GENERATING,
+        }:
+            links.append(
+                (
+                    reverse("admin:core_order_generate_revision", args=[order.pk]),
+                    "Generate / Retry Revision",
+                )
+            )
         if order.status in {Order.Status.PREVIEW_REVIEW, Order.Status.PACK_GENERATING}:
             links.append(
                 (
@@ -143,6 +158,29 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             " &nbsp; ",
             '<a class="button" href="{}">{}</a>',
             links,
+        )
+
+    @admin.display(description="Revision (запрос клиента)")
+    def revision_request(self, order):
+        if not order or not order.pk:
+            return "—"
+        try:
+            revision = order.revision
+        except Revision.DoesNotExist:
+            return "Клиент не запрашивал revision."
+        source_url = reverse(
+            "admin:core_preview_asset_file", args=[revision.source_preview_id]
+        )
+        return format_html(
+            "Revision #{} · {} · category: <strong>{}</strong><br>"
+            'source preview: <a href="{}" target="_blank" rel="noopener">#{}</a><br>'
+            "customer text: {}",
+            revision.pk,
+            revision.get_status_display(),
+            revision.get_category_display(),
+            source_url,
+            revision.source_preview_id,
+            revision.customer_text.strip() or "—",
         )
 
     @admin.display(description="Generation jobs")
@@ -265,6 +303,11 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 name="core_order_regenerate_preview",
             ),
             path(
+                "<int:order_id>/generate-revision/",
+                self.admin_site.admin_view(self.generate_revision_view),
+                name="core_order_generate_revision",
+            ),
+            path(
                 "<int:order_id>/approve-preview/<int:asset_id>/",
                 self.admin_site.admin_view(self.approve_preview_view),
                 name="core_order_approve_preview",
@@ -339,6 +382,52 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             self.message_user(
                 request,
                 f"Preview #{asset.pk} generated and is ready for internal review.",
+                level=messages.SUCCESS,
+            )
+        return redirect(reverse("admin:core_order_change", args=[order.pk]))
+
+    def generate_revision_view(self, request, order_id):
+        """DRF-2066: run the customer's included revision (GenerationService).
+
+        The service owns the state machine (REVISION_REQUESTED ->
+        REVISION_GENERATING -> INTERNAL_PREVIEW_REVIEW) and the one-revision
+        limit; this view only confirms, calls it and reports the outcome.
+        """
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        action_url = reverse("admin:core_order_generate_revision", args=[order.pk])
+        if request.method != "POST":
+            return self._confirmation(
+                request,
+                order=order,
+                title="Generate revision",
+                action_url=action_url,
+                detail=(
+                    "Будет запущена revision attempt по запросу клиента (см. блок "
+                    "«Revision»). Предыдущие preview assets сохранятся; после успеха "
+                    "заказ вернётся на internal preview review."
+                ),
+            )
+        if order.status not in {
+            Order.Status.REVISION_REQUESTED,
+            Order.Status.REVISION_GENERATING,
+        }:
+            self.message_user(
+                request,
+                "Generate revision доступен только из REVISION_REQUESTED / REVISION_GENERATING.",
+                level=messages.ERROR,
+            )
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
+        try:
+            asset = self.get_generation_service().generate_revision(order=order)
+        except (InvalidOrderTransition, GenerationError) as exc:
+            self.message_user(request, str(exc), level=messages.ERROR)
+        else:
+            self.message_user(
+                request,
+                f"Revision preview #{asset.pk} generated (job #{asset.job_id}) "
+                "and is ready for internal review; previous assets were preserved.",
                 level=messages.SUCCESS,
             )
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
