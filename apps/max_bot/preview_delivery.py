@@ -1,5 +1,6 @@
 from apps.core.models import ChannelIdentity
 from apps.core.services.preview_delivery import DeliveryResult
+from apps.max_bot.client import created_message_id
 
 
 class MaxPreviewDeliveryAdapter:
@@ -27,18 +28,8 @@ class MaxPreviewDeliveryAdapter:
                 "payload": "preview_revision",
             }]],
         )
-        message_id = (
-            (message or {}).get("body", {}).get("mid")
-            or (message or {}).get("message", {}).get("mid")
-            or (message or {}).get("mid")
-            or ""
-        )
-        controls_id = (
-            (controls or {}).get("body", {}).get("mid")
-            or (controls or {}).get("message", {}).get("mid")
-            or (controls or {}).get("mid")
-            or ""
-        )
+        message_id = created_message_id(message)
+        controls_id = created_message_id(controls)
         return DeliveryResult(
             message_id=str(message_id),
             metadata={"user_id": recipient_id, "controls_message_id": str(controls_id)},

@@ -44,6 +44,12 @@ EMOTIONS = [{"code": "e0", "label": "E0"}, {"code": "e1", "label": "E1"}, {"code
 PACK3 = {"kind": "pack", "quantity": 3, "emotion_count": 3, "emotions": EMOTIONS, "price_minor": 50000}
 
 
+def _max_envelope(mid, *, seq=None, text=""):
+    """Real MAX Bot API ``POST /messages`` envelope (reference deployment)."""
+    body = {"mid": mid, "seq": seq if seq is not None else 1, "text": text}
+    return {"message": {"sender": {"user_id": 1}, "recipient": {"chat_id": 2}, "timestamp": 1, "body": body}}
+
+
 class StickerProvider:
     name = "fake"
 
@@ -60,7 +66,7 @@ class FakeMaxClient:
         if self.fail:
             raise MaxAPIError(502, "max down")
         self.sent.append({"chat_id": chat_id, "user_id": user_id, "text": text})
-        return {"message": {"mid": f"mid-{len(self.sent)}"}}
+        return _max_envelope(f"mid-{len(self.sent)}", seq=len(self.sent))
 
 
 class ProductionNoticeFixture(TestCase):

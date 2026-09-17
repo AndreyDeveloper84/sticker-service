@@ -1,15 +1,10 @@
 from apps.core.models import ChannelIdentity
+from apps.max_bot.client import created_message_id
 from apps.core.services.preview_delivery import DeliveryResult
 
 
 def _message_id(response) -> str:
-    response = response or {}
-    return str(
-        response.get("body", {}).get("mid")
-        or response.get("message", {}).get("mid")
-        or response.get("mid")
-        or ""
-    )
+    return created_message_id(response)
 
 
 class MaxFinalDeliveryAdapter:

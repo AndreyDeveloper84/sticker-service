@@ -109,6 +109,22 @@ class MaxFinalDeliveryAdapterTests(SimpleTestCase):
         self.assertEqual(image["caption"], "Стикер 1/1 · Привет")
         self.assertEqual(client.calls[1][1], {"user_id": "200", "text": "Набор готов"})
 
+    def test_real_max_envelope_message_body_mid(self):
+        class Client:
+            def send_image(self, **kwargs):
+                return {"message": {"sender": {}, "recipient": {}, "body": {"mid": "mid.real-1", "seq": 9}}}
+
+            def send_message(self, **kwargs):
+                return {"message": {"body": {"mid": "mid.real-2", "seq": 10}}}
+
+        adapter = MaxFinalDeliveryAdapter(client=Client())
+        item = adapter.send_final_item(
+            recipient_id="200", content=b"x", mime_type="image/png", filename="s.png", caption="c", index=1, total=1
+        )
+        self.assertEqual(item.message_id, "mid.real-1")
+        summary = adapter.send_final_summary(recipient_id="200", text="t", total=1)
+        self.assertEqual(summary.message_id, "mid.real-2")
+
     def test_top_level_mid_is_accepted(self):
         class Client:
             def send_image(self, **kwargs):

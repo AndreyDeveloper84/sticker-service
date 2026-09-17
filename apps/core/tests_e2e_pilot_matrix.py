@@ -356,8 +356,9 @@ class MaxDriver:
         self.test = test
         self.client = test.client
         self.bot = mock.MagicMock(name="MaxBotClient")
-        self.bot.send_message.return_value = {"body": {"mid": "max-msg"}}
-        self.bot.send_image.return_value = {"body": {"mid": "max-photo"}}
+        # real MAX envelope: mid lives in message.body (reference deployment)
+        self.bot.send_message.return_value = {"message": {"body": {"mid": "max-msg", "seq": 1}}}
+        self.bot.send_image.return_value = {"message": {"body": {"mid": "max-photo", "seq": 2}}}
         self.yookassa = FakeYooKassa()
 
     def _post(self, payload):

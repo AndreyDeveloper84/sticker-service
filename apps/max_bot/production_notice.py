@@ -22,6 +22,7 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.core.models import ChannelIdentity, Order, Payment
+from apps.max_bot.client import created_message_id
 
 logger = logging.getLogger(__name__)
 
@@ -42,13 +43,7 @@ IN_PRODUCTION_STATUSES = frozenset(
 
 
 def _message_id(response) -> str:
-    response = response or {}
-    return str(
-        response.get("body", {}).get("mid")
-        or response.get("message", {}).get("mid")
-        or response.get("mid")
-        or ""
-    )
+    return created_message_id(response)
 
 
 @transaction.atomic

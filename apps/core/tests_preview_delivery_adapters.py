@@ -32,7 +32,7 @@ class MaxPreviewAdapterTests(SimpleTestCase):
     def test_returns_message_id_and_feedback_controls(self):
         class Client:
             def send_image(self, **kwargs):
-                return {"body": {"mid": "max-77"}}
+                return {"message": {"body": {"mid": "max-77", "seq": 7}}}
 
             def send_message(self, **kwargs):
                 self.buttons = kwargs["buttons"]

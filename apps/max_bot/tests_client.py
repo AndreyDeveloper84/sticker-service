@@ -3,7 +3,7 @@ from unittest import mock
 import httpx
 from django.test import SimpleTestCase, override_settings
 
-from apps.max_bot.client import DEFAULT_API_BASE, MaxAPIError, MaxBotClient
+from apps.max_bot.client import DEFAULT_API_BASE, MaxAPIError, MaxBotClient, created_message_id
 
 
 class FakeResponse:
@@ -124,3 +124,33 @@ class MaxBotClientTests(SimpleTestCase):
         self.assertEqual(kwargs["params"], {"callback_id": "cb-1"})
         # current MAX contract rejects an empty body — notification is required
         self.assertEqual(kwargs["json"], {"notification": ""})
+
+
+class CreatedMessageIdTests(SimpleTestCase):
+    """``POST /messages`` answers with a Message envelope; the id is
+    ``message.body.mid`` (staging Order 10 evidence: the legacy probes
+    body.mid / message.mid / mid all missed it and recorded "")."""
+
+    def test_real_envelope_message_body_mid(self):
+        envelope = {
+            "message": {
+                "sender": {"user_id": 1, "name": "bot"},
+                "recipient": {"chat_id": 2, "chat_type": "dialog"},
+                "timestamp": 1758000000000,
+                "body": {"mid": "mid.abc123", "seq": 4, "text": "Оплата получена."},
+            }
+        }
+        self.assertEqual(created_message_id(envelope), "mid.abc123")
+
+    def test_seq_is_the_fallback_inside_the_real_envelope(self):
+        self.assertEqual(created_message_id({"message": {"body": {"seq": 42}}}), "42")
+
+    def test_legacy_shapes_stay_accepted(self):
+        self.assertEqual(created_message_id({"body": {"mid": "a"}}), "a")
+        self.assertEqual(created_message_id({"message": {"mid": "b"}}), "b")
+        self.assertEqual(created_message_id({"mid": "c"}), "c")
+
+    def test_empty_or_foreign_payloads_give_empty_string(self):
+        for payload in ({}, None, [], "x", {"message": None}, {"message": {"body": {}}}, {"body": None}):
+            self.assertEqual(created_message_id(payload), "", payload)
+
