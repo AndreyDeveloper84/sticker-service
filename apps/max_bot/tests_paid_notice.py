@@ -20,6 +20,12 @@ from apps.max_bot.tests_yookassa import FakeHttpClient, make_provider, webhook_b
 WEBHOOK_URL = "/max/payment/webhook/"
 
 
+def _max_envelope(mid, *, seq=None, text=""):
+    """Real MAX Bot API ``POST /messages`` envelope (reference deployment)."""
+    body = {"mid": mid, "seq": seq if seq is not None else 1, "text": text}
+    return {"message": {"sender": {"user_id": 1}, "recipient": {"chat_id": 2}, "timestamp": 1, "body": body}}
+
+
 class FakeMaxClient:
     def __init__(self, *, fail=False):
         self.fail = fail
@@ -29,7 +35,7 @@ class FakeMaxClient:
         if self.fail:
             raise MaxAPIError(502, "max down")
         self.sent.append({"chat_id": chat_id, "user_id": user_id, "text": text})
-        return {"message": {"mid": f"mid-{len(self.sent)}"}}
+        return _max_envelope(f"mid-{len(self.sent)}", seq=len(self.sent))
 
 
 class PaidNoticeWebhookTests(TestCase):

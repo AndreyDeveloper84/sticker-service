@@ -3,7 +3,13 @@ from unittest import mock
 import httpx
 from django.test import SimpleTestCase, override_settings
 
-from apps.max_bot.client import DEFAULT_API_BASE, MaxAPIError, MaxBotClient
+from apps.max_bot.client import (
+    DEFAULT_API_BASE,
+    MaxAPIError,
+    MaxBotClient,
+    created_message_id,
+    uploaded_image_token,
+)
 
 
 class FakeResponse:
@@ -124,3 +130,102 @@ class MaxBotClientTests(SimpleTestCase):
         self.assertEqual(kwargs["params"], {"callback_id": "cb-1"})
         # current MAX contract rejects an empty body — notification is required
         self.assertEqual(kwargs["json"], {"notification": ""})
+
+
+class CreatedMessageIdTests(SimpleTestCase):
+    """``POST /messages`` answers with a Message envelope; the id is
+    ``message.body.mid`` (staging Order 10 evidence: the legacy probes
+    body.mid / message.mid / mid all missed it and recorded "")."""
+
+    def test_real_envelope_message_body_mid(self):
+        envelope = {
+            "message": {
+                "sender": {"user_id": 1, "name": "bot"},
+                "recipient": {"chat_id": 2, "chat_type": "dialog"},
+                "timestamp": 1758000000000,
+                "body": {"mid": "mid.abc123", "seq": 4, "text": "Оплата получена."},
+            }
+        }
+        self.assertEqual(created_message_id(envelope), "mid.abc123")
+
+    def test_seq_is_the_fallback_inside_the_real_envelope(self):
+        self.assertEqual(created_message_id({"message": {"body": {"seq": 42}}}), "42")
+
+    def test_legacy_shapes_stay_accepted(self):
+        self.assertEqual(created_message_id({"body": {"mid": "a"}}), "a")
+        self.assertEqual(created_message_id({"message": {"mid": "b"}}), "b")
+        self.assertEqual(created_message_id({"mid": "c"}), "c")
+
+    def test_empty_or_foreign_payloads_give_empty_string(self):
+        for payload in ({}, None, [], "x", {"message": None}, {"message": {"body": {}}}, {"body": None}):
+            self.assertEqual(created_message_id(payload), "", payload)
+
+
+class ImageUploadTokenTests(SimpleTestCase):
+    """Live blocker (Order 10, step 8): the upload URL answers
+    ``{"photos": {"<opaque key>": {"token": "<str>"}}}``; the previous
+    extractor only looked at top-level / retval / init / query tokens and
+    raised "MAX image upload returned no token" before send_message."""
+
+    UPLOAD_URL = "https://upload.max.test/api/upload?sig=abc"
+    ENVELOPE = {"message": {"body": {"mid": "mid.sent-1", "seq": 3}}}
+
+    def _fake_http(self, *, uploaded, init=None):
+        fake = mock.MagicMock(name="shared_httpx_client")
+        # /uploads (init) and /messages (send) go through .request; the
+        # multipart upload to the returned URL goes through .post.
+        fake.request.side_effect = [
+            FakeResponse(payload=init or {"url": self.UPLOAD_URL}),
+            FakeResponse(payload=self.ENVELOPE),
+        ]
+        fake.post.return_value = FakeResponse(payload=uploaded)
+        return mock.patch("apps.max_bot.client._shared_client", return_value=fake), fake
+
+    def test_uploaded_image_token_reads_first_photos_entry(self):
+        self.assertEqual(uploaded_image_token({"photos": {"k1": {"token": "tok-1"}}}), "tok-1")
+        self.assertEqual(uploaded_image_token({"photos": {"a": {}, "b": {"token": "tok-b"}}}), "tok-b")
+        for payload in ({}, None, {"photos": None}, {"photos": {}}, {"photos": {"k": {"token": ""}}}, {"token": "x"}):
+            self.assertEqual(uploaded_image_token(payload), "", payload)
+
+    def test_send_image_uses_photos_token_and_documented_attachment_form(self):
+        patcher, fake = self._fake_http(uploaded={"photos": {"3fa9c1": {"token": "tok.real"}}})
+        with patcher:
+            result = MaxBotClient("raw-max-token").send_image(
+                user_id="200", content=b"png", filename="preview.png", mime_type="image/png", caption="Превью"
+            )
+
+        self.assertEqual(created_message_id(result), "mid.sent-1")
+        # multipart went to the upload URL from /uploads
+        upload_call = fake.post.call_args
+        self.assertEqual(upload_call.args[0], self.UPLOAD_URL)
+        self.assertIn("multipart/form-data", upload_call.kwargs["headers"]["Content-Type"])
+        self.assertIn(b'name="data"; filename="preview.png"', upload_call.kwargs["content"])
+        # send: recipient in the query, attachment payload carries the token
+        init_call, send_call = fake.request.call_args_list
+        self.assertEqual(init_call.args[:2], ("POST", f"{DEFAULT_API_BASE}/uploads"))
+        self.assertEqual(init_call.kwargs["params"], {"type": "image"})
+        self.assertEqual(send_call.args[:2], ("POST", f"{DEFAULT_API_BASE}/messages"))
+        self.assertEqual(send_call.kwargs["params"], {"user_id": "200"})
+        body = send_call.kwargs["json"]
+        self.assertEqual(body["text"], "Превью")
+        self.assertEqual(body["attachments"], [{"type": "image", "payload": {"token": "tok.real"}}])
+
+    def test_legacy_token_shapes_still_work(self):
+        for uploaded in ({"token": "legacy-top"}, {"retval": {"token": "legacy-retval"}}):
+            patcher, fake = self._fake_http(uploaded=uploaded)
+            with patcher:
+                MaxBotClient("raw-max-token").send_image(
+                    user_id="200", content=b"png", filename="p.png", mime_type="image/png"
+                )
+            token = fake.request.call_args_list[1].kwargs["json"]["attachments"][0]["payload"]["token"]
+            self.assertEqual(token, next(iter(uploaded.values())) if "token" in uploaded else "legacy-retval")
+
+    def test_upload_without_any_token_still_fails_closed_before_send(self):
+        patcher, fake = self._fake_http(uploaded={"photos": {"k": {"size": 10}}})
+        with patcher:
+            with self.assertRaisesMessage(MaxAPIError, "returned no token"):
+                MaxBotClient("raw-max-token").send_image(
+                    user_id="200", content=b"png", filename="p.png", mime_type="image/png"
+                )
+        self.assertEqual(len(fake.request.call_args_list), 1)  # only /uploads, no /messages
+

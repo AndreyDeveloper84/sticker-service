@@ -30,6 +30,53 @@ from apps.max_bot.client_payment_link import render_button
 DEFAULT_API_BASE = "https://botapi.max.ru"
 
 
+def uploaded_image_token(uploaded) -> str:
+    """Attachment token from the multipart upload answer of an image upload
+    URL (``POST /uploads?type=image`` → upload URL → multipart POST).
+
+    Real wire shape (measured on staging, synthetic PNG):
+    ``{"photos": {"<key>": {"token": "<str>"}}}`` — one entry whose key is
+    opaque; the token is the only inner field that matters. Returns "" when
+    the answer carries no photos/token.
+    """
+    if not isinstance(uploaded, dict):
+        return ""
+    photos = uploaded.get("photos")
+    if not isinstance(photos, dict):
+        return ""
+    for entry in photos.values():
+        if isinstance(entry, dict) and entry.get("token"):
+            return str(entry["token"])
+    return ""
+
+
+def created_message_id(response) -> str:
+    """``mid`` of the message created by ``POST /messages`` (or ``/uploads``
+    + send), or "" when the envelope carries none.
+
+    Real wire shape (reference deployment, ``ai-bot-platform`` outbound):
+    ``{"message": {"sender": …, "recipient": …, "timestamp": …,
+    "body": {"mid": "…", "seq": …, "text": …}}}`` → ``message.body.mid``
+    (``seq`` as a fallback). Older fixtures used ``body.mid`` /
+    ``message.mid`` / top-level ``mid``; they stay accepted so no evidence
+    silently degrades.
+    """
+    if not isinstance(response, dict):
+        return ""
+    message = response.get("message")
+    body = message.get("body") if isinstance(message, dict) else None
+    if isinstance(body, dict) and (body.get("mid") or body.get("seq")):
+        return str(body.get("mid") or body.get("seq"))
+    for candidate in (
+        (response.get("body") or {}).get("mid") if isinstance(response.get("body"), dict) else None,
+        message.get("mid") if isinstance(message, dict) else None,
+        response.get("mid"),
+    ):
+        if candidate:
+            return str(candidate)
+    return ""
+
+
 class MaxAPIError(Exception):
     """Non-2xx response from the MAX REST API, or a network failure."""
 
@@ -189,12 +236,15 @@ class MaxBotClient:
         except ValueError:
             uploaded = {}
 
-        token = str(
-            uploaded.get("token")
-            or uploaded.get("retval", {}).get("token")
-            or init.get("token")
-            or ""
-        )
+        token = uploaded_image_token(uploaded)
+        if not token:
+            # legacy / defensive fallbacks, never observed on the live API
+            token = str(
+                uploaded.get("token")
+                or (uploaded.get("retval") or {}).get("token")
+                or init.get("token")
+                or ""
+            )
         if not token:
             from urllib.parse import parse_qs, urlparse
 
