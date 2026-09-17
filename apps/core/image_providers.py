@@ -42,12 +42,16 @@ class ImageProvider(Protocol):
 
 
 def _usage_metadata(usage) -> dict:
-    """Token usage from an OpenAI images response, as plain ints (DRF-2055 cost evidence)."""
+    """Token usage from an images response, as plain ints (DRF-2055 cost evidence).
+
+    Accepts the OpenAI SDK usage object (attributes) or a decoded JSON dict
+    (OpenAI-compatible providers such as Nodule, DRF-2072).
+    """
     if usage is None:
         return {}
     result = {}
     for key in ("input_tokens", "output_tokens", "total_tokens"):
-        value = getattr(usage, key, None)
+        value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
         if isinstance(value, int) and not isinstance(value, bool):
             result[key] = value
     return result
@@ -342,8 +346,9 @@ class NoduleImageProvider:
             "experimental": True,
             "reference_equivalent": False,
         }
-        if isinstance(body.get("usage"), dict):
-            result_metadata["usage"] = body["usage"]
+        usage = _usage_metadata(body.get("usage") if isinstance(body.get("usage"), dict) else None)
+        if usage:
+            result_metadata["usage"] = usage
         return ImageGenerationResult(content=content, mime_type=mime_type, metadata=result_metadata)
 
 

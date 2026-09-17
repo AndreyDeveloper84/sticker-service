@@ -48,7 +48,7 @@ def b64_reply(request):
         json={
             "created": 1,
             "data": [{"b64_json": base64.b64encode(PNG).decode()}],
-            "usage": {"total_tokens": 42},
+            "usage": {"input_tokens": 10, "output_tokens": 32, "total_tokens": 42, "cost": "n/a"},
         },
     )
 
@@ -97,7 +97,16 @@ class NoduleContractTests(SimpleTestCase):
         self.assertEqual(result.metadata["endpoint"], NODULE_GENERATIONS_PATH)
         self.assertIs(result.metadata["experimental"], True)
         self.assertIs(result.metadata["reference_equivalent"], False)
-        self.assertEqual(result.metadata["usage"], {"total_tokens": 42})
+        # Same shape as OpenAI usage (DRF-2055 _usage_metadata): ints only.
+        self.assertEqual(
+            result.metadata["usage"],
+            {"input_tokens": 10, "output_tokens": 32, "total_tokens": 42},
+        )
+
+    def test_missing_usage_leaves_metadata_without_usage(self):
+        nodule, _ = provider(lambda r: httpx.Response(200, json={"data": [{"b64_json": base64.b64encode(PNG).decode()}]}))
+        result = nodule.generate_text_to_image(prompt="x")
+        self.assertNotIn("usage", result.metadata)
 
     def test_never_calls_edits(self):
         nodule, recorder = provider()
