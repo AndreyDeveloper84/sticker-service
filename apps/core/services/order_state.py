@@ -114,14 +114,19 @@ class OrderStateService:
             )
 
         from_status = order.status
-        order.status = to_status
-        order.save(update_fields=["status", "updated_at"])
         # DRF-2055: single emission point for the pilot funnel; every
         # transition (including PAID via PaymentService) passes through here.
-        OrderEvent.objects.create(
-            order=order,
-            event_type=OrderEvent.Type.STATUS_CHANGED,
-            from_status=from_status,
-            to_status=to_status,
-        )
+        # Status write and event insert succeed or fail together: callers in
+        # autocommit (console views, preview delivery) must never end up with
+        # a changed status and no log entry. Inside a caller's transaction
+        # this is a savepoint.
+        with transaction.atomic():
+            order.status = to_status
+            order.save(update_fields=["status", "updated_at"])
+            OrderEvent.objects.create(
+                order=order,
+                event_type=OrderEvent.Type.STATUS_CHANGED,
+                from_status=from_status,
+                to_status=to_status,
+            )
         return order

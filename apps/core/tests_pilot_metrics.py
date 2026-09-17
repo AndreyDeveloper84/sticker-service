@@ -16,7 +16,8 @@ from django.test import TestCase, override_settings
 from django.urls import reverse
 from django.utils import timezone
 
-from apps.core.image_providers import OpenAIImageProvider
+from apps.core import tests_full_generation as _full_generation
+from apps.core.image_providers import ImageGenerationResult, OpenAIImageProvider
 from apps.core.models import (
     ChannelIdentity,
     GeneratedAsset,
@@ -117,6 +118,22 @@ class OrderEventEmissionTests(MetricsFixtureMixin, TestCase):
         with self.assertRaises(Exception):
             OrderStateService.transition(order=order, to_status=Order.Status.PAID)
         self.assertEqual(order.events.count(), 0)
+
+    def test_event_insert_failure_rolls_back_the_status_change(self):
+        """Status write and event insert are one unit even in autocommit
+        callers (console views, preview delivery): a failed INSERT must not
+        leave a changed status without a log entry."""
+        order = self.order()
+        with mock.patch(
+            "apps.core.services.order_state.OrderEvent.objects.create",
+            side_effect=RuntimeError("event insert failed"),
+        ):
+            with self.assertRaises(RuntimeError):
+                OrderStateService.transition(order=order, to_status=Order.Status.AWAITING_PHOTOS)
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DRAFT)
+        self.assertEqual(OrderEvent.objects.count(), 0)
 
     def test_customer_approval_is_logged_once(self):
         order = self.order()
@@ -311,11 +328,38 @@ class PilotMetricsSnapshotTests(MetricsFixtureMixin, TestCase):
         self.assertEqual(manual["paid_orders_without_logs"], 1)
         self.assertEqual(manual["minutes_by_activity"], {"preview_review": 12})
 
-    def test_delivery_is_reported_as_not_yet_defined(self):
-        delivery = PilotMetricsService().snapshot()["delivery"]
-        self.assertEqual(delivery["orders_delivered"], 0)
-        self.assertFalse(delivery["delivered_status_defined"])
-        self.assertIn("DRF-2053", delivery["note"])
+    def test_delivery_counts_ready_for_delivery_and_delivered(self):
+        delivered = self.order()
+        self.to_preview_review(delivered)
+        self.walk(
+            delivered,
+            Order.Status.PACK_GENERATING,
+            Order.Status.QUALITY_CONTROL,
+            Order.Status.READY_FOR_DELIVERY,
+            Order.Status.DELIVERY_IN_PROGRESS,
+            Order.Status.DELIVERED,
+        )
+        waiting = self.order()
+        self.to_preview_review(waiting)
+        self.walk(waiting, Order.Status.PACK_GENERATING, Order.Status.QUALITY_CONTROL, Order.Status.READY_FOR_DELIVERY)
+
+        snapshot = PilotMetricsService().snapshot()
+
+        self.assertEqual(snapshot["delivery"], {"orders_delivered": 1, "orders_ready_for_delivery": 2})
+        self.assertEqual(snapshot["funnel"]["reached"][Order.Status.DELIVERED], 1)
+        self.assertEqual(snapshot["funnel"]["reached"][Order.Status.READY_FOR_DELIVERY], 2)
+        self.assertNotIn("delivered_status_defined", snapshot["delivery"])
+
+    def test_delivered_is_inferred_for_orders_that_predate_the_log(self):
+        # An order that reached DELIVERED before the event log existed still
+        # counts for every earlier happy-path stage.
+        before = PilotMetricsService().snapshot()["funnel"]["reached"]
+        self.order(status=Order.Status.DELIVERED)
+
+        after = PilotMetricsService().snapshot()["funnel"]["reached"]
+
+        for stage in (Order.Status.PAID, Order.Status.READY_FOR_DELIVERY, Order.Status.DELIVERED):
+            self.assertEqual(after[stage], before[stage] + 1, stage)
 
     def test_window_filters_by_order_creation(self):
         Order.objects.filter(pk=self.cancelled.pk).update(created_at=timezone.now() - timedelta(days=30))
@@ -353,3 +397,34 @@ class PilotMetricsCommandTests(MetricsFixtureMixin, TestCase):
 
         with self.assertRaises(CommandError):
             call_command("pilot_metrics", "--since", "yesterday", stdout=StringIO())
+
+
+class FullGenerationUsageMetricsTests(_full_generation.FullProductionTestCase):
+    """DRF-2051 compat: FULL jobs keep provider metadata (model, usage) in
+    output_metadata like preview jobs do, so pilot metrics can price them."""
+
+    def test_full_usage_is_visible_in_generation_cost(self):
+        usage = {"input_tokens": 70, "output_tokens": 330, "total_tokens": 400}
+
+        class UsageProvider(_full_generation.FakeProvider):
+            def generate_preview(self, request):
+                result = super().generate_preview(request)
+                return ImageGenerationResult(
+                    content=result.content, metadata={"model": "gpt-image-2", "usage": usage}
+                )
+
+        order, _preview = self._make_order(config=_full_generation.SINGLE_CONFIG, emotions=("hello",))
+        self._service(UsageProvider()).start(order=order)
+
+        job = self._full_jobs(order).get()
+        self.assertEqual(job.status, GenerationJob.Status.SUCCEEDED)
+        self.assertEqual(job.output_metadata["asset_id"], self._final_assets(order).get().pk)
+        self.assertEqual(job.output_metadata["model"], "gpt-image-2")
+        self.assertEqual(job.output_metadata["usage"], usage)
+
+        cost = PilotMetricsService().snapshot()["generation_cost"]
+        self.assertEqual(cost["provider_calls_by_task_type"].get("full"), 1)
+        self.assertGreaterEqual(cost["jobs_with_usage"], 1)
+        for key, value in usage.items():
+            self.assertGreaterEqual(cost["tokens"].get(key, 0), value)
+

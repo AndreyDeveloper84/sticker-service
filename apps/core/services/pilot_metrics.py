@@ -33,11 +33,9 @@ FUNNEL_STAGES = [
     Order.Status.QUALITY_CONTROL,
 ]
 
-# Statuses owned by later tickets (DRF-2052 QC exit, DRF-2053 delivery). They
-# are reported by value so the snapshot picks them up as soon as the owning
-# ticket routes them through OrderStateService.
-LATER_STAGES = ["ready_for_delivery", "delivered"]
-DELIVERED_STATUS = "delivered"
+# Post-production stages (DRF-2052 QC exit, DRF-2053 delivery). DELIVERY_IN_PROGRESS
+# is a transient step between them and is not a funnel stage of its own.
+LATER_STAGES = [Order.Status.READY_FOR_DELIVERY, Order.Status.DELIVERED]
 
 TERMINAL_STATUSES = {Order.Status.CANCELLED, Order.Status.FAILED}
 
@@ -262,10 +260,7 @@ class PilotMetricsService:
 
     @staticmethod
     def _delivery(reached, status_now) -> dict:
-        defined = DELIVERED_STATUS in {value for value, _ in Order.Status.choices}
         return {
-            "orders_delivered": len(reached.get(DELIVERED_STATUS, set())),
-            "orders_ready_for_delivery": len(reached.get("ready_for_delivery", set())),
-            "delivered_status_defined": defined,
-            "note": None if defined else "DELIVERED status is not defined yet (DRF-2053); count stays 0 until then.",
+            "orders_delivered": len(reached.get(Order.Status.DELIVERED, set())),
+            "orders_ready_for_delivery": len(reached.get(Order.Status.READY_FOR_DELIVERY, set())),
         }
