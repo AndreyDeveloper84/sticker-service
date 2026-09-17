@@ -25,6 +25,7 @@ same matrix is described in docs/DRF-2054_pilot_e2e_live_runbook.md.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import tempfile
@@ -58,6 +59,7 @@ from apps.core.services.qc import AUTOMATED_CHECKS, HUMAN_CRITERIA, QcService
 from apps.core.storage import LocalMediaStorage
 from apps.core.tests_qc import make_image
 from apps.max_bot.paid_notice import PAID_NOTICE_TEXT
+from apps.max_bot.production_notice import PRODUCTION_NOTICE_TEXT
 from apps.max_bot.payments import CheckoutSession, PaymentConfirmation
 from apps.telegram_bot.payments import TelegramStarsPaymentAdapter
 
@@ -291,6 +293,18 @@ class TelegramDriver:
         """Console preview delivery talks to the Telegram client at this boundary."""
         return mock.patch("apps.core.preview_delivery_console.TelegramBotClient", return_value=self.bot)
 
+    def production_patch(self):
+        """Start Full Production notifies MAX customers only; Telegram orders
+        must never instantiate the MAX client (DRF-2075)."""
+        return contextlib.nullcontext()
+
+    def production_notices(self):
+        return sum(
+            1
+            for call in self.bot.send_message.call_args_list
+            if call.kwargs.get("text") == PRODUCTION_NOTICE_TEXT
+        )
+
     def preview_controls_sent(self):
         return any(
             call.kwargs.get("text") == "Как вам превью?"
@@ -437,6 +451,19 @@ class MaxDriver:
     def preview_delivery_patch(self):
         return mock.patch("apps.core.preview_delivery_console.MaxBotClient", return_value=self.bot)
 
+    def production_patch(self):
+        """Start Full Production sends the "in production" notice through the
+        MAX client at this boundary (DRF-2075) — never the real API in tests."""
+        return mock.patch("apps.core.production_console.MaxBotClient", return_value=self.bot)
+
+    def production_notices(self):
+        return sum(
+            1
+            for call in self.bot.send_message.call_args_list
+            if call.kwargs.get("text") == PRODUCTION_NOTICE_TEXT
+            and call.kwargs.get("user_id") == self.recipient_id()
+        )
+
     def preview_controls_sent(self):
         return any(
             call.kwargs.get("text") == "Как вам превью?"
@@ -512,15 +539,21 @@ class PilotE2ECase(TestCase):
         self.assertEqual(deliveries[0]["channel"], driver.channel)
         self.assertTrue(driver.preview_controls_sent())
 
-    def operator_full_production(self, order, approved_preview):
+    def operator_full_production(self, driver, order, approved_preview):
         quantity = PRICES[order.product.code]["quantity"]
         emotions = order_emotion_codes(order)
         before = len(self.provider.requests)
+        expected_notices = 1 if driver.channel == ChannelIdentity.Channel.MAX else 0
+        self.assertEqual(driver.production_notices(), 0, "no production notice before production starts")
         for step in range(1, quantity + 1):
-            self._console("core_order_start_full_production", order.pk)
+            with driver.production_patch():
+                self._console("core_order_start_full_production", order.pk)
             order.refresh_from_db()
             expected = Order.Status.QUALITY_CONTROL if step == quantity else Order.Status.PACK_GENERATING
             self.assertEqual(order.status, expected, f"slot {step}/{quantity}")
+            # DRF-2075: the MAX customer is told once when production starts;
+            # slot batching re-entries never repeat it; Telegram gets nothing.
+            self.assertEqual(driver.production_notices(), expected_notices, f"slot {step}/{quantity}")
         full_requests = [r for r in self.provider.requests[before:] if r["task_type"] == GenerationJob.TaskType.FULL]
         self.assertEqual([r["slot_key"] for r in full_requests], emotions)
         for request in full_requests:
@@ -534,8 +567,10 @@ class PilotE2ECase(TestCase):
         self.assertEqual(len(finals), quantity)
         self.assertEqual(sorted(a.slot_key for a in finals), sorted(emotions))
         # re-entry after completion is a rejected no-op, never a duplicate
-        self._console("core_order_start_full_production", order.pk)
+        with driver.production_patch():
+            self._console("core_order_start_full_production", order.pk)
         self.assertEqual(jobs.count(), quantity)
+        self.assertEqual(driver.production_notices(), expected_notices)
         return finals
 
     def operator_qc_pass(self, order):
@@ -626,7 +661,7 @@ class PilotE2ECase(TestCase):
         ]
         self.assertEqual([a.pk for a in approved], [preview.pk])
 
-        finals = self.operator_full_production(order, preview)
+        finals = self.operator_full_production(driver, order, preview)
         report = self.operator_qc_pass(order)
         self.assertEqual(report.asset_ids, [a.pk for a in finals])
         self.final_delivery(driver, order)
