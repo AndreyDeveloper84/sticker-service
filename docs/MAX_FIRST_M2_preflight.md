@@ -33,11 +33,12 @@ approve/revision → FULL (1 slot) → QC → final delivery → `DELIVERED`.
 | `IMAGE_PROVIDER` | выбор провайдера `openai|nodule` (появится с провайдером C) | для M2 — `openai` или absent (default openai); `nodule` для персонализированных операций = fail‑closed | absent (переменной ещё нет в коде) |
 | `MAX_BOT_TOKEN` | официальный MAX‑бот (STG‑05B) | present; `GET /me` direct → 200 | present ✔ |
 | `MAX_WEBHOOK_SECRET` | защита `/max/webhook/` | present | present ✔ |
+| `MAX_API_BASE` | override базы MAX Bot API (`apps/max_bot/client.py`, только tests/staging‑smoke); при значении весь трафик бота уйдёт на другой хост | **absent** (direct platform API) | absent ✔ (Agent A, 2026‑09‑17: effective base `https://botapi.max.ru`) |
 | `YOOKASSA_SHOP_ID` | магазин YooKassa | present | present ✔ |
 | `YOOKASSA_SECRET_KEY` | секрет магазина; `test_…` = тестовый магазин, `live_…` = боевой | present; **режим фиксируется в evidence** (test/live) | present, режим **test** |
 | `YOOKASSA_RETURN_URL` | возврат после оплаты | present | present ✔ |
 | `YOOKASSA_API_BASE` | override API base — должен быть absent (direct api.yookassa.ru) | absent | absent ✔ |
-| `MAX_PAYMENT_PROVIDER_*` (3 шт.) | legacy MAX‑провайдер, не используется с YooKassa | могут быть пустыми | empty ✔ |
+| `MAX_PAYMENT_PROVIDER_*` (3 шт.) | legacy MAX‑провайдер; **кодом не читаются** (нет в `apps/`/`config/`), можно удалить из `.env.staging` | могут быть пустыми или отсутствовать | empty ✔ |
 | `OUTBOUND_PROXY_ENABLED` / `OUTBOUND_PROXY_URLS_JSON` / `OUTBOUND_PROXY_COOLDOWN_SECONDS` | ProxyPool только для Telegram/OpenAI (DRF‑2041) | present; JSON‑list валиден; **credentials ротированы** до REAL PAID | present, JSON ok, **не ротированы** → для REAL PAID блокер (DRF‑2041) |
 | `HTTP_PROXY` / `HTTPS_PROXY` (в контейнере) | глобального прокси быть не должно | absent | absent ✔ |
 | `TELEGRAM_*` | не нужны для M2 (MAX path не ждёт Telegram relay) | — | — |
@@ -74,11 +75,12 @@ grep -E '^[A-Za-z_][A-Za-z0-9_]*=' .env.staging \
 
 # 2.4 backend видит переменные (присутствие + форма, не значение)
 $C exec -T backend sh -c '
-  for v in OPENAI_API_KEY OPENAI_IMAGE_SIZE OPENAI_IMAGE_BACKGROUND OPENAI_IMAGE_OUTPUT_FORMAT MAX_BOT_TOKEN MAX_WEBHOOK_SECRET YOOKASSA_SHOP_ID YOOKASSA_SECRET_KEY YOOKASSA_RETURN_URL OUTBOUND_PROXY_ENABLED OUTBOUND_PROXY_URLS_JSON NODULE_IMAGE_API_KEY IMAGE_PROVIDER OPENAI_BASE_URL HTTPS_PROXY HTTP_PROXY; do
+  for v in OPENAI_API_KEY OPENAI_IMAGE_SIZE OPENAI_IMAGE_BACKGROUND OPENAI_IMAGE_OUTPUT_FORMAT MAX_BOT_TOKEN MAX_WEBHOOK_SECRET MAX_API_BASE YOOKASSA_SHOP_ID YOOKASSA_SECRET_KEY YOOKASSA_RETURN_URL OUTBOUND_PROXY_ENABLED OUTBOUND_PROXY_URLS_JSON NODULE_IMAGE_API_KEY IMAGE_PROVIDER OPENAI_BASE_URL HTTPS_PROXY HTTP_PROXY; do
     eval val=\$$v; if [ -n "$val" ]; then echo "$v present"; else echo "$v absent"; fi
   done
   case "$OPENAI_API_KEY" in sk-*) echo "OPENAI_API_KEY format: canonical";; nodule_*) echo "OPENAI_API_KEY format: NODULE (wrong slot)";; *) echo "OPENAI_API_KEY format: other";; esac
-  case "$YOOKASSA_SECRET_KEY" in test_*) echo "YOOKASSA mode: test";; live_*) echo "YOOKASSA mode: live";; *) echo "YOOKASSA mode: other";; esac'
+  case "$YOOKASSA_SECRET_KEY" in test_*) echo "YOOKASSA mode: test";; live_*) echo "YOOKASSA mode: live";; *) echo "YOOKASSA mode: other";; esac
+  [ -z "$MAX_API_BASE" ] && echo "MAX_API_BASE: absent (direct platform API) OK" || echo "MAX_API_BASE: PRESENT -> bot traffic redirected, must be removed for real MAX"'
 
 # 2.5 egress: OpenAI через ProxyPool, MAX и YooKassa DIRECT
 $C exec -T backend python manage.py check_outbound_proxies      # нужно: telegram PASS + openai PASS
@@ -104,7 +106,7 @@ for p in max/webhook/ max/payment/webhook/; do printf "%s -> " $p; curl -s -o /d
 ```
 
 Критерии ENGINEERING READY по §2: HEAD == origin/dev, deploy run SUCCESS, health
-`ok/db/redis`, 0 unapplied, env parse PASS, MAX `/me` ok, YooKassa `/v3/me` 200
+`ok/db/redis`, 0 unapplied, env parse PASS, `MAX_API_BASE` absent, MAX `/me` ok, YooKassa `/v3/me` 200
 без proxy mounts, `single-sticker` active с `price_minor=10000 RUB`, GET на
 webhooks → 405. Для REAL PAID дополнительно: `check_outbound_proxies` → `openai PASS`
 и `OPENAI_API_KEY format: canonical`.
@@ -232,10 +234,11 @@ preview на существующем оплаченном Order 8 (DRF‑1871),
 только с png/webp (jpeg не несёт alpha; `opaque`/absent → `missing_alpha`);
 `dimensions` — требует одну сторону **ровно 512 px**, а API отдаёт минимум
 1024 px, поэтому `size=1024x1024` (и любой другой) всё равно даст
-`bad_dimensions` без post‑processing — это отдельное решение (issue D,
-resize/crop до 512 перед сохранением FINAL), параметры провайдера его не закрывают;
+`bad_dimensions` без post‑processing — это отдельное решение (issue D = **DRF‑2076**:
+нормализация до 512 выполняется в `QcService.start_qc()` in place, оригинал
+сохраняется, ссылка в `metadata.normalized_from`), параметры провайдера его не закрывают;
 `file_size` — ≤ 512 KB; 1024 px PNG с alpha может превышать → `file_too_large`.
-Итог: параметры снимают только alpha/mime‑половину риска; PASS в QC до issue D
+Итог: параметры снимают только alpha/mime‑половину риска; PASS в QC до DRF‑2076
 не ожидается, и это корректная работа gate, а не дефект.
 
 ---
