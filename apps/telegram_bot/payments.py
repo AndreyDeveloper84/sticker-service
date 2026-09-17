@@ -1,13 +1,34 @@
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 
-from apps.core.models import ChannelIdentity, Order, Payment
+from apps.core.models import ChannelIdentity, Order, Payment, Product
 from apps.core.services.payment import PaymentError, PaymentService
+
+logger = logging.getLogger(__name__)
 
 
 class TelegramPaymentError(ValueError):
     pass
+
+
+def configured_stars_price(product: Product) -> int:
+    """Explicit Telegram Stars (XTR) price from Product.config["price_stars"].
+
+    DRF-2057: XTR is priced independently of the RUB price. There is no
+    conversion from and no fallback to price_minor/currency; a missing or
+    malformed value fails closed before any Payment or invoice exists.
+    """
+    value = (product.config or {}).get("price_stars")
+    if value is None:
+        logger.warning("Telegram Stars checkout blocked: product=%s price_stars is not configured", product.code)
+        raise TelegramPaymentError("Product Telegram Stars price is not configured")
+    # bool is an int subclass; floats/strings would be silently coerced by int().
+    if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+        logger.warning("Telegram Stars checkout blocked: product=%s price_stars is invalid", product.code)
+        raise TelegramPaymentError("Product Telegram Stars price is invalid")
+    return value
 
 
 @dataclass(frozen=True)
@@ -28,12 +49,7 @@ class TelegramStarsPaymentAdapter:
         if order is None:
             raise TelegramPaymentError("No order is ready for payment")
 
-        try:
-            amount = int((order.product.config or {}).get("price_stars"))
-        except (TypeError, ValueError):
-            raise TelegramPaymentError("Product Telegram Stars price is not configured")
-        if amount <= 0:
-            raise TelegramPaymentError("Product Telegram Stars price is not configured")
+        amount = configured_stars_price(order.product)
 
         existing = (
             Payment.objects.filter(

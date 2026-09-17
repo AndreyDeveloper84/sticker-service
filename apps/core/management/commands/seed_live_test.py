@@ -24,6 +24,11 @@ GENERATION_PROMPT = (
     "Use a clean sticker composition suitable for messaging apps."
 )
 
+# Pricing (DRF-2057): price_minor/currency is the RUB price used by the
+# MAX/YooKassa path; price_stars is the Telegram Stars (XTR) price used by the
+# Telegram invoice. They are independent and never derived from each other.
+# The price_stars values below are provisional technical placeholders, NOT
+# owner-approved commercial XTR prices.
 PILOT_PRODUCTS = [
     {
         "code": "sticker-pack-9",
