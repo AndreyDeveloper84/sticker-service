@@ -8,7 +8,7 @@ from apps.core.models import Order, Revision
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
 from apps.telegram_bot.client import TelegramBotClient
-from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
+from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter, configured_stars_price
 
 
 @csrf_exempt
@@ -110,15 +110,23 @@ def _emotion_step(adapter, order):
     return text, {"inline_keyboard": buttons}
 
 
-def _summary_text(summary):
+def _summary_text(summary, *, price_stars):
     lines = [f"Ваш заказ: {summary['product_name']}", f"Стиль: {summary['style_name']}"]
     if summary["quantity"]:
         lines.append(f"Стикеров: {summary['quantity']}")
     if summary["emotions"]:
         lines.append(f"Эмоции: {', '.join(summary['emotions'])}")
-    if summary["price_stars"]:
-        lines.append(f"Цена: {summary['price_stars']} Stars")
+    if price_stars:
+        lines.append(f"Цена: {price_stars} Stars")
     return "\n".join(lines)
+
+
+def _summary_stars_price(product):
+    # Shows exactly what the XTR invoice will charge; never a RUB amount.
+    try:
+        return configured_stars_price(product)
+    except TelegramPaymentError:
+        return None
 
 
 def _revision_buttons():
@@ -161,7 +169,7 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
         client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
     elif data == "photos_done":
         order = adapter.complete_photos(identity)
-        client.send_message(chat_id=chat_id, text=_summary_text(adapter.order_summary(order)), reply_markup={"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]})
+        client.send_message(chat_id=chat_id, text=_summary_text(adapter.order_summary(order), price_stars=_summary_stars_price(order.product)), reply_markup={"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]})
     elif data == "pay":
         payment = payment_adapter.payment_for_identity(identity)
         client.send_invoice(chat_id=chat_id, title=payment.order.product.name, description="Персональный цифровой заказ", payload=payment_adapter.payload(payment), amount_stars=payment.amount_minor)

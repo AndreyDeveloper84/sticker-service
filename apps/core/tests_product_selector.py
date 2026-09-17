@@ -197,7 +197,8 @@ class PilotSeedTests(TestCase):
         self.assertEqual(len(pack.config["emotions"]), 9)
         self.assertEqual(len({item["code"] for item in pack.config["emotions"]}), 9)
         self.assertEqual(pack.config["price_minor"], 50000)
-        self.assertEqual(pack.config["price_stars"], 500)
+        # DRF-2057: XTR price is approved independently of the RUB price.
+        self.assertEqual(pack.config["price_stars"], 460)
 
         self.assertEqual(single.config["kind"], "single")
         self.assertEqual(single.config["quantity"], 1)
