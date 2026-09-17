@@ -12,6 +12,7 @@ import os
 import tempfile
 from io import BytesIO
 from pathlib import Path
+from unittest import mock
 from uuid import uuid4
 
 from django.contrib.auth import get_user_model
@@ -391,6 +392,15 @@ class QcCurrentAssetRuleTests(QcTestCase):
 
 
 class QcAutomatedChecksTests(QcTestCase):
+    """Raw automated checks: these are the gate itself and must hold with
+    format normalization (DRF-2076) switched off, i.e. on the rollback path."""
+
+    def setUp(self):
+        super().setUp()
+        env = mock.patch.dict(os.environ, {"QC_NORMALIZE_FINAL_ASSETS": "0"})
+        env.start()
+        self.addCleanup(env.stop)
+
     def _run_fail(self, storage, order, **asset_kwargs):
         service = QcService(storage=storage)
         asset = self.add_final_asset(storage, order, attempt=1, **asset_kwargs)

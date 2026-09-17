@@ -8,8 +8,9 @@ proves that every stage refuses to advance without its precondition:
     G3  no full production before customer approval
     G4  no full production without a confirmed payment
     G5  no QC / delivery before production is complete
-    G6  no delivery before QC PASS; QC FAIL on non-sticker output blocks
-        delivery (the 512 px / alpha risk recorded on DRF-2052)
+    G6  no delivery before QC PASS; QC FAIL on opaque provider output blocks
+        delivery (DRF-2052 risk: the 1024 px side is normalized by DRF-2076,
+        the missing alpha is never invented)
     G7  channel isolation: a preview cannot leave through the other channel
     G8  the included revision is single-use
     G9  MAX consent gate: no checkout without consent:accept, accept is
@@ -54,8 +55,9 @@ from apps.max_bot.preview_delivery import MaxPreviewDeliveryAdapter
 
 
 class OpaqueLargeProvider:
-    """What an unconfigured images.edit call is expected to return: 1024 px,
-    no alpha. QC must FAIL such output and keep delivery closed."""
+    """What an unconfigured images.edit call returns: 1024 px, no alpha.
+    Normalization fixes the size; QC must still FAIL on alpha and keep
+    delivery closed."""
 
     name = "opaque-1024"
 
@@ -205,14 +207,18 @@ class PilotNegativeGateTests(PilotE2ECase):
         self._console("core_order_qc_start", order.pk)
         report = QcReport.objects.get(order=order)
         checks = report.automated_checks["laugh"]
-        self.assertFalse(checks["dimensions"])
+        # DRF-2076: the 1024 px side is normalized to 512 before the checks;
+        # the missing alpha is NOT invented and still fails honestly.
+        asset = GeneratedAsset.objects.get(pk=checks["asset_id"])
+        self.assertEqual(asset.metadata["normalized_from"]["width"], 1024)
+        self.assertTrue(checks["dimensions"])
         self.assertFalse(checks["alpha_channel"])
         self.assertTrue(checks["decodable"])
         self._console("core_order_qc_finalize", order.pk, data={c: "on" for c in HUMAN_CRITERIA})
         report.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual(report.status, QcReport.Status.FAILED)
-        self.assertEqual(report.reason_codes, ["bad_dimensions", "missing_alpha"])
+        self.assertEqual(report.reason_codes, ["missing_alpha"])
         self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
         with self.assertRaises(QcError):
             QcService(storage=self.storage).assert_delivery_allowed(order=order)
