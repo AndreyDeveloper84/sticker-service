@@ -40,6 +40,7 @@ from apps.core.services.preview_delivery import PreviewDeliveryError, PreviewDel
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.core.services.qc import HUMAN_CRITERIA, QcError, QcService
 from apps.max_bot.payments import MaxExternalPaymentAdapter, MaxPaymentError
+from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
 from apps.core.tests_e2e_pilot_matrix import (
     ALL_EMOTIONS,
     PACK,
@@ -370,3 +371,77 @@ class PilotNegativeGateTests(PilotE2ECase):
         self.assertNotEqual(new_order.pk, order.pk)
         self.assertFalse(new_order.consent_accepted)
         self.assertEqual(new_order.consent_version, "")
+
+    # -- G9 (Telegram): consent gate before the Stars invoice --------------------
+
+    def test_G9_telegram_invoice_requires_consent_and_accept_is_idempotent(self):
+        driver = TelegramDriver(self)
+        driver._post(driver._message(text="/start"))
+        for data in (f"product:{SINGLE}", f"style:{SINGLE}:comic", "emotion:laugh"):
+            driver._post(driver._callback(data))
+        driver._post(driver._message(photo=[{"file_id": "big"}]))
+        self.assertEqual(driver._post(driver._callback("photos_done")).status_code, 200)
+        order = Order.objects.get(channel_identity__external_user_id=driver.recipient_id())
+        self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+        self.assertFalse(order.consent_accepted)
+
+        # "pay" before consent: the webhook path has nothing ready for payment;
+        # no invoice, no Payment
+        response = driver._post(driver._callback("pay"))
+        self.assertEqual(response.status_code, 200)
+        self.assertFalse(response.json()["ok"])
+        driver.bot.send_invoice.assert_not_called()
+        self.assertFalse(Payment.objects.filter(order=order).exists())
+        # domain-level gate: an order forced to READY_FOR_CHECKOUT without
+        # consent (a path that bypasses the consent screen) is refused
+        bypass = TelegramDriver(self)
+        bypass.user = {"id": 770910, "first_name": "Bypass"}
+        bypass._post(bypass._message(text="/start"))
+        for data in (f"product:{SINGLE}", f"style:{SINGLE}:comic", "emotion:laugh"):
+            bypass._post(bypass._callback(data))
+        bypass._post(bypass._message(photo=[{"file_id": "big"}]))
+        bypass_order = Order.objects.get(channel_identity__external_user_id="770910")
+        ChannelOrderFlowService().complete_photos(bypass_order.channel_identity)
+        bypass_order.refresh_from_db()
+        self.assertEqual(bypass_order.status, Order.Status.READY_FOR_CHECKOUT)
+        with self.assertRaisesMessage(TelegramPaymentError, "consent"):
+            TelegramStarsPaymentAdapter().payment_for_identity(bypass_order.channel_identity)
+        response = bypass._post(bypass._callback("pay"))
+        self.assertFalse(response.json()["ok"])
+        bypass.bot.send_invoice.assert_not_called()
+        self.assertFalse(Payment.objects.filter(order=bypass_order).exists())
+        # a second photos_done just repeats the consent screen
+        self.assertEqual(driver._post(driver._callback("photos_done", "cb-again")).status_code, 200)
+        self.assertEqual(
+            driver.bot.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
+            "consent:accept",
+        )
+
+        # accept → one consent → pay → one pending payment, one invoice
+        self.assertEqual(driver._post(driver._callback("consent:accept")).status_code, 200)
+        order.refresh_from_db()
+        accepted_at = order.consent_accepted_at
+        self.assertTrue(order.consent_accepted)
+        self.assertEqual(order.status, Order.Status.READY_FOR_CHECKOUT)
+        self.assertEqual(driver._post(driver._callback("pay")).status_code, 200)
+        payment = Payment.objects.get(order=order)
+        # duplicate accept is idempotent: same consent timestamp, pay reuses
+        # the same pending payment (same invoice payload)
+        self.assertEqual(driver._post(driver._callback("consent:accept", "cb-dup")).status_code, 200)
+        self.assertEqual(driver._post(driver._callback("pay")).status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.consent_accepted_at, accepted_at)
+        self.assertEqual(Payment.objects.filter(order=order).count(), 1)
+        payloads = {call.kwargs["payload"] for call in driver.bot.send_invoice.call_args_list}
+        self.assertEqual(payloads, {TelegramStarsPaymentAdapter.payload(payment)})
+
+        # consent never leaks to the customer's next order
+        driver.pay(order)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PAID)
+        next_order = ChannelOrderFlowService().create_or_get_order(
+            identity=order.channel_identity, product_code=SINGLE, style_code="comic"
+        )
+        self.assertNotEqual(next_order.pk, order.pk)
+        self.assertFalse(next_order.consent_accepted)
+

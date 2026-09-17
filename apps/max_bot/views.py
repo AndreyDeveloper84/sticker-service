@@ -11,6 +11,7 @@ from django.views.decorators.csrf import csrf_exempt
 logger = logging.getLogger(__name__)
 
 from apps.core.models import Order, Revision
+from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.max_bot.adapter import MaxAdapter, MaxFlowError
 from apps.max_bot.checkout import start_checkout
@@ -150,14 +151,8 @@ PHOTO_REJECTED = (
 # Consent gate (MAX Pilot): shown after the photos are complete, before the
 # order summary and the YooKassa link. The accepted text version is persisted
 # on the order (PILOT_CONSENT_VERSION) so checkout can fail closed without it.
-CONSENT_TEXT = (
-    "Перед оплатой подтвердите:\n"
-    "• у вас есть право использовать загруженные фотографии;\n"
-    "• фотографии будут обработаны для создания заказанных стикеров;\n"
-    "• вы принимаете условия сервиса и заказа.\n\n"
-    "Нажмите «Принимаю», чтобы перейти к оплате."
-)
-CONSENT_BUTTONS = [[{"text": "Принимаю", "payload": "consent:accept"}]]
+CONSENT_TEXT = PILOT_CONSENT_TEXT
+CONSENT_BUTTONS = [[{"text": PILOT_CONSENT_BUTTON_LABEL, "payload": "consent:accept"}]]
 
 
 def _emotion_step(adapter, order):

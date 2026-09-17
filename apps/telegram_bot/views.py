@@ -5,6 +5,7 @@ from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
 from apps.core.models import Order, Revision
+from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
 from apps.telegram_bot.client import TelegramBotClient
@@ -90,6 +91,13 @@ def _feedback_order(identity):
 
 PHOTO_PROMPT = "Отправьте несколько хороших фотографий человека."
 
+# Consent gate (parity with MAX, DRF-2069): shown after the photos are
+# complete, before the order summary and the Stars invoice; the accepted text
+# version is persisted on the order so checkout can fail closed without it.
+CONSENT_TEXT = PILOT_CONSENT_TEXT
+CONSENT_REPLY_MARKUP = {"inline_keyboard": [[{"text": PILOT_CONSENT_BUTTON_LABEL, "callback_data": "consent:accept"}]]}
+PAY_REPLY_MARKUP = {"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]}
+
 
 def _emotion_step(adapter, order):
     """Emotion step text + keyboard, driven entirely by Product.config.
@@ -168,8 +176,17 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
         adapter.confirm_emotions(identity=identity)
         client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
     elif data == "photos_done":
-        order = adapter.complete_photos(identity)
-        client.send_message(chat_id=chat_id, text=_summary_text(adapter.order_summary(order), price_stars=_summary_stars_price(order.product)), reply_markup={"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]})
+        # Validate photos/selection now (same errors as before) but stay in
+        # AWAITING_PHOTOS: the invoice is reachable only through consent:accept.
+        adapter.photos_ready(identity)
+        client.send_message(chat_id=chat_id, text=CONSENT_TEXT, reply_markup=CONSENT_REPLY_MARKUP)
+    elif data == "consent:accept":
+        order = adapter.accept_consent(identity=identity)
+        if order.status == Order.Status.AWAITING_PHOTOS:
+            order = adapter.complete_photos(identity)
+        # Repeated accept is idempotent: consent is stored once; "pay" reuses
+        # the pending payment.
+        client.send_message(chat_id=chat_id, text=_summary_text(adapter.order_summary(order), price_stars=_summary_stars_price(order.product)), reply_markup=PAY_REPLY_MARKUP)
     elif data == "pay":
         payment = payment_adapter.payment_for_identity(identity)
         client.send_invoice(chat_id=chat_id, title=payment.order.product.name, description="Персональный цифровой заказ", payload=payment_adapter.payload(payment), amount_stars=payment.amount_minor)

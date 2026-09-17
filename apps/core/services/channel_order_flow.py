@@ -16,6 +16,18 @@ class ChannelFlowError(ValueError):
 # customer actually saw (Order.consent_version).
 PILOT_CONSENT_VERSION = "pilot-2026-09-v1"
 
+# Customer-facing consent text for PILOT_CONSENT_VERSION (same wording in every
+# channel): rights to the photos, processing for the ordered stickers,
+# service/order terms. Channel views only add their own button widget.
+PILOT_CONSENT_TEXT = (
+    "Перед оплатой подтвердите:\n"
+    "• у вас есть право использовать загруженные фотографии;\n"
+    "• фотографии будут обработаны для создания заказанных стикеров;\n"
+    "• вы принимаете условия сервиса и заказа.\n\n"
+    "Нажмите «Принимаю», чтобы перейти к оплате."
+)
+PILOT_CONSENT_BUTTON_LABEL = "Принимаю"
+
 
 def product_emotion_count(product: Product) -> int:
     """Emotions required by the product; 0 means the product has no emotion step."""
