@@ -35,6 +35,14 @@ $COMPOSE run --rm --no-deps backend python manage.py collectstatic --noinput
 echo "[deploy] starting services"
 $COMPOSE up -d --remove-orphans
 
+# The nginx config is a bind-mounted template rendered at container start.
+# `up -d` leaves a running nginx untouched (the service definition did not
+# change), and after `git checkout` the mount still points at the OLD file
+# inode, so template changes never reach the running container. Recreating
+# nginx is cheap (~5 s) and deterministic, so always do it.
+echo "[deploy] recreating nginx to re-render the config template"
+$COMPOSE up -d --force-recreate --no-deps nginx
+
 echo "[deploy] waiting for backend healthcheck"
 backend_cid="$($COMPOSE ps -q backend)"
 if [ -z "$backend_cid" ]; then
