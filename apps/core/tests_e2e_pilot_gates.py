@@ -12,6 +12,8 @@ proves that every stage refuses to advance without its precondition:
         delivery (the 512 px / alpha risk recorded on DRF-2052)
     G7  channel isolation: a preview cannot leave through the other channel
     G8  the included revision is single-use
+    G9  MAX consent gate: no checkout without consent:accept, accept is
+        idempotent and bound to one order (PR #37)
 
 All gates are exercised on the real pilot catalog with the same fakes as
 the matrix; nothing here reaches Telegram, MAX, YooKassa or OpenAI.
@@ -30,11 +32,13 @@ from apps.core.models import (
     Revision,
 )
 from apps.core.services.final_delivery import FinalDeliveryError
+from apps.core.services.channel_order_flow import ChannelOrderFlowService
 from apps.core.services.full_production import FullProductionError, FullProductionService
 from apps.core.services.generation import GenerationError, GenerationService
 from apps.core.services.preview_delivery import PreviewDeliveryError, PreviewDeliveryService
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.core.services.qc import HUMAN_CRITERIA, QcError, QcService
+from apps.max_bot.payments import MaxExternalPaymentAdapter, MaxPaymentError
 from apps.core.tests_e2e_pilot_matrix import (
     ALL_EMOTIONS,
     PACK,
@@ -124,10 +128,13 @@ class PilotNegativeGateTests(PilotE2ECase):
         response, payment = driver.pay(order)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(order.status, Order.Status.PAID)
-        # a replayed webhook is ACKed and stays a single confirmation
+        self.assertEqual(driver.paid_notices(), 1)
+        # a replayed webhook is ACKed, stays a single confirmation and sends
+        # no second customer notice
         response, _ = driver.pay(order)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(Payment.objects.filter(order=order, status=Payment.Status.CONFIRMED).count(), 1)
+        self.assertEqual(driver.paid_notices(), 1)
 
     # -- G3 / G4: production entry ------------------------------------------
 
@@ -276,3 +283,84 @@ class PilotNegativeGateTests(PilotE2ECase):
         self.assertEqual(
             order.generated_assets.filter(kind=GeneratedAsset.Kind.PREVIEW).count(), 2
         )
+
+    # -- G9: MAX consent gate ---------------------------------------------------
+
+    def test_G9_max_checkout_requires_consent_and_accept_is_idempotent(self):
+        driver = MaxDriver(self)
+        driver._post({"update_type": "bot_started", "chat_id": driver.chat_id, "user": driver.user})
+        for payload in (f"product:{SINGLE}", f"style:{SINGLE}:comic", "emotion:laugh"):
+            driver._post(driver._callback(payload))
+        photo = {
+            "update_type": "message_created",
+            "message": {
+                "sender": driver.user,
+                "recipient": {"chat_id": driver.chat_id},
+                "body": {
+                    "mid": "mid-photo",
+                    "attachments": [{"type": "image", "payload": {"url": "https://cdn.max.test/p.jpg"}}],
+                },
+            },
+        }
+        driver._post(photo)
+        self.assertEqual(driver._post(driver._callback("photos_done")).status_code, 200)
+        order = Order.objects.get(channel_identity__external_user_id=driver.recipient_id())
+        self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+        self.assertFalse(order.consent_accepted)
+
+        # checkout fails closed without consent: no Payment, no provider call
+        # (the webhook path keeps the order in AWAITING_PHOTOS, so nothing is
+        # ready for payment at all)
+        with self.assertRaises(MaxPaymentError):
+            MaxExternalPaymentAdapter(provider=driver.yookassa).create_checkout(
+                identity=order.channel_identity
+            )
+        self.assertFalse(Payment.objects.filter(order=order).exists())
+        self.assertEqual(driver.yookassa.checkouts, [])
+        # domain-level gate: even an order forced to READY_FOR_CHECKOUT without
+        # consent (a path that bypasses the MAX consent screen) is refused
+        bypass = MaxDriver(self)
+        bypass.user = {"user_id": 770909, "first_name": "Bypass"}
+        bypass._post({"update_type": "bot_started", "chat_id": 880909, "user": bypass.user})
+        for payload in (f"product:{SINGLE}", f"style:{SINGLE}:comic", "emotion:laugh"):
+            bypass._post(bypass._callback(payload))
+        bypass._post({**photo, "message": {**photo["message"], "sender": bypass.user}})
+        bypass_order = Order.objects.get(channel_identity__external_user_id="770909")
+        ChannelOrderFlowService().complete_photos(bypass_order.channel_identity)
+        bypass_order.refresh_from_db()
+        self.assertEqual(bypass_order.status, Order.Status.READY_FOR_CHECKOUT)
+        with self.assertRaisesMessage(MaxPaymentError, "consent"):
+            MaxExternalPaymentAdapter(provider=bypass.yookassa).create_checkout(
+                identity=bypass_order.channel_identity
+            )
+        self.assertFalse(Payment.objects.filter(order=bypass_order).exists())
+        self.assertEqual(bypass.yookassa.checkouts, [])
+        # a second photos_done just repeats the consent screen
+        self.assertEqual(driver._post(driver._callback("photos_done", "cb-again")).status_code, 200)
+        self.assertEqual(
+            driver.bot.send_message.call_args.kwargs["buttons"][0][0]["payload"], "consent:accept"
+        )
+
+        # accept → one consent, one pending payment, one provider checkout
+        self.assertEqual(driver._post(driver._callback("consent:accept")).status_code, 200)
+        order.refresh_from_db()
+        accepted_at = order.consent_accepted_at
+        self.assertTrue(order.consent_accepted)
+        self.assertEqual(order.status, Order.Status.AWAITING_PAYMENT)
+        payment = Payment.objects.get(order=order)
+        # duplicate accept is idempotent: same consent timestamp, same payment,
+        # checkout session reused (no second provider call)
+        self.assertEqual(driver._post(driver._callback("consent:accept", "cb-dup")).status_code, 200)
+        order.refresh_from_db()
+        self.assertEqual(order.consent_accepted_at, accepted_at)
+        self.assertEqual(Payment.objects.filter(order=order).count(), 1)
+        self.assertEqual(driver.yookassa.checkouts, [payment.pk])
+
+        # consent never leaks to the customer's next order
+        driver.pay(order)
+        driver._post(driver._callback(f"product:{SINGLE}"))
+        driver._post(driver._callback(f"style:{SINGLE}:comic"))
+        new_order = Order.objects.filter(channel_identity=order.channel_identity).order_by("-id").first()
+        self.assertNotEqual(new_order.pk, order.pk)
+        self.assertFalse(new_order.consent_accepted)
+        self.assertEqual(new_order.consent_version, "")

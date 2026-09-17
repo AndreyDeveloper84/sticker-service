@@ -10,8 +10,8 @@ Matrix — Pilot is NOT ready until every cell passes:
 Every cell runs the full customer + operator chain on the real pilot
 catalog (`seed_live_test`):
 
-    start → product → style → emotion(s) → photos → checkout → payment
-    → preview (operator) → internal approve + deliver (console)
+    start → product → style → emotion(s) → photos → consent (MAX) → checkout
+    → payment → preview (operator) → internal approve + deliver (console)
     → customer approve | 1 revision → approve → full generation (console,
     one slot per request) → QC (console) → delivery gate → final delivery
     (DRF-2053) → DELIVERED.
@@ -50,22 +50,20 @@ from apps.core.models import (
     Revision,
 )
 from apps.core.production_console import ProductionOrderAdmin
-from apps.core.services.channel_order_flow import order_emotion_codes
+from apps.core.services.channel_order_flow import PILOT_CONSENT_VERSION, order_emotion_codes
 from apps.core.services.full_production import FullProductionService
 from apps.core.services.generation import GenerationService
 from apps.core.services.preview_delivery import DeliveryResult
 from apps.core.services.qc import AUTOMATED_CHECKS, HUMAN_CRITERIA, QcService
 from apps.core.storage import LocalMediaStorage
 from apps.core.tests_qc import make_image
+from apps.max_bot.paid_notice import PAID_NOTICE_TEXT
 from apps.max_bot.payments import CheckoutSession, PaymentConfirmation
 from apps.telegram_bot.payments import TelegramStarsPaymentAdapter
 
 from apps.core.services.final_delivery import FinalDeliveryError, FinalDeliveryService
 
-try:  # DRF-2055 (PR #34) — metrics snapshot consumes the same orders.
-    from apps.core.services.pilot_metrics import PilotMetricsService
-except ImportError:  # pragma: no cover - depends on merge order
-    PilotMetricsService = None
+from apps.core.services.pilot_metrics import PilotMetricsService
 
 
 TELEGRAM_WEBHOOK = "/telegram/webhook/"
@@ -362,10 +360,23 @@ class MaxDriver:
             },
         }
         t.assertEqual(self._post(photo).status_code, 200)
-        # photos_done → summary + real start_checkout() against the fake provider
+        # photos_done → consent screen only; the order stays in AWAITING_PHOTOS
+        # and no checkout exists until the customer explicitly accepts.
         t.assertEqual(self._post(self._callback("photos_done", "cb-done")).status_code, 200)
         order.refresh_from_db()
+        t.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+        t.assertFalse(order.consent_accepted)
+        consent = self.bot.send_message.call_args.kwargs
+        t.assertIn("право использовать загруженные фотографии", consent["text"])
+        t.assertEqual(consent["buttons"], [[{"text": "Принимаю", "payload": "consent:accept"}]])
+        t.assertFalse(Payment.objects.filter(order=order).exists())
+        # consent:accept → consent persisted → summary + real start_checkout()
+        t.assertEqual(self._post(self._callback("consent:accept", "cb-consent")).status_code, 200)
+        order.refresh_from_db()
         t.assertEqual(order.status, Order.Status.AWAITING_PAYMENT)
+        t.assertTrue(order.consent_accepted)
+        t.assertEqual(order.consent_version, PILOT_CONSENT_VERSION)
+        t.assertIsNotNone(order.consent_accepted_at)
         texts = [call.kwargs.get("text", "") for call in self.bot.send_message.call_args_list]
         t.assertTrue(any(f"Стикеров: {PRICES[product_code]['quantity']}" in text for text in texts))
         t.assertTrue(any(f"{PRICES[product_code]['rub_minor'] // 100} ₽" in text for text in texts))
@@ -397,11 +408,23 @@ class MaxDriver:
         )
         with mock.patch(
             "apps.max_bot.provider_webhook.YooKassaPaymentProvider.from_env", return_value=self.yookassa
-        ):
+        ), mock.patch("apps.max_bot.provider_webhook.MaxBotClient", return_value=self.bot):
             response = self.client.post(MAX_PAYMENT_WEBHOOK, data=body, content_type="application/json")
         order.refresh_from_db()
         payment.refresh_from_db()
+        # PAID confirmation to the customer: exactly once per payment, only
+        # after a CONFIRMED payment, never on a mismatch or a duplicate webhook.
+        expected = 1 if payment.status == Payment.Status.CONFIRMED else 0
+        t.assertEqual(self.paid_notices(), expected)
         return response, payment
+
+    def paid_notices(self):
+        return sum(
+            1
+            for call in self.bot.send_message.call_args_list
+            if call.kwargs.get("text") == PAID_NOTICE_TEXT
+            and call.kwargs.get("user_id") == self.recipient_id()
+        )
 
     def customer_approve(self):
         self.test.assertEqual(self._post(self._callback("preview_approve")).status_code, 200)
@@ -667,8 +690,6 @@ class PilotMatrixCrossChannelTests(PilotE2ECase):
 
     def test_metrics_snapshot_sees_the_matrix(self):
         """DRF-2055 handoff: the snapshot counts what the matrix produced."""
-        if PilotMetricsService is None:
-            self.skipTest("DRF-2055 PilotMetricsService not on this branch (PR #34)")
         self.run_cell(TelegramDriver(self), SINGLE)
         snapshot = PilotMetricsService().snapshot()
         self.assertEqual(snapshot["payments"]["orders_paid"], 1)
