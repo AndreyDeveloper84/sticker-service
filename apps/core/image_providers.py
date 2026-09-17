@@ -71,12 +71,61 @@ def classify_provider_failure(provider, exc: Exception) -> str:
     return "unknown"
 
 
+class ProviderConfigurationError(RuntimeError):
+    """Provider selection / credentials are missing or unknown: fail closed."""
+
+
+# Optional images.edit parameters (gpt-image API). Env-gated: an absent /
+# empty variable means the parameter is NOT sent and the provider behaves
+# exactly as before. Known QC risk (DRF-2052 needs a 512 px side + alpha):
+# background=transparent + output_format=png/webp make the raw output
+# QC-compatible on alpha; the 512 px side is a separate post-processing
+# decision taken after the first real FULL run.
+OPENAI_IMAGE_SIZES = frozenset({"1024x1024", "1024x1536", "1536x1024", "auto"})
+OPENAI_IMAGE_BACKGROUNDS = frozenset({"transparent", "opaque", "auto"})
+OPENAI_IMAGE_OUTPUT_FORMATS = frozenset({"png", "webp", "jpeg"})
+OPENAI_OUTPUT_MIME_TYPES = {"png": "image/png", "webp": "image/webp", "jpeg": "image/jpeg"}
+
+
+def _optional_choice(env_name: str, value: str | None, allowed: frozenset) -> str | None:
+    """Explicit value wins over env; empty -> None (parameter not sent);
+    anything outside ``allowed`` fails closed at provider construction."""
+    raw = value if value is not None else os.getenv(env_name, "")
+    raw = (raw or "").strip().lower()
+    if not raw:
+        return None
+    if raw not in allowed:
+        raise ProviderConfigurationError(
+            f"{env_name}={raw!r} is not supported; expected one of {sorted(allowed)}"
+        )
+    return raw
+
+
 class OpenAIImageProvider:
     name = "openai"
 
-    def __init__(self, *, client=None, model: str | None = None, proxy_pool=None, client_factory=None):
+    def __init__(
+        self,
+        *,
+        client=None,
+        model: str | None = None,
+        proxy_pool=None,
+        client_factory=None,
+        size: str | None = None,
+        background: str | None = None,
+        output_format: str | None = None,
+    ):
         self._client = client
         self.model = model or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
+        # Validated once here so a bad env value fails closed before any
+        # billable call; None means "do not pass" (current production call).
+        self.size = _optional_choice("OPENAI_IMAGE_SIZE", size, OPENAI_IMAGE_SIZES)
+        self.background = _optional_choice(
+            "OPENAI_IMAGE_BACKGROUND", background, OPENAI_IMAGE_BACKGROUNDS
+        )
+        self.output_format = _optional_choice(
+            "OPENAI_IMAGE_OUTPUT_FORMAT", output_format, OPENAI_IMAGE_OUTPUT_FORMATS
+        )
         # Outbound proxy pool: None = direct (current production behaviour).
         # When a pool is configured, each generation attempt goes through a
         # selected healthy proxy with failover (see generate_preview).
@@ -175,24 +224,37 @@ class OpenAIImageProvider:
             "OpenAI generation failed: all configured outbound proxies unavailable"
         ) from last_error
 
+    def edit_parameters(self) -> dict:
+        """Optional images.edit kwargs; only the configured ones are sent."""
+        params = {}
+        if self.size is not None:
+            params["size"] = self.size
+        if self.background is not None:
+            params["background"] = self.background
+        if self.output_format is not None:
+            params["output_format"] = self.output_format
+        return params
+
     def _generate(self, client, images, prompt: str) -> ImageGenerationResult:
         response = client.images.edit(
             model=self.model,
             image=images,
             prompt=prompt,
+            **self.edit_parameters(),
         )
         data = getattr(response, "data", None) or []
         if not data or not getattr(data[0], "b64_json", None):
             raise RuntimeError("OpenAI image provider returned no image")
 
         content = base64.b64decode(data[0].b64_json)
-        metadata = {"model": self.model}
+        metadata = {"model": self.model, **self.edit_parameters()}
         usage = _usage_metadata(getattr(response, "usage", None))
         if usage:
             metadata["usage"] = usage
         return ImageGenerationResult(
             content=content,
-            mime_type="image/png",
+            # Without output_format the API returns PNG (current behaviour).
+            mime_type=OPENAI_OUTPUT_MIME_TYPES.get(self.output_format or "png", "image/png"),
             metadata=metadata,
         )
 
@@ -206,10 +268,6 @@ class OpenAIImageProvider:
 
 NODULE_DEFAULT_MODEL = "gpt-image-2"
 NODULE_GENERATIONS_PATH = "/v1/images/generations"
-
-
-class ProviderConfigurationError(RuntimeError):
-    """Provider selection / credentials are missing or unknown: fail closed."""
 
 
 class ProviderCapabilityError(RuntimeError):
