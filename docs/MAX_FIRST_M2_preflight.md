@@ -28,6 +28,7 @@ approve/revision → FULL (1 slot) → QC → final delivery → `DELIVERED`.
 | `OPENAI_API_KEY` | канонический ключ platform.openai.com с доступом к Images **edit** (reference‑based preview/FULL) | present, format‑ok (canonical `sk-…`), `models.list()` через ProxyPool → 200 | **present, но НЕ канонический** (Nodule‑формат → 401 `invalid_api_key` на api.openai.com) → блокер §4 |
 | `OPENAI_IMAGE_MODEL` | модель для `images.edit` | present | present |
 | `OPENAI_BASE_URL` | должен быть **absent** (canonical only, Nodule endpoint не подставлять) | absent | absent ✔ |
+| `OPENAI_IMAGE_SIZE` / `OPENAI_IMAGE_BACKGROUND` / `OPENAI_IMAGE_OUTPUT_FORMAT` | env‑gated параметры `images.edit` (PR #42, default = поведение без параметров) | absent для baseline‑прогона; включать только по решению D/C после первого реального FULL (§5) | absent ✔ |
 | `NODULE_IMAGE_API_KEY` | отдельный слот для Nodule (экспериментальный text‑to‑image, только после merge провайдера Agent C) | absent до merge; после — present только если куплен Image package | absent (ключ Nodule сейчас ошибочно лежит в `OPENAI_API_KEY`) |
 | `IMAGE_PROVIDER` | выбор провайдера `openai|nodule` (появится с провайдером C) | для M2 — `openai` или absent (default openai); `nodule` для персонализированных операций = fail‑closed | absent (переменной ещё нет в коде) |
 | `MAX_BOT_TOKEN` | официальный MAX‑бот (STG‑05B) | present; `GET /me` direct → 200 | present ✔ |
@@ -73,7 +74,7 @@ grep -E '^[A-Za-z_][A-Za-z0-9_]*=' .env.staging \
 
 # 2.4 backend видит переменные (присутствие + форма, не значение)
 $C exec -T backend sh -c '
-  for v in OPENAI_API_KEY MAX_BOT_TOKEN MAX_WEBHOOK_SECRET YOOKASSA_SHOP_ID YOOKASSA_SECRET_KEY YOOKASSA_RETURN_URL OUTBOUND_PROXY_ENABLED OUTBOUND_PROXY_URLS_JSON NODULE_IMAGE_API_KEY IMAGE_PROVIDER OPENAI_BASE_URL HTTPS_PROXY HTTP_PROXY; do
+  for v in OPENAI_API_KEY OPENAI_IMAGE_SIZE OPENAI_IMAGE_BACKGROUND OPENAI_IMAGE_OUTPUT_FORMAT MAX_BOT_TOKEN MAX_WEBHOOK_SECRET YOOKASSA_SHOP_ID YOOKASSA_SECRET_KEY YOOKASSA_RETURN_URL OUTBOUND_PROXY_ENABLED OUTBOUND_PROXY_URLS_JSON NODULE_IMAGE_API_KEY IMAGE_PROVIDER OPENAI_BASE_URL HTTPS_PROXY HTTP_PROXY; do
     eval val=\$$v; if [ -n "$val" ]; then echo "$v present"; else echo "$v absent"; fi
   done
   case "$OPENAI_API_KEY" in sk-*) echo "OPENAI_API_KEY format: canonical";; nodule_*) echo "OPENAI_API_KEY format: NODULE (wrong slot)";; *) echo "OPENAI_API_KEY format: other";; esac
@@ -81,18 +82,21 @@ $C exec -T backend sh -c '
 
 # 2.5 egress: OpenAI через ProxyPool, MAX и YooKassa DIRECT
 $C exec -T backend python manage.py check_outbound_proxies      # нужно: telegram PASS + openai PASS
-$C exec -T backend python - <<'EOF'
+# (внутри manage.py shell — иначе AppRegistryNotReady при импорте провайдера)
+$C exec -T backend python manage.py shell -c '
 import os, httpx
 from apps.max_bot.client import MaxBotClient
 me = MaxBotClient(os.environ["MAX_BOT_TOKEN"])._request("GET", "/me")
-print("MAX /me direct:", "ok" if me.get("user_id") or me.get("username") else "unexpected")
+print("MAX /me direct:", "ok" if (me.get("user_id") or me.get("username")) else "unexpected")
 r = httpx.get("https://api.yookassa.ru/v3/me", auth=(os.environ["YOOKASSA_SHOP_ID"], os.environ["YOOKASSA_SECRET_KEY"]), timeout=15)
 j = r.json() if r.status_code == 200 else {}
 print("YooKassa /v3/me direct:", r.status_code, "test=", j.get("test"), "status=", j.get("status"))
 from apps.max_bot.payments_yookassa import YooKassaPaymentProvider
 p = YooKassaPaymentProvider.from_env()
 print("YooKassa proxy mounts:", [str(k) for k in getattr(p.http_client, "_mounts", {})] or "none (direct)")
-EOF
+import apps.core.image_providers as ip
+print("image provider:", ip.get_image_provider().name)   # ожидание для M2: openai
+'
 
 # 2.6 каталог и внешние маршруты
 $C exec -T backend python manage.py seed_live_test               # products=sticker-pack-9, single-sticker, style=comic
