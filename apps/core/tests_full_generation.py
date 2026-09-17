@@ -230,7 +230,7 @@ class FullProductionTestCase(TestCase):
 
     def test_pack_produces_exactly_n_final_assets_in_selection_order(self):
         order, _preview = self._make_order()
-        plan = self._service(FakeProvider()).start(order=order)
+        plan = self._service(FakeProvider()).start(order=order, max_slots=None)
 
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
@@ -258,11 +258,18 @@ class FullProductionTestCase(TestCase):
     def test_reentry_creates_no_duplicate_jobs_or_assets(self):
         order, _preview = self._make_order()
         # First entry: one slot fails, order stays in PACK_GENERATING.
-        self._service(FakeProvider(fail_slots={"bye"})).start(order=order)
+        self._service(FakeProvider(fail_slots={"bye"})).start(order=order, max_slots=None)
         kept_assets = {asset.slot_key: asset.pk for asset in self._final_assets(order)}
 
-        # Re-entry on PACK_GENERATING retries only the missing slot.
-        plan = self._service(FakeProvider()).start(order=order)
+        # Plain re-entry does NOT auto-retry failed slots (retry_failed scope).
+        plan = self._service(FakeProvider()).start(order=order, max_slots=None)
+        self.assertEqual(self._full_jobs(order).count(), 3)
+        self.assertEqual(
+            [slot.status for slot in plan], ["succeeded", "failed", "succeeded"]
+        )
+
+        # Selective retry completes the plan without touching succeeded slots.
+        plan = self._service(FakeProvider()).retry_failed(order=order)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
         self.assertEqual(self._final_assets(order).count(), 3)
@@ -280,7 +287,7 @@ class FullProductionTestCase(TestCase):
 
     def test_one_slot_failure_keeps_order_in_pack_generating(self):
         order, _preview = self._make_order()
-        plan = self._service(FakeProvider(fail_slots={"bye"})).start(order=order)
+        plan = self._service(FakeProvider(fail_slots={"bye"})).start(order=order, max_slots=None)
 
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.PACK_GENERATING)
@@ -297,7 +304,7 @@ class FullProductionTestCase(TestCase):
 
     def test_retry_failed_regenerates_only_the_failed_slot(self):
         order, _preview = self._make_order()
-        self._service(FakeProvider(fail_slots={"bye"})).start(order=order)
+        self._service(FakeProvider(fail_slots={"bye"})).start(order=order, max_slots=None)
         kept_assets = {
             asset.slot_key: asset.pk
             for asset in self._final_assets(order)
@@ -322,7 +329,7 @@ class FullProductionTestCase(TestCase):
     def test_identity_lock_uses_approved_preview_as_first_reference(self):
         order, preview = self._make_order()
         provider = FakeProvider()
-        self._service(provider).start(order=order)
+        self._service(provider).start(order=order, max_slots=None)
 
         self.assertEqual(len(provider.requests), 3)
         for job in self._full_jobs(order):
@@ -372,7 +379,7 @@ class FullProductionTestCase(TestCase):
         order, _preview = self._make_order()
         plan = self._service(
             ClassifyingProvider({"bye": "ambiguous"})
-        ).start(order=order)
+        ).start(order=order, max_slots=None)
 
         bye = next(slot for slot in plan if slot.slot_key == "bye")
         self.assertEqual(bye.status, "failed")
@@ -392,7 +399,7 @@ class FullProductionTestCase(TestCase):
         order, _preview = self._make_order()
         self._service(
             ClassifyingProvider({"bye": "ambiguous", "thanks": "api"})
-        ).start(order=order)
+        ).start(order=order, max_slots=None)
 
         with self.assertRaises(FullProductionError) as ctx:
             self._service(FakeProvider()).retry_failed(order=order)
@@ -407,7 +414,7 @@ class FullProductionTestCase(TestCase):
 
     def test_definitive_api_failure_is_retryable(self):
         order, _preview = self._make_order()
-        plan = self._service(ClassifyingProvider({"bye": "api"})).start(order=order)
+        plan = self._service(ClassifyingProvider({"bye": "api"})).start(order=order, max_slots=None)
         bye = next(slot for slot in plan if slot.slot_key == "bye")
         self.assertTrue(bye.retryable)
 
@@ -420,7 +427,7 @@ class FullProductionTestCase(TestCase):
         provider = FakeProvider(fail_slots={"bye"})
         self.assertFalse(hasattr(provider, "classify_failure"))
         order, _preview = self._make_order()
-        plan = self._service(provider).start(order=order)
+        plan = self._service(provider).start(order=order, max_slots=None)
 
         bye = next(slot for slot in plan if slot.slot_key == "bye")
         bye_job = self._full_jobs(order).get(slot_key="bye")
@@ -444,3 +451,191 @@ class FullProductionTestCase(TestCase):
         self.assertEqual(
             classify_provider_failure(FakeProvider(), RuntimeError("x")), "unknown"
         )
+
+    # ------------------------------------- F1: QC selective regeneration
+
+    def _back_to_pack_generating(self, order):
+        """Mirror DRF-2052 QC FAIL: order returns to production with retry slots."""
+        order.status = Order.Status.PACK_GENERATING
+        order.save(update_fields=["status"])
+
+    def test_regenerate_slots_replaces_current_asset_and_keeps_audit(self):
+        order, _preview = self._make_order()
+        self._service(FakeProvider()).start(order=order, max_slots=None)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        self._back_to_pack_generating(order)
+        old_bye = self._final_assets(order).get(slot_key="bye").pk
+
+        plan = self._service(FakeProvider()).regenerate_slots(
+            order=order, slot_keys=["bye"]
+        )
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        bye_assets = list(
+            self._final_assets(order).filter(slot_key="bye").order_by("created_at", "pk")
+        )
+        # Old asset retained for audit; the new one is current.
+        self.assertEqual(len(bye_assets), 2)
+        self.assertEqual(bye_assets[0].pk, old_bye)
+        bye = next(slot for slot in plan if slot.slot_key == "bye")
+        self.assertEqual(bye.status, "succeeded")
+        self.assertEqual(bye.asset_id, bye_assets[1].pk)
+        # Other slots got no new jobs.
+        self.assertEqual(self._full_jobs(order).filter(slot_key="hello").count(), 1)
+        self.assertEqual(self._full_jobs(order).filter(slot_key="thanks").count(), 1)
+        self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 2)
+        # production_plan reports the new asset as current.
+        plan_after = self._service(FakeProvider()).production_plan(order)
+        self.assertEqual(
+            next(slot for slot in plan_after if slot.slot_key == "bye").asset_id,
+            bye_assets[1].pk,
+        )
+
+    def test_failed_regeneration_keeps_order_in_pack_generating(self):
+        order, _preview = self._make_order()
+        self._service(FakeProvider()).start(order=order, max_slots=None)
+        self._back_to_pack_generating(order)
+        old_bye = self._final_assets(order).get(slot_key="bye").pk
+
+        plan = self._service(FakeProvider(fail_slots={"bye"})).regenerate_slots(
+            order=order, slot_keys=["bye"]
+        )
+
+        # No bounce back to QUALITY_CONTROL with the stale asset.
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PACK_GENERATING)
+        bye = next(slot for slot in plan if slot.slot_key == "bye")
+        self.assertEqual(bye.status, "failed")
+        self.assertEqual(bye.asset_id, old_bye)  # old asset still current
+
+        plan = self._service(FakeProvider()).regenerate_slots(
+            order=order, slot_keys=["bye"]
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        bye = next(slot for slot in plan if slot.slot_key == "bye")
+        self.assertEqual(bye.status, "succeeded")
+        self.assertNotEqual(bye.asset_id, old_bye)
+
+    def test_regenerate_slots_validates_slot_keys(self):
+        order, _preview = self._make_order()
+        self._service(FakeProvider()).start(order=order, max_slots=None)
+        self._back_to_pack_generating(order)
+        with self.assertRaises(FullProductionError) as ctx:
+            self._service(FakeProvider()).regenerate_slots(
+                order=order, slot_keys=["bye", "nope"]
+            )
+        self.assertIn("nope", str(ctx.exception))
+        self.assertEqual(self._full_jobs(order).count(), 3)
+
+    def test_regenerate_slots_requires_pack_generating(self):
+        order, _preview = self._make_order()  # PREVIEW_REVIEW
+        with self.assertRaises(FullProductionError):
+            self._service(FakeProvider()).regenerate_slots(order=order, slot_keys=["hello"])
+        self.assertFalse(self._full_jobs(order).exists())
+
+        self._service(FakeProvider()).start(order=order, max_slots=None)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        with self.assertRaises(FullProductionError):
+            self._service(FakeProvider()).regenerate_slots(order=order, slot_keys=["hello"])
+        self.assertEqual(self._full_jobs(order).count(), 3)
+
+    def test_regenerate_slots_rejects_ambiguous_blocked_slot(self):
+        order, _preview = self._make_order()
+        self._service(ClassifyingProvider({"bye": "ambiguous"})).start(
+            order=order, max_slots=None
+        )
+        with self.assertRaises(FullProductionError) as ctx:
+            self._service(FakeProvider()).regenerate_slots(order=order, slot_keys=["bye"])
+        self.assertIn("bye", str(ctx.exception))
+        # No new attempt for the blocked slot.
+        self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 1)
+
+    # ------------------------------------- F2: no blind billable retry
+
+    def test_stale_running_slot_is_failed_closed_not_blind_retried(self):
+        order, preview = self._make_order()
+        # Simulates a worker killed mid-generation (e.g. gunicorn timeout).
+        GenerationJob.objects.create(
+            order=order,
+            task_type=GenerationJob.TaskType.FULL,
+            status=GenerationJob.Status.RUNNING,
+            attempt=1,
+            slot_key="bye",
+            provider="fake",
+            input_metadata={"source_preview_id": preview.pk, "slot_key": "bye"},
+            started_at=timezone.now(),
+        )
+        provider = FakeProvider()
+        plan = self._service(provider).start(order=order, max_slots=None)
+
+        bye_jobs = list(self._full_jobs(order).filter(slot_key="bye"))
+        self.assertEqual(len(bye_jobs), 1)  # no new attempt on this pass
+        self.assertEqual(bye_jobs[0].status, GenerationJob.Status.FAILED)
+        self.assertEqual(bye_jobs[0].output_metadata["failure_class"], "ambiguous")
+        bye = next(slot for slot in plan if slot.slot_key == "bye")
+        self.assertEqual(bye.status, "failed")
+        self.assertFalse(bye.retryable)
+        # The provider was never called for the stale slot.
+        self.assertNotIn(
+            "bye", [request.metadata["slot_key"] for request in provider.requests]
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PACK_GENERATING)
+
+    def test_force_retry_slot_unblocks_ambiguous_slot(self):
+        order, _preview = self._make_order()
+        self._service(ClassifyingProvider({"bye": "ambiguous"})).start(
+            order=order, max_slots=None
+        )
+        self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 1)
+
+        plan = self._service(FakeProvider()).force_retry_slot(order=order, slot_key="bye")
+
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        bye = next(slot for slot in plan if slot.slot_key == "bye")
+        self.assertEqual(bye.status, "succeeded")
+        self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 2)
+        self.assertTrue(self._final_assets(order).filter(slot_key="bye").exists())
+
+    def test_force_retry_slot_requires_blocked_slot(self):
+        order, _preview = self._make_order()
+        self._service(FakeProvider(fail_slots={"bye"})).start(order=order, max_slots=None)
+        # bye failed retryable ("unknown"), hello succeeded — neither is blocked.
+        for slot_key in ("bye", "hello"):
+            with self.subTest(slot_key=slot_key):
+                with self.assertRaises(FullProductionError):
+                    self._service(FakeProvider()).force_retry_slot(
+                        order=order, slot_key=slot_key
+                    )
+        self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 1)
+        self.assertEqual(self._full_jobs(order).filter(slot_key="hello").count(), 1)
+
+    def test_max_slots_batches_one_slot_per_call_until_complete(self):
+        order, _preview = self._make_order()
+        provider = FakeProvider()
+        service = self._service(provider)
+
+        plan = service.start(order=order)  # default max_slots=1
+        self.assertEqual(len(provider.requests), 1)
+        self.assertEqual(
+            [slot.status for slot in plan], ["succeeded", "pending", "pending"]
+        )
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.PACK_GENERATING)
+
+        plan = service.start(order=order)
+        self.assertEqual(len(provider.requests), 2)
+        self.assertEqual(
+            [slot.status for slot in plan], ["succeeded", "succeeded", "pending"]
+        )
+
+        plan = service.start(order=order)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        self.assertEqual(self._final_assets(order).count(), 3)
+        self.assertTrue(all(slot.status == "succeeded" for slot in plan))
