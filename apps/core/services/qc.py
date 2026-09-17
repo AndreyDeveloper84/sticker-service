@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 from io import BytesIO
+from uuid import uuid4
 
 from django.db import transaction
 from django.db.models import Max
@@ -27,6 +29,18 @@ ALLOWED_MIME_TYPES = frozenset({"image/png", "image/webp"})
 MIME_FORMATS = {"image/png": "PNG", "image/webp": "WEBP"}
 STICKER_SIDE = 512
 MAX_FILE_BYTES = 512 * 1024
+
+# Format normalization (DRF-2076): the image API cannot return a 512 px side
+# (minimum size 1024), so every real FULL asset is fitted into 512x512 before
+# the automated checks. Env-gated for rollback without a deploy:
+# QC_NORMALIZE_FINAL_ASSETS=0 disables it (default on).
+NORMALIZE_ENV = "QC_NORMALIZE_FINAL_ASSETS"
+NORMALIZED_KEY = "normalized_from"
+NORMALIZATION_VERSION = 1
+
+
+def normalization_enabled() -> bool:
+    return os.getenv(NORMALIZE_ENV, "1").strip().lower() not in {"0", "false", "no", "off"}
 
 # Subjective criteria: human QC only — there is no proven reliable
 # automation for these in the Pilot.
@@ -167,6 +181,123 @@ class QcService:
             result["decodable"] = False
         return result
 
+    # --- Format normalization (DRF-2076) ---------------------------------
+
+    def normalize_final_asset(self, asset: GeneratedAsset) -> GeneratedAsset:
+        """Fit the current FINAL asset into the sticker box, in place.
+
+        The asset row (pk, job, slot_key, kind) is unchanged so the QC gate
+        and delivery keep working on the same identity; only storage_key,
+        mime_type and size_bytes move to the normalized file. The provider
+        original stays under its old storage_key and is referenced from
+        metadata["normalized_from"] for audit. Idempotent: an asset that
+        already carries normalized_from is returned as-is.
+
+        Rules: longest side becomes exactly 512 px, aspect preserved, never
+        upscaled beyond the source; alpha is preserved but NEVER invented —
+        an opaque source stays opaque so alpha_channel fails honestly; PNG
+        first, WebP (lossless, then quality 90) only when PNG exceeds the
+        512 KB limit. An undecodable source is left untouched for the
+        automated "decodable" check to report.
+        """
+        if (asset.metadata or {}).get(NORMALIZED_KEY):
+            return asset
+        if not self.storage.exists(asset.storage_key):
+            return asset
+        with self.storage.open(asset.storage_key, "rb") as source:
+            original = source.read()
+        try:
+            with Image.open(BytesIO(original)) as image:
+                image.load()
+                source_info = {
+                    "width": image.width,
+                    "height": image.height,
+                    "mode": image.mode,
+                    "format": image.format or "",
+                }
+                if self._already_sticker_sized(image, len(original), asset.mime_type):
+                    return asset  # within contract already: nothing to rewrite
+                normalized = self._fit_sticker(image)
+        except QcError:
+            raise
+        except Exception:
+            return asset  # undecodable: automated checks record decodable=False
+
+        content, mime_type, extension = self._encode_sticker(normalized)
+        base = asset.storage_key.rsplit(".", 1)[0]
+        new_key = f"{base}-normalized-{uuid4().hex[:8]}.{extension}"
+        self.storage.save(new_key, BytesIO(content))
+
+        metadata = dict(asset.metadata or {})
+        metadata[NORMALIZED_KEY] = {
+            "storage_key": asset.storage_key,
+            "mime_type": asset.mime_type or "",
+            "size_bytes": len(original),
+            **source_info,
+            "version": NORMALIZATION_VERSION,
+            "at": timezone.now().isoformat(),
+        }
+        asset.storage_key = new_key
+        asset.mime_type = mime_type
+        asset.size_bytes = len(content)
+        asset.metadata = metadata
+        asset.save(update_fields=["storage_key", "mime_type", "size_bytes", "metadata", "updated_at"])
+        return asset
+
+    @staticmethod
+    def _already_sticker_sized(image: Image.Image, size_bytes: int, mime_type: str) -> bool:
+        width, height = image.size
+        return (
+            width <= STICKER_SIDE
+            and height <= STICKER_SIDE
+            and (width == STICKER_SIDE or height == STICKER_SIDE)
+            and size_bytes <= MAX_FILE_BYTES
+            and mime_type in ALLOWED_MIME_TYPES
+            and image.format == MIME_FORMATS.get(mime_type)
+        )
+
+    @staticmethod
+    def _fit_sticker(image: Image.Image) -> Image.Image:
+        has_alpha = image.mode in ("RGBA", "LA") or (
+            image.mode == "P" and "transparency" in image.info
+        )
+        # Keep alpha when the source has it; never add one to an opaque image.
+        converted = image.convert("RGBA" if has_alpha else "RGB")
+        width, height = converted.size
+        longest = max(width, height)
+        if longest <= 0:
+            raise QcError("Final asset has no pixels")
+        scale = STICKER_SIDE / longest
+        target = (
+            max(1, round(width * scale)),
+            max(1, round(height * scale)),
+        )
+        # Exactly one side must be 512 after rounding.
+        if width >= height:
+            target = (STICKER_SIDE, target[1])
+        else:
+            target = (target[0], STICKER_SIDE)
+        if target == converted.size:
+            return converted
+        return converted.resize(target, Image.Resampling.LANCZOS)
+
+    @staticmethod
+    def _encode_sticker(image: Image.Image) -> tuple[bytes, str, str]:
+        buffer = BytesIO()
+        image.save(buffer, format="PNG", optimize=True)
+        content = buffer.getvalue()
+        if len(content) <= MAX_FILE_BYTES:
+            return content, "image/png", "png"
+        for kwargs in ({"lossless": True}, {"quality": 90, "method": 6}):
+            buffer = BytesIO()
+            image.save(buffer, format="WEBP", **kwargs)
+            content = buffer.getvalue()
+            if len(content) <= MAX_FILE_BYTES:
+                return content, "image/webp", "webp"
+        raise QcError(
+            f"Normalized sticker still exceeds {MAX_FILE_BYTES} bytes ({len(content)})"
+        )
+
     # --- QC lifecycle -----------------------------------------------------
 
     @transaction.atomic
@@ -190,6 +321,10 @@ class QcService:
         if existing:
             return existing
         assets = self.current_final_assets(locked)
+        if normalization_enabled():
+            # Same transaction as the report: a normalization failure raises
+            # QcError and no QcReport row is created.
+            assets = [self.normalize_final_asset(asset) for asset in assets]
         attempt = (
             QcReport.objects.filter(order=locked).aggregate(max_attempt=Max("attempt"))[
                 "max_attempt"
