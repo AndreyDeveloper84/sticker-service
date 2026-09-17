@@ -65,7 +65,15 @@ class OrderStateService:
             Order.Status.FAILED,
         },
         Order.Status.QUALITY_CONTROL: {
-            # QC exits (PASS/FAIL handling) belong to DRF-2052.
+            # QC exits (DRF-2052): PASS -> READY_FOR_DELIVERY; FAIL with
+            # selective retry -> PACK_GENERATING so DRF-2051 regenerates
+            # exactly the requested slot_keys.
+            Order.Status.READY_FOR_DELIVERY,
+            Order.Status.PACK_GENERATING,
+            Order.Status.FAILED,
+        },
+        Order.Status.READY_FOR_DELIVERY: {
+            # DELIVERY_IN_PROGRESS / DELIVERED are added by DRF-2053.
             Order.Status.FAILED,
         },
         Order.Status.CANCELLED: set(),

@@ -77,6 +77,7 @@ class Order(TimestampedModel):
         REVISION_GENERATING = "revision_generating", "Revision generating"
         PACK_GENERATING = "pack_generating", "Pack generating"
         QUALITY_CONTROL = "quality_control", "Quality control"
+        READY_FOR_DELIVERY = "ready_for_delivery", "Ready for delivery"
         CANCELLED = "cancelled", "Cancelled"
         FAILED = "failed", "Failed"
 
@@ -216,6 +217,55 @@ class GeneratedAsset(TimestampedModel):
 
     def __str__(self) -> str:
         return f"GeneratedAsset #{self.pk} for order #{self.order_id}"
+
+
+class QcReport(TimestampedModel):
+    """QC result for the current set of final assets (DRF-2052).
+
+    PASS requires the full expected asset set, all automated format checks
+    and the complete human checklist. FAIL persists reason codes; the
+    operator then selects concrete slots for selective retry.
+
+    Canonical slot identity is GeneratedAsset.slot_key (owned by DRF-2051);
+    asset ids are stored for audit/reference only.
+    """
+
+    class Status(models.TextChoices):
+        IN_PROGRESS = "in_progress", "In progress"
+        PASSED = "passed", "Passed"
+        FAILED = "failed", "Failed"
+
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="qc_reports")
+    attempt = models.PositiveIntegerField()
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.IN_PROGRESS)
+    expected_count = models.PositiveIntegerField(default=0)
+    # Canonical identity of the evaluated set (slot_key list). The delivery
+    # gate compares it against the current set to catch post-PASS changes.
+    slot_keys = models.JSONField(default=list, blank=True)
+    # Concrete assets evaluated by this report (parallel to slot_keys).
+    # Not domain identity, but the delivery gate uses them to detect a slot
+    # regenerated after PASS (same slot_key, new current asset).
+    asset_ids = models.JSONField(default=list, blank=True)
+    # {slot_key: {check_name: bool}} plus set-level "expected_count".
+    automated_checks = models.JSONField(default=dict, blank=True)
+    # {criterion: {"passed": bool, "note": str}} — human QC only.
+    human_checklist = models.JSONField(default=dict, blank=True)
+    reason_codes = models.JSONField(default=list, blank=True)
+    # [{"slot_key": str, "asset_id": int (audit), "reason_codes": [...]}]
+    retry_slots = models.JSONField(default=list, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["order", "attempt"],
+                name="uniq_qc_report_attempt",
+            )
+        ]
+        ordering = ["order_id", "attempt"]
+
+    def __str__(self) -> str:
+        return f"QcReport #{self.pk} for order #{self.order_id} attempt {self.attempt}"
 
 
 class Revision(TimestampedModel):
