@@ -148,6 +148,22 @@ class TelegramClientMethodTests(SimpleTestCase):
         filename, content, mime = kwargs["files"]["photo"]
         self.assertEqual((filename, content, mime), ("preview.png", b"png-bytes", "image/png"))
 
+    def test_send_document_multipart(self):
+        patcher, fake = self._fake()
+        with patcher:
+            self.client.send_document(
+                chat_id=42,
+                content=b"png-bytes",
+                filename="sticker-1-hello.png",
+                mime_type="image/png",
+                caption="Стикер 1/9",
+            )
+        args, kwargs = fake.post.call_args
+        self.assertEqual(args[0], f"{DEFAULT_API_ORIGIN}/bot{TOKEN}/sendDocument")
+        self.assertEqual(kwargs["data"], {"chat_id": "42", "caption": "Стикер 1/9"})
+        filename, content, mime = kwargs["files"]["document"]
+        self.assertEqual((filename, content, mime), ("sticker-1-hello.png", b"png-bytes", "image/png"))
+
     def test_send_invoice_stars_xtr_no_provider_token(self):
         patcher, fake = self._fake()
         with patcher:

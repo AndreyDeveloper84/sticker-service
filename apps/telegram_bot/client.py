@@ -217,6 +217,21 @@ class TelegramBotClient:
             mime_type=mime_type,
         )
 
+    def send_document(self, *, chat_id, content: bytes, filename: str, mime_type: str, caption: str = ""):
+        # sendDocument keeps the file byte-for-byte (sendPhoto re-encodes to
+        # JPEG and drops transparency) — used for final sticker delivery.
+        fields = {"chat_id": chat_id}
+        if caption:
+            fields["caption"] = caption
+        return self._post_multipart(
+            "sendDocument",
+            fields=fields,
+            file_field="document",
+            filename=filename,
+            content=content,
+            mime_type=mime_type,
+        )
+
     def send_invoice(self, *, chat_id, title, description, payload, amount_stars):
         # Telegram Stars: currency XTR, no provider_token.
         return self._post(

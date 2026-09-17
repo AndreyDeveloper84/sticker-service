@@ -78,6 +78,10 @@ class Order(TimestampedModel):
         PACK_GENERATING = "pack_generating", "Pack generating"
         QUALITY_CONTROL = "quality_control", "Quality control"
         READY_FOR_DELIVERY = "ready_for_delivery", "Ready for delivery"
+        # Final delivery (DRF-2053): entered from READY_FOR_DELIVERY (QC PASS,
+        # DRF-2052); DELIVERED is terminal.
+        DELIVERY_IN_PROGRESS = "delivery_in_progress", "Delivery in progress"
+        DELIVERED = "delivered", "Delivered"
         CANCELLED = "cancelled", "Cancelled"
         FAILED = "failed", "Failed"
 
@@ -266,6 +270,48 @@ class QcReport(TimestampedModel):
 
     def __str__(self) -> str:
         return f"QcReport #{self.pk} for order #{self.order_id} attempt {self.attempt}"
+
+
+class FinalDelivery(TimestampedModel):
+    """One delivery run of the final sticker set to the order channel (DRF-2053).
+
+    A run sends the CURRENT final asset of every expected slot that has
+    not been sent yet. Per-slot outcomes are recorded in ``results``;
+    idempotency across runs is by slot_key: a slot with a "sent" result
+    (message_id) in ANY run of the order is never sent again, so the
+    customer cannot receive the same sticker twice.
+    """
+
+    class Status(models.TextChoices):
+        IN_PROGRESS = "in_progress", "In progress"
+        SENT = "sent", "Sent"
+        FAILED = "failed", "Failed"
+
+    order = models.ForeignKey(Order, on_delete=models.PROTECT, related_name="final_deliveries")
+    channel = models.CharField(max_length=20, choices=ChannelIdentity.Channel.choices)
+    attempt = models.PositiveIntegerField()
+    status = models.CharField(max_length=32, choices=Status.choices, default=Status.IN_PROGRESS)
+    # Per-slot outcomes of THIS run, in send order:
+    # [{"slot_key", "asset_id", "message_id", "status": "sent"|"failed",
+    #   "error", "failure_class": "retryable"|"permanent"|"", "metadata",
+    #   "created_at"}]
+    results = models.JSONField(default=list, blank=True)
+    # Final "set is ready" message: {"status", "message_id", "error", ...}.
+    summary = models.JSONField(default=dict, blank=True)
+    started_at = models.DateTimeField(null=True, blank=True)
+    finished_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=["order", "attempt"],
+                name="uniq_final_delivery_attempt",
+            )
+        ]
+        ordering = ["order_id", "attempt"]
+
+    def __str__(self) -> str:
+        return f"FinalDelivery #{self.pk} for order #{self.order_id} attempt {self.attempt}"
 
 
 class Revision(TimestampedModel):
