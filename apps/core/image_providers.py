@@ -41,6 +41,18 @@ class ImageProvider(Protocol):
     def generate_preview(self, request: ImageGenerationRequest) -> ImageGenerationResult: ...
 
 
+def _usage_metadata(usage) -> dict:
+    """Token usage from an OpenAI images response, as plain ints (DRF-2055 cost evidence)."""
+    if usage is None:
+        return {}
+    result = {}
+    for key in ("input_tokens", "output_tokens", "total_tokens"):
+        value = getattr(usage, key, None)
+        if isinstance(value, int) and not isinstance(value, bool):
+            result[key] = value
+    return result
+
+
 def classify_provider_failure(provider, exc: Exception) -> str:
     """Best-effort failure classification for retry/cost-safety decisions.
 
@@ -170,8 +182,12 @@ class OpenAIImageProvider:
             raise RuntimeError("OpenAI image provider returned no image")
 
         content = base64.b64decode(data[0].b64_json)
+        metadata = {"model": self.model}
+        usage = _usage_metadata(getattr(response, "usage", None))
+        if usage:
+            metadata["usage"] = usage
         return ImageGenerationResult(
             content=content,
             mime_type="image/png",
-            metadata={"model": self.model},
+            metadata=metadata,
         )

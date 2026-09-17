@@ -341,3 +341,69 @@ class Revision(TimestampedModel):
 
     def __str__(self) -> str:
         return f"Revision #{self.pk} for order #{self.order_id}"
+
+
+class OrderEvent(models.Model):
+    """Append-only pilot metrics log (DRF-2055).
+
+    Records only facts that cannot be derived from other tables: order state
+    transitions (drop-off point, stage timing), the customer's preview
+    approval (which does not change order status) and explicitly logged
+    operator minutes. Payments, generation jobs and revisions are derived from
+    their own tables and are deliberately not duplicated here.
+    """
+
+    class Type(models.TextChoices):
+        STATUS_CHANGED = "order.status_changed", "Order status changed"
+        PREVIEW_CUSTOMER_APPROVED = "preview.customer_approved", "Preview approved by customer"
+        MANUAL_WORK_LOGGED = "manual.work_logged", "Manual work logged"
+
+    class Actor(models.TextChoices):
+        SYSTEM = "system", "System"
+        CUSTOMER = "customer", "Customer"
+        OPERATOR = "operator", "Operator"
+
+    class Activity(models.TextChoices):
+        PHOTO_REVIEW = "photo_review", "Photo review"
+        PREVIEW_REVIEW = "preview_review", "Preview review"
+        REVISION_HANDLING = "revision_handling", "Revision handling"
+        QC = "qc", "Quality control"
+        DELIVERY = "delivery", "Delivery"
+        SUPPORT = "support", "Customer support"
+        OTHER = "other", "Other"
+
+    # CASCADE: the log has no life of its own; orders with payments/jobs are
+    # already protected from deletion by those FKs.
+    order = models.ForeignKey(Order, on_delete=models.CASCADE, related_name="events")
+    event_type = models.CharField(max_length=64, choices=Type.choices)
+    from_status = models.CharField(max_length=32, blank=True)
+    to_status = models.CharField(max_length=32, blank=True)
+    actor_kind = models.CharField(max_length=16, choices=Actor.choices, default=Actor.SYSTEM)
+    actor_ref = models.CharField(max_length=150, blank=True)
+    payload = models.JSONField(default=dict, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        indexes = [
+            models.Index(fields=["order", "created_at"], name="core_orderevent_order_idx"),
+            models.Index(fields=["event_type", "created_at"], name="core_orderevent_type_idx"),
+        ]
+
+    def __str__(self) -> str:
+        return f"OrderEvent #{self.pk} {self.event_type} for order #{self.order_id}"
+
+
+class ManualWorkLogManager(models.Manager):
+    def get_queryset(self):
+        return super().get_queryset().filter(event_type=OrderEvent.Type.MANUAL_WORK_LOGGED)
+
+
+class ManualWorkLog(OrderEvent):
+    """Operator-entered minutes per order; the only hand-written OrderEvent."""
+
+    objects = ManualWorkLogManager()
+
+    class Meta:
+        proxy = True
+        verbose_name = "Manual work log"
+        verbose_name_plural = "Manual work logs"
