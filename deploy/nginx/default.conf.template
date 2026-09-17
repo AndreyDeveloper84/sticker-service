@@ -61,8 +61,15 @@ server {
     }
 
     # Everything else (/admin/, DRF API, ...).
+    # Production Console actions run one synchronous image generation per
+    # request (preview / revision / one FULL slot, measured 60-90 s on
+    # staging). nginx's 60 s default returned 504 to the operator while the
+    # job completed; keep this in step with gunicorn --timeout so nginx never
+    # outlives the worker (a killed worker would leave a stale RUNNING job).
     location / {
         proxy_pass http://sticker_backend;
+        proxy_read_timeout 300s;
+        proxy_send_timeout 300s;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
