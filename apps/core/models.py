@@ -98,8 +98,17 @@ class Order(TimestampedModel):
     # Canonical shape: {"emotions": [<emotion code>, ...]} — codes come from
     # Product.config["emotions"]; the required count is Product.config["emotion_count"].
     selection = models.JSONField(default=dict, blank=True)
+    # Customer consent captured before checkout (MAX Pilot gate): the
+    # identifier of the consent text the customer accepted and when. Empty /
+    # NULL means no consent was recorded; checkout must fail closed on it.
+    consent_version = models.CharField(max_length=64, blank=True, default="")
+    consent_accepted_at = models.DateTimeField(null=True, blank=True)
     customer_notes = models.TextField(blank=True)
     operator_notes = models.TextField(blank=True)
+
+    @property
+    def consent_accepted(self) -> bool:
+        return self.consent_accepted_at is not None and bool(self.consent_version)
 
     def __str__(self) -> str:
         return f"Order #{self.pk}"

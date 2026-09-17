@@ -108,7 +108,7 @@ class MaxStickerFlowRegressionTests(TestCase):
                     kwargs = client.send_message.call_args.kwargs
                     self.assertEqual(kwargs["buttons"][0][0]["payload"], "photos_done")
 
-        # photos_done → checkout started
+        # photos_done → consent screen (no checkout yet, order stays in AWAITING_PHOTOS)
         with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(
             "apps.max_bot.views.start_checkout"
         ) as checkout_mock:
@@ -116,10 +116,26 @@ class MaxStickerFlowRegressionTests(TestCase):
             response = self._post(_callback_payload(payload="photos_done", callback_id="cb-9"))
             self.assertEqual(response.status_code, 200)
             order.refresh_from_db()
+            self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            self.assertFalse(order.consent_accepted)
+            checkout_mock.assert_not_called()
+            kwargs = client.send_message.call_args.kwargs
+            self.assertEqual(kwargs["buttons"][0][0]["payload"], "consent:accept")
+            client.answer_callback.assert_called_once_with(callback_id="cb-9")
+
+        # consent:accept → consent persisted, summary, checkout started
+        with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(
+            "apps.max_bot.views.start_checkout"
+        ) as checkout_mock:
+            client = client_cls.return_value
+            response = self._post(_callback_payload(payload="consent:accept", callback_id="cb-10"))
+            self.assertEqual(response.status_code, 200)
+            order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.READY_FOR_CHECKOUT)
+            self.assertTrue(order.consent_accepted)
             checkout_mock.assert_called_once()
             self.assertEqual(checkout_mock.call_args.kwargs["chat_id"], "9001")
-            client.answer_callback.assert_called_once_with(callback_id="cb-9")
+            client.answer_callback.assert_called_once_with(callback_id="cb-10")
 
     def test_callback_ack_failure_does_not_fail_webhook(self):
         """A failed /answers ACK must not 502 the webhook: MAX would retry
@@ -153,3 +169,43 @@ class MaxStickerFlowRegressionTests(TestCase):
                     HTTP_X_MAX_BOT_API_SECRET="s3cret",
                 )
             self.assertEqual(response.status_code, 200)
+
+    def test_invalid_photo_upload_replies_instead_of_500(self):
+        """MediaService rejects e.g. a GIF; the customer gets a hint and MAX
+        gets a 200 (a 500 would make MAX redeliver the same update)."""
+        with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls:
+            self._post(_callback_payload(payload="product:stickers"))
+            self._post(_callback_payload(payload="style:stickers:classic"))
+            client = client_cls.return_value
+            client.reset_mock()
+            with mock.patch("apps.max_bot.views.download_photo", return_value=b"gif-bytes"):
+                response = self._post(
+                    {
+                        "update_type": "message_created",
+                        "message": {
+                            "sender": {"user_id": 7001, "first_name": "Ivan"},
+                            "recipient": {"chat_id": 9001},
+                            "body": {
+                                "mid": "mid-gif",
+                                "attachments": [
+                                    {"type": "image", "payload": {"url": "https://cdn.max.test/p.gif"}}
+                                ],
+                            },
+                        },
+                    }
+                )
+            self.assertEqual(response.status_code, 200)
+            kwargs = client.send_message.call_args.kwargs
+            self.assertIn("Не удалось принять фото", kwargs["text"])
+            self.assertIn("JPEG, PNG и WebP", kwargs["text"])
+            self.assertNotIn("buttons", kwargs)
+            self.assertEqual(Order.objects.get().photos.count(), 0)
+
+    def test_photo_prompt_explains_clear_face_and_angles(self):
+        from apps.max_bot.views import PHOTO_PROMPT
+
+        self.assertIn("чётк", PHOTO_PROMPT)
+        self.assertIn("лицо", PHOTO_PROMPT)
+        self.assertIn("ракурс", PHOTO_PROMPT)
+        self.assertIn("Фото загружены", PHOTO_PROMPT)
+

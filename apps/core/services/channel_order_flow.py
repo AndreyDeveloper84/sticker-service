@@ -1,5 +1,6 @@
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import transaction
+from django.utils import timezone
 
 from apps.core.models import ChannelIdentity, Order, Product, Style, User
 from apps.core.services.media import MediaService
@@ -8,6 +9,12 @@ from apps.core.services.order_state import OrderStateService
 
 class ChannelFlowError(ValueError):
     pass
+
+
+# Identifier of the customer consent text shown before checkout. Bump it when
+# the wording changes so accepted orders stay auditable against the text the
+# customer actually saw (Order.consent_version).
+PILOT_CONSENT_VERSION = "pilot-2026-09-v1"
 
 
 def product_emotion_count(product: Product) -> int:
@@ -207,11 +214,55 @@ class ChannelOrderFlowService:
             mime_type=mime_type,
         )
 
-    @transaction.atomic
-    def complete_photos(self, identity) -> Order:
-        order = self.current_photo_order(identity)
+    def assert_photos_complete(self, order: Order) -> None:
+        """Photos + product selection are sufficient to leave AWAITING_PHOTOS."""
         if not order.photos.exists():
             raise ChannelFlowError("At least one photo is required")
         if not self.selection_complete(order):
             raise ChannelFlowError("Emotion selection is not complete")
+
+    def photos_ready(self, identity) -> Order:
+        """The in-progress order, validated but NOT transitioned (consent step)."""
+        order = self.current_photo_order(identity)
+        self.assert_photos_complete(order)
+        return order
+
+    @transaction.atomic
+    def accept_consent(self, *, identity, version: str = PILOT_CONSENT_VERSION) -> Order:
+        """Persist the customer's consent on the order about to be checked out.
+
+        Idempotent: a repeated accept on an order that already carries consent
+        (whatever its later status) returns it unchanged. Consent is bound to
+        one order; a new order never inherits it.
+        """
+        order = (
+            Order.objects.select_for_update()
+            .select_related("product")
+            .filter(
+                channel_identity=identity,
+                status__in=[
+                    Order.Status.AWAITING_PHOTOS,
+                    Order.Status.READY_FOR_CHECKOUT,
+                    Order.Status.AWAITING_PAYMENT,
+                ],
+            )
+            .order_by("-id")
+            .first()
+        )
+        if not order:
+            raise ChannelFlowError("No order is waiting for consent")
+        if order.consent_accepted:
+            return order
+        if order.status != Order.Status.AWAITING_PHOTOS:
+            raise ChannelFlowError("Order is past the consent step without consent")
+        self.assert_photos_complete(order)
+        order.consent_version = str(version)
+        order.consent_accepted_at = timezone.now()
+        order.save(update_fields=["consent_version", "consent_accepted_at", "updated_at"])
+        return order
+
+    @transaction.atomic
+    def complete_photos(self, identity) -> Order:
+        order = self.current_photo_order(identity)
+        self.assert_photos_complete(order)
         return OrderStateService.transition(order=order, to_status=Order.Status.READY_FOR_CHECKOUT)

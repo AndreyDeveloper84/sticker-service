@@ -5,8 +5,10 @@ from unittest.mock import patch
 
 import httpx
 from django.test import TestCase
+from django.utils import timezone
 
 from apps.core.models import ChannelIdentity, Order, Payment, Product, Style, User
+from apps.core.services.channel_order_flow import PILOT_CONSENT_VERSION
 from apps.max_bot.payments import MaxExternalPaymentAdapter, MaxPaymentError, MaxPaymentIgnored
 from apps.max_bot.payments_yookassa import YooKassaPaymentProvider
 
@@ -240,6 +242,8 @@ class YooKassaAdapterTests(TestCase):
             product=product,
             style=style,
             status=Order.Status.READY_FOR_CHECKOUT,
+            consent_version=PILOT_CONSENT_VERSION,
+            consent_accepted_at=timezone.now(),
         )
         self.http = FakeHttpClient(created={
             "id": "yk-tx-1",
@@ -339,6 +343,8 @@ class YooKassaWebhookViewTests(TestCase):
             product=product,
             style=style,
             status=Order.Status.READY_FOR_CHECKOUT,
+            consent_version=PILOT_CONSENT_VERSION,
+            consent_accepted_at=timezone.now(),
         )
         self.http = FakeHttpClient(created={
             "id": "yk-tx-1",
@@ -349,10 +355,12 @@ class YooKassaWebhookViewTests(TestCase):
         self.payment, _session = self.adapter.create_checkout(identity=self.identity)
 
     def post_webhook(self, body):
+        # The PAID customer notice (tests_paid_notice) must not hit the real
+        # MAX API from these payment-contract tests.
         with patch(
             "apps.max_bot.provider_webhook.YooKassaPaymentProvider.from_env",
             return_value=self.provider,
-        ):
+        ), patch("apps.max_bot.provider_webhook.MaxBotClient"):
             return self.client.post(WEBHOOK_URL, data=body, content_type="application/json")
 
     def test_invalid_payload_returns_400(self):

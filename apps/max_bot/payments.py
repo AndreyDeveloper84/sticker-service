@@ -66,6 +66,10 @@ class MaxExternalPaymentAdapter:
         )
         if order is None:
             raise MaxPaymentError("No order ready for payment")
+        if not order.consent_accepted:
+            # Pilot gate: never create or reuse a checkout without the
+            # customer's recorded consent (ChannelOrderFlowService.accept_consent).
+            raise MaxPaymentError("Customer consent is required before checkout")
 
         existing = (
             Payment.objects.filter(
