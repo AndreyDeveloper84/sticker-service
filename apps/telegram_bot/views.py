@@ -6,7 +6,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 import logging
 
-from apps.core.customer_hints import customer_hint
+from apps.core.customer_hints import PHOTO_GUIDANCE, SINGLE_PHOTO_REMINDER, customer_hint
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
@@ -128,7 +128,7 @@ def _feedback_order(identity):
     return order
 
 
-PHOTO_PROMPT = "Отправьте несколько хороших фотографий человека."
+PHOTO_PROMPT = PHOTO_GUIDANCE
 
 # Consent gate (parity with MAX, DRF-2069): shown after the photos are
 # complete, before the order summary and the Stars invoice; the accepted text
@@ -217,7 +217,10 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
     elif data == "photos_done":
         # Validate photos/selection now (same errors as before) but stay in
         # AWAITING_PHOTOS: the invoice is reachable only through consent:accept.
-        adapter.photos_ready(identity)
+        order = adapter.photos_ready(identity)
+        if order.photos.count() == 1:
+            # soft reminder only — one photo is accepted (DRF-2090)
+            client.send_message(chat_id=chat_id, text=SINGLE_PHOTO_REMINDER)
         client.send_message(chat_id=chat_id, text=CONSENT_TEXT, reply_markup=CONSENT_REPLY_MARKUP)
     elif data == "consent:accept":
         order = adapter.accept_consent(identity=identity)

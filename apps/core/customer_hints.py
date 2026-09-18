@@ -22,6 +22,23 @@ NO_PREVIEW_HINT = "Сейчас нет превью, ожидающего ваш
 REVISION_USED_HINT = "Бесплатная правка по этому заказу уже использована. Мы продолжаем работу над стикерами."
 GENERIC_HINT = "Не удалось выполнить это действие на текущем шаге. Нажмите /start, чтобы продолжить."
 
+# --- photo step (DRF-2090) ----------------------------------------------
+# Live evidence (Orders 3/13): the provider's output moderation reacted to
+# how the model extends a body from a reference photo. Ask for neutral
+# portraits up front; remind softly when only one photo was sent.
+PHOTO_GUIDANCE = (
+    "Отправьте 2–3 чётких фотографии человека, лучше с разных ракурсов:\n"
+    "• лицо крупно и плечи в кадре;\n"
+    "• обычная повседневная одежда — без открытых плеч, декольте и купальников;\n"
+    "• без солнцезащитных очков и фильтров;\n"
+    "• нейтральный фон.\n\n"
+    "Когда закончите, нажмите «Фото загружены»."
+)
+SINGLE_PHOTO_REMINDER = (
+    "Лучше 2–3 фото с разных ракурсов — так стикер будет похожее. "
+    "Можно отправить ещё фото сейчас или продолжить с одним."
+)
+
 # Exact domain messages → hint. Anything unknown falls back to GENERIC_HINT.
 _FLOW_HINTS = {
     "No order is waiting for photos": START_HINT,
