@@ -10,7 +10,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 logger = logging.getLogger(__name__)
 
-from apps.core.customer_hints import customer_hint
+from apps.core.customer_hints import PHOTO_GUIDANCE, SINGLE_PHOTO_REMINDER, customer_hint
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
@@ -164,10 +164,7 @@ def _feedback_order(identity):
     return order
 
 
-PHOTO_PROMPT = (
-    "Отправьте несколько чётких фотографий человека: лицо должно быть хорошо "
-    "видно, лучше с разных ракурсов. Когда закончите, нажмите «Фото загружены»."
-)
+PHOTO_PROMPT = PHOTO_GUIDANCE
 
 PHOTO_REJECTED = (
     "Не удалось принять фото. Поддерживаются JPEG, PNG и WebP до 10 МБ. "
@@ -254,7 +251,10 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
     elif payload == "photos_done":
         # Validate photos/selection now (same errors as before) but stay in
         # AWAITING_PHOTOS: checkout is reachable only through consent:accept.
-        adapter.photos_ready(identity)
+        order = adapter.photos_ready(identity)
+        if order.photos.count() == 1:
+            # soft reminder only — one photo is accepted (DRF-2090)
+            _reply(client, event, text=SINGLE_PHOTO_REMINDER)
         _reply(client, event, text=CONSENT_TEXT, buttons=CONSENT_BUTTONS)
     elif payload == "consent:accept":
         order = adapter.accept_consent(identity=identity)
