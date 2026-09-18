@@ -58,6 +58,9 @@ class MaxAdapter:
             mime_type=mime_type,
         )
 
+    def current_photo_order(self, identity):
+        return self.flow.current_photo_order(identity)
+
     def photos_ready(self, identity):
         return self.flow.photos_ready(identity)
 

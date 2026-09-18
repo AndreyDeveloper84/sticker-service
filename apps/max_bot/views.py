@@ -10,6 +10,7 @@ from django.views.decorators.csrf import csrf_exempt
 
 logger = logging.getLogger(__name__)
 
+from apps.core.customer_hints import customer_hint
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
@@ -49,7 +50,11 @@ def webhook(request):
     try:
         _handle_event(event, adapter=adapter, client=client)
     except (MaxFlowError, PreviewFeedbackError) as exc:
-        return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+        # Out-of-step input (photo before /start, stale button, ...): tell
+        # the customer what to do next and ACK the update — a bare 409 left
+        # the bot silent and only made MAX redeliver (DRF-2083).
+        _reply_hint(client, event, exc)
+        return JsonResponse({"ok": True, "hint": str(exc)})
     except MaxAPIError as exc:
         # MAX error bodies carry a code/message pair, never secrets.
         logger.warning(
@@ -73,6 +78,24 @@ def _reply(client, event: MaxEvent, **kwargs):
     from the console is proactive and stays on ``user_id``).
     """
     return client.send_message(chat_id=event.chat_id, **kwargs)
+
+
+def _reply_hint(client, event: MaxEvent, exc: Exception) -> None:
+    """Best-effort customer hint for a rejected step; never raises."""
+    try:
+        _reply(client, event, text=customer_hint(exc))
+    except MaxAPIError as api_exc:
+        logger.warning(
+            "max.webhook.hint_failed update_type=%s status=%s body=%r",
+            event.update_type,
+            api_exc.status_code,
+            api_exc.body[:200],
+        )
+    if event.callback_id:
+        try:
+            client.answer_callback(callback_id=event.callback_id)
+        except MaxAPIError as api_exc:
+            logger.warning("max.webhook.callback_ack_failed status=%s body=%r", api_exc.status_code, api_exc.body[:200])
 
 
 def _handle_event(event: MaxEvent, *, adapter, client):
@@ -103,6 +126,9 @@ def _handle_message(event: MaxEvent, *, adapter, client):
         image_url = extract_photo_url(attachment)
         if not image_url:
             continue
+        # Flow check before the download: a photo that no order is waiting
+        # for is answered with a hint, never fetched from the CDN.
+        adapter.current_photo_order(identity)
         try:
             content = download_photo(image_url)
         except PhotoTooLargeError:

@@ -12,6 +12,7 @@ from unittest import mock
 
 from django.test import TestCase, override_settings
 
+from apps.core.customer_hints import EMOTION_CHOICE_HINT, NEED_PHOTO_HINT
 from apps.core.models import Order, Product, Style
 from apps.core.services.channel_order_flow import order_emotion_codes
 
@@ -131,10 +132,12 @@ class MaxProductSelectorFlowTests(TestCase):
             self.assertIn("Привет", kwargs["text"])
             self.assertEqual(kwargs["buttons"], [[{"text": "Подтвердить набор", "payload": "emotions:confirm"}]])
 
-            # photos_done before the emotion step is rejected with 409, no state mutation
+            # photos_done before the emotion step is rejected with a hint (200), no state mutation
             client.reset_mock()
             response = self._post(_callback("photos_done", callback_id="cb-early"))
-            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.status_code, 200)
+            # photos are checked first: no photo yet → the photo hint
+            self.assertEqual(client.send_message.call_args.kwargs["text"], NEED_PHOTO_HINT)
             order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
             checkout_mock.assert_not_called()
@@ -189,10 +192,11 @@ class MaxProductSelectorFlowTests(TestCase):
                 ["emotion:hello", "emotion:bye", "emotion:thanks"],
             )
 
-            # unknown emotion is rejected with 409, selection unchanged
+            # unknown emotion is rejected with a hint (200), selection unchanged
             client.reset_mock()
             response = self._post(_callback("emotion:nope"))
-            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(client.send_message.call_args.kwargs["text"], EMOTION_CHOICE_HINT)
             order.refresh_from_db()
             self.assertEqual(order_emotion_codes(order), [])
 

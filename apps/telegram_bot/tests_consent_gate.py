@@ -134,7 +134,8 @@ class TelegramConsentWebhookFlowTests(TestCase):
 
             response = self._post(_callback("consent:accept"))
 
-            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["ok"], True)
             order = Order.objects.get()
             self.assertFalse(order.consent_accepted)
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)

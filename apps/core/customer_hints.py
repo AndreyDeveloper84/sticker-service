@@ -1,0 +1,51 @@
+"""Customer-facing hints for out-of-step bot input (DRF-2083).
+
+Domain services raise ``ChannelFlowError`` / ``PreviewFeedbackError`` with
+English, operator-oriented messages. Both bots map them here to one short
+Russian hint that names the next expected action, so a customer who sends a
+photo before choosing a product (or taps a stale button) is never left with
+silence. Pure presentation: no domain behaviour changes.
+"""
+
+from __future__ import annotations
+
+START_HINT = "Сначала выберите продукт: нажмите /start."
+CONTINUE_ORDER_HINT = (
+    "У вас уже есть незавершённый заказ — продолжите его: отправьте фото "
+    "или нажмите «Фото загружены»."
+)
+NEED_PHOTO_HINT = "Сначала отправьте хотя бы одно фото человека."
+NEED_EMOTIONS_HINT = "Сначала выберите эмоции для стикера — нажмите кнопки выше."
+EMOTION_CHOICE_HINT = "Этот вариант эмоции сейчас недоступен. Выберите один из предложенных выше."
+PRODUCT_UNAVAILABLE_HINT = "Этот вариант недоступен. Нажмите /start и выберите продукт заново."
+NO_PREVIEW_HINT = "Сейчас нет превью, ожидающего вашей оценки. Мы напишем, когда оно будет готово."
+REVISION_USED_HINT = "Бесплатная правка по этому заказу уже использована. Мы продолжаем работу над стикерами."
+GENERIC_HINT = "Не удалось выполнить это действие на текущем шаге. Нажмите /start, чтобы продолжить."
+
+# Exact domain messages → hint. Anything unknown falls back to GENERIC_HINT.
+_FLOW_HINTS = {
+    "No order is waiting for photos": START_HINT,
+    "No order is waiting for consent": START_HINT,
+    "Another order is already waiting for photos": CONTINUE_ORDER_HINT,
+    "At least one photo is required": NEED_PHOTO_HINT,
+    "Emotion selection is not complete": NEED_EMOTIONS_HINT,
+    "Unknown emotion for this product": EMOTION_CHOICE_HINT,
+    "Emotion is already selected": EMOTION_CHOICE_HINT,
+    "All required emotions are already selected": NEED_PHOTO_HINT,
+    "This product has no emotion selection": GENERIC_HINT,
+    "Product emotion set does not match the required count": PRODUCT_UNAVAILABLE_HINT,
+    "Product or style is unavailable": PRODUCT_UNAVAILABLE_HINT,
+    "Product is unavailable": PRODUCT_UNAVAILABLE_HINT,
+    "Order is past the consent step without consent": GENERIC_HINT,
+    # preview feedback
+    "Нет превью, ожидающего вашей оценки": NO_PREVIEW_HINT,
+    "No delivered approved preview": NO_PREVIEW_HINT,
+    "Order is not awaiting preview feedback": NO_PREVIEW_HINT,
+    "Included preview revision has already been used": REVISION_USED_HINT,
+    "Unknown revision category": GENERIC_HINT,
+}
+
+
+def customer_hint(exc: Exception) -> str:
+    """Short Russian hint for a domain flow/feedback error."""
+    return _FLOW_HINTS.get(str(exc), GENERIC_HINT)

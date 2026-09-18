@@ -4,13 +4,18 @@ from django.conf import settings
 from django.http import HttpResponse, JsonResponse
 from django.views.decorators.csrf import csrf_exempt
 
+import logging
+
+from apps.core.customer_hints import customer_hint
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
-from apps.telegram_bot.client import TelegramBotClient
+from apps.telegram_bot.client import TelegramAPIError, TelegramBotClient
 from apps.telegram_bot.paid_notice import notify_customer_paid
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter, configured_stars_price
+
+logger = logging.getLogger(__name__)
 
 
 @csrf_exempt
@@ -33,12 +38,37 @@ def webhook(request):
 
     try:
         _handle_update(update, adapter=adapter, payment_adapter=payment_adapter, client=client)
-    except (TelegramPaymentError, PreviewFeedbackError) as exc:
+    except TelegramPaymentError as exc:
         return JsonResponse({"ok": False, "error": str(exc)})
-    except TelegramFlowError as exc:
-        return JsonResponse({"ok": False, "error": str(exc)}, status=409)
+    except (TelegramFlowError, PreviewFeedbackError) as exc:
+        # Out-of-step input (photo before /start, stale button, ...): tell
+        # the customer what to do next and ACK the update — a bare 409 left
+        # the bot silent (DRF-2083).
+        _reply_hint(client, update, exc)
+        return JsonResponse({"ok": True, "hint": str(exc)})
 
     return JsonResponse({"ok": True})
+
+
+def _update_chat_id(update):
+    message = update.get("message") or (update.get("callback_query") or {}).get("message") or {}
+    return (message.get("chat") or {}).get("id")
+
+
+def _reply_hint(client, update, exc: Exception) -> None:
+    """Best-effort customer hint for a rejected step; never raises."""
+    chat_id = _update_chat_id(update)
+    if chat_id is not None:
+        try:
+            client.send_message(chat_id=chat_id, text=customer_hint(exc))
+        except TelegramAPIError as api_exc:
+            logger.warning("telegram.webhook.hint_failed error=%s", api_exc)
+    callback = update.get("callback_query") or {}
+    if callback.get("id"):
+        try:
+            client.answer_callback_query(callback_query_id=callback["id"])
+        except TelegramAPIError as api_exc:
+            logger.warning("telegram.webhook.callback_ack_failed error=%s", api_exc)
 
 
 def _handle_update(update, *, adapter, payment_adapter, client):
@@ -80,6 +110,9 @@ def _handle_message(message, *, adapter, payment_adapter, client):
 
     photos = message.get("photo") or []
     if photos:
+        # Flow check before the download: a photo that no order is waiting
+        # for is answered with a hint, never fetched from Telegram.
+        adapter.current_photo_order(identity)
         file_info = client.get_file(photos[-1]["file_id"])
         file_path = file_info["file_path"]
         content = client.download_file(file_path)

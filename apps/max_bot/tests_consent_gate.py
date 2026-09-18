@@ -11,6 +11,7 @@ from unittest import mock
 from django.test import TestCase, override_settings
 from django.utils import timezone
 
+from apps.core.customer_hints import NEED_PHOTO_HINT
 from apps.core.models import ChannelIdentity, Order, Payment, Product, Style, User
 from apps.core.services.channel_order_flow import (
     PILOT_CONSENT_VERSION,
@@ -116,8 +117,9 @@ class MaxConsentWebhookFlowTests(TestCase):
 
             response = self._post(_callback("photos_done"))
 
-            self.assertEqual(response.status_code, 409)
-            client.send_message.assert_not_called()
+            # rejected step: 200 + a hint to the customer, no state change
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(client.send_message.call_args.kwargs["text"], NEED_PHOTO_HINT)
             checkout_mock.assert_not_called()
 
     def test_accept_persists_consent_and_starts_checkout(self):
@@ -150,7 +152,8 @@ class MaxConsentWebhookFlowTests(TestCase):
 
             response = self._post(_callback("consent:accept"))
 
-            self.assertEqual(response.status_code, 409)
+            self.assertEqual(response.status_code, 200)
+            self.assertFalse(Payment.objects.exists())
             order = Order.objects.get()
             self.assertFalse(order.consent_accepted)
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
