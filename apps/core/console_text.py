@@ -91,10 +91,39 @@ def emotion_labels(order: Order) -> dict[str, str]:
     return labels
 
 
-def slot_title(order: Order, slot_key: str) -> str:
-    """«Привет» when the product knows the emotion, else the raw code."""
+def custom_phrase_for_slot(order: Order, slot_key: str) -> str:
+    """The customer's phrase behind a custom-pack slot («custom-N»), else ''."""
+    selection = order.selection or {}
+    phrases = selection.get("custom_phrases") or []
+    key = str(slot_key)
+    if not phrases or not key.startswith("custom-"):
+        return ""
+    try:
+        index = int(key.rsplit("-", 1)[-1])
+    except ValueError:
+        return ""
+    if 1 <= index <= len(phrases):
+        return str(phrases[index - 1])
+    return ""
+
+
+def slot_title(order: Order, slot_key: str, *, max_length: int = 40) -> str:
+    """«Привет» for an emotion slot, «<фраза>» for a custom-pack slot (the
+    customer's text instead of «Фраза N»), else the raw code."""
+    phrase = custom_phrase_for_slot(order, slot_key)
+    if phrase:
+        name = phrase if len(phrase) <= max_length else phrase[: max_length - 1] + "…"
+        return f"«{name}»"
     name = emotion_labels(order).get(str(slot_key), str(slot_key))
     return f"«{name}»"
+
+
+def customer_contact(order: Order) -> str:
+    return str((order.selection or {}).get("contact") or "").strip()
+
+
+def custom_phrases(order: Order) -> list[str]:
+    return [str(value) for value in (order.selection or {}).get("custom_phrases") or []]
 
 
 # --- QC checklist ------------------------------------------------------------
@@ -118,6 +147,10 @@ QC_CRITERIA = {
         "Прозрачный фон",
         "Фон прозрачный по всему периметру, без остатков заливки и белых углов.",
     ),
+    "white_outline": (
+        "Белая обводка",
+        "Аккуратная ровная белая обводка по контуру, без разрывов.",
+    ),
     "emotion_readability": (
         "Читаемость эмоции",
         "Эмоция слота узнаётся с первого взгляда и соответствует названию.",
@@ -137,6 +170,13 @@ QC_AUTOMATED_CHECKS = {
     "alpha_channel": "прозрачность",
     "file_size": "вес ≤ 512 КБ",
 }
+
+# Every human criterion the service requires must have console text;
+# an unknown code falls back to itself so the checklist can always be
+# completed (DRF-2084 blocker: a criterion missing here was unanswerable).
+def criterion_text(code: str) -> tuple[str, str]:
+    return QC_CRITERIA.get(code, (code, ""))
+
 
 QC_REASON_CODES = {
     "incomplete_set": "неполный комплект",
