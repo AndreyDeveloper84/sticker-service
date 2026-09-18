@@ -116,31 +116,35 @@ webhooks → 405. Для REAL PAID дополнительно: `check_outbound_p
 ## 3. Порядок шагов M2 и evidence
 
 Клиентская часть — официальный MAX‑бот; операторская — `/admin/core/order/<id>/`
-(Production Console). Каждое console‑действие — одна кнопка/URL, `POST`.
-Ниже имена URL из `apps/core/production_console.py`, `qc_console.py`,
-`final_delivery_console.py` (dev `c733121`).
+(Production Console, полностью на русском с DRF‑2084, dev `fb8f51f`). Вверху
+страницы заказа блок **«Что делать сейчас»** с одной главной кнопкой по
+статусу — в штатном сценарии оператор нажимает только её; второстепенные
+действия в свёрнутом блоке «Дополнительно». Каждое действие — одна
+кнопка/URL, `POST`; ниже русское название кнопки и имя URL из
+`apps/core/production_console.py`, `qc_console.py`, `final_delivery_console.py`.
 
 | # | Шаг | Кто | Действие | Ожидаемое состояние | Evidence (записать) |
 |---|---|---|---|---|---|
 | 1 | Старт | клиент | `bot_started` в MAX | кнопки ровно `sticker-pack-9`, `single-sticker` | `ChannelIdentity` id (max) |
 | 2 | Продукт + стиль | клиент | `single-sticker` → `comic` | Order `AWAITING_PHOTOS`; 9 кнопок эмоций | **order id** |
-| 3 | Эмоция | клиент | `emotion:<code>` | `Order.selection.emotions` = 1 код | код эмоции |
+| 3 | Эмоция | клиент | `emotion:<code>` — **до** отправки фото (урок Order 10: фото до эмоции принимаются, но «Фото загружены» отклоняется, пока эмоция не выбрана) | `Order.selection.emotions` = 1 код | код эмоции |
 | 4 | Фото | клиент | 2–3 фото (только владельца/согласного тестера) | `OrderPhoto` ×N | photo ids |
 | 5 | Consent (PR #37) | клиент | «Фото загружены» → текст согласия → `consent:accept` | `Order.consent_accepted=true`, `consent_version`; до merge #37 шага нет — checkout сразу | consent_version |
 | 6 | Checkout | клиент/бот | кнопка «Оплатить заказ» с URL YooKassa | `READY_FOR_CHECKOUT` → `AWAITING_PAYMENT`; `Payment(yookassa, 10000 RUB, PENDING)` | **payment id**, `external_payment_id` |
 | 7 | Оплата | клиент | YooKassa checkout (тест‑карта в test‑режиме / реальная — только по явному решению владельца) | webhook `payment.succeeded` → `Payment.CONFIRMED`, Order `PAID`, ровно один CONFIRMED; повтор webhook идемпотентен | `confirmed_at`, `metadata.provider_webhook` present |
 | 8 | PAID notice (PR #37) | бот | `notify_customer_paid` | клиент получил «Оплата получена. Готовим ваше превью.» ровно один раз | **message id** уведомления |
-| 9 | Preview | оператор | `core_order_generate_preview` | `PREVIEW_GENERATING` → `INTERNAL_PREVIEW_REVIEW`; `GenerationJob(preview)` SUCCEEDED, `output_metadata.usage` present | **preview job id**, asset id |
-| 10 | Approve + deliver preview | оператор | `core_order_approve_preview` (asset) → deliver | `PREVIEW_REVIEW`; клиент получил фото + «Как вам превью?» | message id превью |
+| 9 | Превью | оператор | «Сгенерировать превью» (`core_order_generate_preview`); страница подтверждения: «~1–1.5 мин, не закрывайте страницу» | `PREVIEW_GENERATING` → `INTERNAL_PREVIEW_REVIEW`; `GenerationJob(preview)` SUCCEEDED, `output_metadata.usage` present | **preview job id**, asset id |
+| 10 | Одобрить + отправить превью | оператор | «Одобрить превью #N» (`core_order_approve_preview`) → «Отправить превью клиенту» (`core_order_deliver_preview`) | `PREVIEW_REVIEW`; клиент получил фото + «Как вам превью?» | message id превью |
 | 11a | Клиент «Нравится» | клиент | callback approve | `customer_approved=true`, статус `PREVIEW_REVIEW` | — |
 | 11b | (вариант) «Нужно исправить» | клиент | категория правки | `REVISION_REQUESTED`, `Revision` ×1; вторая правка → 409 | revision id |
-| 11c | Generate Revision (DRF‑2066) | оператор | `core_order_generate_revision` | `REVISION_GENERATING` → `INTERNAL_PREVIEW_REVIEW`; `GenerationJob(revision)` SUCCEEDED → шаг 10 → 11a | **revision job id** |
-| 12 | Start Full Production | оператор | `core_order_start_full_production` — **один slot за нажатие**, для single повторять до завершения (1 раз) | `PACK_GENERATING` → `QUALITY_CONTROL`; `GenerationJob(full)` ×1 SUCCEEDED, `input_metadata.source_preview_id` = одобренное превью; повторное нажатие после завершения — ошибка, новых jobs нет | **full job id(s)**, FINAL asset id |
-| 12b | (при failed slot) | оператор | `core_order_retry_failed_production` / `core_order_force_retry_slot` | новый attempt того же slot_key | attempt №, job id |
-| 13 | QC report | оператор | `core_order_qc_start` | `QcReport attempt=1`, `expected_count=1`, automated checks `dimensions` / `alpha_channel` / `file_size` (см. §5) | **QcReport id**, automated_checks |
-| 14 | QC checklist | оператор | `core_order_qc_finalize` — все 6 критериев явно | `PASSED` → `READY_FOR_DELIVERY`; любой снятый → `FAILED` + reason codes, статус не меняется; `core_order_qc_retry <slot>` → `PACK_GENERATING` → шаг 12 → attempt=2 | verdict, reason_codes |
-| 15 | Deliver final set | оператор | `core_order_deliver_final` | `DELIVERY_IN_PROGRESS` → клиент получил 1 файл (MAX `send_image`) + «набор готов» → `DELIVERED`; `FinalDelivery attempt=1`, slot `sent` с message_id | **FinalDelivery id**, per‑slot **message id** |
-| 15b | (при обрыве) | оператор | `core_order_resume_final_delivery` — только явный Resume; после `DELIVERED` — отказ | нет повторных отправок (принятое окно: ≤1 дубль при падении между send и записью message_id) | — |
+| 11c | Сгенерировать правку (DRF‑2066) | оператор | «Сгенерировать правку» (`core_order_generate_revision`) | `REVISION_GENERATING` → `INTERNAL_PREVIEW_REVIEW`; `GenerationJob(revision)` SUCCEEDED → шаг 10 → 11a | **revision job id** |
+| 12 | Производство | оператор | «Запустить производство» (`core_order_start_full_production`) — **один слот за нажатие**, для single 1 раз | `PACK_GENERATING` → `QUALITY_CONTROL`; `GenerationJob(full)` ×1 SUCCEEDED, `input_metadata.source_preview_id` = одобренное превью; повторное нажатие после завершения — ошибка, новых jobs нет | **full job id(s)**, FINAL asset id |
+| 12b | (при слоте «ошибка») | оператор | «Повторить неудавшиеся слоты» (`core_order_retry_failed_production`) / «Принудительный повтор» (`core_order_force_retry_slot`) — оба в «Дополнительно» | новый attempt того же slot_key | attempt №, job id |
+| 13 | QC-отчёт | оператор | «Открыть QC-отчёт» (`core_order_qc_start`) | `QcReport attempt=1`, `expected_count=1`, automated checks `dimensions` / `alpha_channel` / `file_size` (см. §5) | **QcReport id**, automated_checks |
+| 14 | Чек-лист | оператор | «Заполнить чек-лист» (`core_order_qc_finalize`): по каждому из 6 критериев радио «✅ Норма / ❌ Дефект» (обязательно), превью стикера в форме, затем **«QC пройден»** или **«Отправить на доработку»**. Пустая/неполная форма, PASS с дефектом, FAIL без дефекта → ошибка валидации, отчёт не завершается | все «Норма» + «QC пройден» → `PASSED` → `READY_FOR_DELIVERY`; дефект + «на доработку» → `FAILED` + причины по-русски, статус не меняется | verdict, reason_codes |
+| 14b | Доработка | оператор | «Доработать этот слот» (`core_order_qc_retry <slot>`) → `PACK_GENERATING` → главная кнопка **«Перегенерировать слот «…»»** (`core_order_regenerate_slots`, форма предзаполнена; DRF‑2079) → «Открыть QC-отчёт» → attempt=2. Не «Повторить неудавшиеся слоты» (консоль перенаправит в перегенерацию с предупреждением) | новый FULL job того же slot_key, новый asset id | attempt №, job id |
+| 15 | Отправить набор | оператор | «Отправить набор клиенту» (`core_order_deliver_final`; кнопка есть только при открытом QC gate) | `DELIVERY_IN_PROGRESS` → клиент получил 1 файл (MAX `send_image`) + «набор готов» → `DELIVERED`; `FinalDelivery attempt=1`, slot `sent` с message_id | **FinalDelivery id**, per‑slot **message id** |
+| 15b | (при обрыве) | оператор | «Продолжить доставку» (`core_order_resume_final_delivery`) — только явное нажатие; после `DELIVERED` — «Готово», отказ | нет повторных отправок (принятое окно: ≤1 дубль при падении между send и записью message_id) | — |
 | 16 | Metrics (после merge #34) | оператор | `python manage.py pilot_metrics --since <D> --until <D> --json`; `ManualWorkLog` минуты | `orders_paid=1`, `yookassa/RUB (1, 10000)`, `delivery=1 DELIVERED` | snapshot JSON |
 
 Шаблон evidence ячейки:
@@ -158,8 +162,13 @@ VERDICT: PASS | FAIL(<stage>, <reason>)
 ```
 
 Negative gates после зелёной ячейки (без новых оплат, на том же заказе):
-console отклоняет Start full production до «Нравится», QC report при неполном
-наборе и Deliver final set до QC PASS (G3/G5/G6 из `tests_e2e_pilot_gates.py`).
+консоль отклоняет «Запустить производство» до «Нравится», «Открыть QC-отчёт» при
+неполном наборе и не показывает «Отправить набор клиенту» до QC пройден
+(G3/G5/G6 из `tests_e2e_pilot_gates.py`).
+
+Уроки Orders 10/11: эмоцию выбирать до фото; после QC FAIL — «Доработать этот
+слот» → «Перегенерировать слот» (форма предзаполнена) → «Открыть QC-отчёт»;
+чек-лист требует явного «Норма/Дефект» по каждому критерию.
 
 ---
 
