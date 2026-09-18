@@ -8,8 +8,8 @@ from django.utils.html import format_html
 from apps.core.console_html import buttons_html, lines_html
 from apps.core.console_text import (
     QC_AUTOMATED_CHECKS,
-    QC_CRITERIA,
     QC_STATUSES,
+    criterion_text,
     humanize_error,
     label,
     reason_label,
@@ -49,7 +49,7 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
         if report is not None and report.status == QcReport.Status.IN_PROGRESS:
             return (
                 "Заполните чек-лист контроля качества",
-                f"QC-попытка {report.attempt} открыта. Оцените каждый стикер по 6 критериям "
+                f"QC-попытка {report.attempt} открыта. Оцените каждый стикер по {len(HUMAN_CRITERIA)} критериям "
                 "и выберите «QC пройден» или «Отправить на доработку».",
                 "Заполнить чек-лист",
                 reverse("admin:core_order_qc_finalize", args=[order.pk]),
@@ -283,10 +283,15 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
                     "auto_failed": failed,
                 }
             )
+        # Exactly the criteria the service will require, in its order.
         criteria = [
-            {"code": code, "title": title, "hint": hint, "value": (answers or {}).get(code, "")}
-            for code, (title, hint) in QC_CRITERIA.items()
-            if code in HUMAN_CRITERIA
+            {
+                "code": code,
+                "title": criterion_text(code)[0],
+                "hint": criterion_text(code)[1],
+                "value": (answers or {}).get(code, ""),
+            }
+            for code in HUMAN_CRITERIA
         ]
         return {
             **self.admin_site.each_context(request),
@@ -320,13 +325,13 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
         decision = request.POST.get("decision", "")
         errors = []
         missing = [
-            QC_CRITERIA[code][0] for code, value in answers.items() if value not in (CHECK_OK, CHECK_DEFECT)
+            criterion_text(code)[0] for code, value in answers.items() if value not in (CHECK_OK, CHECK_DEFECT)
         ]
         if missing:
             errors.append(
                 "Выберите «Норма» или «Дефект» для каждого критерия: " + ", ".join(missing) + "."
             )
-        defects = [QC_CRITERIA[code][0] for code, value in answers.items() if value == CHECK_DEFECT]
+        defects = [criterion_text(code)[0] for code, value in answers.items() if value == CHECK_DEFECT]
         if decision not in (DECISION_PASS, DECISION_FAIL):
             errors.append("Выберите решение: «QC пройден» или «Отправить на доработку».")
         elif decision == DECISION_PASS and defects:
