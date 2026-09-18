@@ -1,24 +1,38 @@
-"""Pilot budget control (DRF-2086): limits, cost figures and their evidence.
+"""Pilot Budget Guard (DRF-2086): limits enforced at the service boundary.
 
-Console-level only. Generation services are not touched: the Production
-Console asks ``BudgetService.check()`` before every paid action and refuses
-to call the service when a limit would be exceeded; a superuser may
-override one action explicitly, and both outcomes are recorded as
-``OrderEvent`` rows (``budget.blocked`` / ``budget.override``).
+Every billable path — preview, revision, FULL slot, retry, regenerate, force
+retry, and any future caller — creates its ``GenerationJob`` under
+``select_for_update(order)`` before the provider is called. The guard runs
+inside that transaction, right before the job row is written:
 
-Limits come from settings/env (settings take precedence so tests can use
-``override_settings``):
+    BudgetGuard(override=...).enforce(locked_order, task_type, slot_key=...)
 
-- ``PILOT_MAX_IMAGE_CALLS_PER_DAY``, ``PILOT_MAX_IMAGE_CALLS_PER_MONTH`` —
-  provider calls (every ``GenerationJob`` that started, all task types) in
-  the current local day / month; absent or 0 = unlimited;
-- ``PILOT_MAX_FULL_ATTEMPTS_PER_SLOT`` (default 3) — FULL jobs per slot;
-- ``PILOT_MAX_IMAGE_CALLS_PER_ORDER`` (default 15) — calls per order;
-  explicit 0 = unlimited for these two as well.
+- limit exceeded → ``BudgetExceeded`` (Russian message) → the transaction
+  rolls back → no job, no provider call;
+- ``BudgetOverride`` (explicit, from a superuser who confirmed) →
+  ``OrderEvent budget.override`` is written in the same transaction and the
+  action proceeds; without it everyone is blocked;
+- invalid configuration → ``BudgetConfigError`` (fail closed, RU message
+  naming the variable).
+
+Limits (Django setting first, then env):
+
+- ``PILOT_MAX_IMAGE_CALLS_PER_DAY`` / ``PILOT_MAX_IMAGE_CALLS_PER_MONTH`` —
+  jobs with ``started_at`` in the current local day / month, every task
+  type and outcome (an attempt that reached the provider is billable);
+  unset or ``0`` = unlimited;
+- ``PILOT_MAX_IMAGE_CALLS_PER_ORDER`` (unset → 15; ``0`` = unlimited);
+- ``PILOT_MAX_FULL_ATTEMPTS_PER_SLOT`` (unset → 3; ``0`` = unlimited) —
+  FULL jobs per slot.
+
+Per-order / per-slot counters are read under the order lock (concurrency
+safe). Day/month counters span orders: on PostgreSQL the guard takes a
+transaction-scoped advisory lock (``BUDGET_LOCK_KEY``) before counting so
+two concurrent transactions cannot both see the last free unit; on other
+backends they are best-effort.
 
 ``PILOT_IMAGE_CALL_COST_RUB`` (optional float) prices one call for the
-operator-facing «≈ ₽» figures; ``PILOT_IMAGE_CALL_COST_USD`` stays the
-snapshot's unit.
+operator-facing «≈ ₽» figures.
 """
 
 from __future__ import annotations
@@ -29,30 +43,11 @@ from dataclasses import dataclass, field
 from datetime import datetime, time
 
 from django.conf import settings
+from django.db import connection
 from django.db.models import Count
 from django.utils import timezone
 
 from apps.core.models import GenerationJob, Order, OrderEvent
-
-# Provider calls a console action will make in ONE click. Every production
-# action runs a single slot per click (max_slots=1), so all actions cost 1.
-ACTION_CALLS = {
-    "preview": 1,
-    "revision": 1,
-    "full_start": 1,
-    "retry": 1,
-    "regenerate": 1,
-    "force_retry": 1,
-}
-
-ACTION_TITLES = {
-    "preview": "Сгенерировать превью",
-    "revision": "Сгенерировать правку",
-    "full_start": "Запустить производство",
-    "retry": "Повторить неудавшиеся слоты",
-    "regenerate": "Перегенерировать стикеры",
-    "force_retry": "Принудительный повтор слота",
-}
 
 LIMIT_TITLES = {
     "day": "вызовов в день",
@@ -68,6 +63,44 @@ DEFAULTS = {
     "PILOT_MAX_FULL_ATTEMPTS_PER_SLOT": 3,
 }
 
+# PostgreSQL advisory-lock key (bigint) used to serialize the cross-order
+# day/month counters while a job is being created. Transaction-scoped
+# (pg_advisory_xact_lock): released automatically at commit or rollback, no
+# schema, no row. Any constant works as long as nothing else in the database
+# uses the same key; "2086" = the ticket, "0001" = the budget counters.
+BUDGET_LOCK_KEY = 20860001
+
+TASK_ACTIONS = {
+    GenerationJob.TaskType.PREVIEW: "preview",
+    GenerationJob.TaskType.REVISION: "revision",
+    GenerationJob.TaskType.FULL: "full",
+}
+
+
+class BudgetError(ValueError):
+    """Base: the action must not reach the provider."""
+
+
+class BudgetConfigError(BudgetError):
+    """A PILOT_MAX_* value is not a non-negative integer — fail closed."""
+
+
+class BudgetExceeded(BudgetError):
+    def __init__(self, decision: "BudgetDecision"):
+        self.decision = decision
+        super().__init__(decision.message)
+
+
+@dataclass(frozen=True)
+class BudgetOverride:
+    """Explicit, audited permission to exceed a limit for one action."""
+
+    actor_ref: str
+    reason: str = ""
+
+
+# ------------------------------------------------------------- settings
+
 
 def setting(name: str, default=None):
     """Django setting first (tests), then the environment, then default."""
@@ -79,14 +112,38 @@ def setting(name: str, default=None):
     return value
 
 
+def _config_message(name: str, raw) -> str:
+    return (
+        f"Некорректная настройка лимита {name}: значение {raw!r} не является целым числом ≥ 0. "
+        "Генерация не запущена."
+    )
+
+
 def limit_value(name: str) -> int | None:
-    """Positive int limit or None (= unlimited) for a PILOT_MAX_* setting."""
+    """Positive int limit or None (= unlimited).
+
+    Unset → DEFAULTS (day/month unlimited, order 15, slot 3); explicit 0 →
+    unlimited; anything else that is not a non-negative integer →
+    BudgetConfigError (fail closed).
+    """
     raw = setting(name, DEFAULTS[name])
+    if isinstance(raw, bool):
+        raise BudgetConfigError(_config_message(name, raw))
     try:
-        value = int(raw)
+        value = int(str(raw).strip())
     except (TypeError, ValueError):
-        return None
+        raise BudgetConfigError(_config_message(name, raw)) from None
+    if value < 0:
+        raise BudgetConfigError(_config_message(name, raw))
     return value if value > 0 else None
+
+
+def safe_limit(name: str) -> int | None:
+    """Display helper: an invalid value shows as None instead of raising."""
+    try:
+        return limit_value(name)
+    except BudgetConfigError:
+        return None
 
 
 def call_cost_rub() -> float | None:
@@ -101,6 +158,15 @@ def call_cost_rub() -> float | None:
 def rub(calls: int) -> float | None:
     cost = call_cost_rub()
     return round(calls * cost, 2) if cost is not None else None
+
+
+def percent(used: int, maximum: int | None) -> int | None:
+    if not maximum:
+        return None
+    return int(round(100 * used / maximum))
+
+
+# ------------------------------------------------------------- decision
 
 
 @dataclass(frozen=True)
@@ -118,10 +184,6 @@ class BudgetLimit:
     @property
     def exceeded(self) -> bool:
         return self.used + self.planned > self.max
-
-    @property
-    def percent(self) -> int:
-        return int(round(100 * self.used / self.max)) if self.max else 0
 
 
 @dataclass(frozen=True)
@@ -142,19 +204,31 @@ class BudgetDecision:
         if limit is None:
             return ""
         where = f" ({limit.slot_key})" if limit.slot_key else ""
-        return (
-            f"Лимит {limit.title}{where} исчерпан: {limit.used}/{limit.max}. "
-            "Генерация не запущена."
-        )
+        return f"Лимит {limit.title}{where} исчерпан: {limit.used}/{limit.max}. Генерация не запущена."
+
+
+def _event_payload(decision: BudgetDecision, **extra) -> dict:
+    limit = decision.blocked
+    return {
+        "action": decision.action,
+        "limit": limit.key,
+        "slot_key": limit.slot_key,
+        "used": limit.used,
+        "max": limit.max,
+        **extra,
+    }
+
+
+# -------------------------------------------------------------- service
 
 
 class BudgetService:
-    """Usage counters, limit checks and cost figures for the console."""
+    """Usage counters, limit checks, evidence and cost figures."""
 
     def __init__(self, *, now: datetime | None = None):
         self.now = now or timezone.now()
 
-    # ---------------------------------------------------------- windows
+    # windows
 
     def day_window(self) -> tuple[datetime, datetime]:
         local = timezone.localtime(self.now)
@@ -167,7 +241,7 @@ class BudgetService:
         next_month = (start.replace(day=28) + timezone.timedelta(days=4)).replace(day=1)
         return start, next_month
 
-    # ---------------------------------------------------------- counters
+    # counters
 
     @staticmethod
     def _started():
@@ -192,13 +266,13 @@ class BudgetService:
         )
         return {row["slot_key"]: row["count"] for row in rows}
 
-    # ------------------------------------------------------------- check
+    # check
 
-    def check(self, order: Order, action: str, *, slot_keys=None) -> BudgetDecision:
-        """Limits this action would hit. ``slot_keys``: slots the action may
-        run (explicit for regenerate/force_retry/retry; production start
-        defaults to the slots without a final asset)."""
-        planned = ACTION_CALLS.get(action, 1)
+    def check(self, order: Order, action: str, *, slot_keys=None, planned: int = 1) -> BudgetDecision:
+        """Limits ``planned`` more calls would hit. ``slot_keys``: FULL slots
+        the calls target (None on production start = slots without a FINAL
+        asset; [] = no per-slot check). Raises BudgetConfigError on an
+        invalid configuration."""
         limits: list[BudgetLimit] = []
         day = limit_value("PILOT_MAX_IMAGE_CALLS_PER_DAY")
         if day:
@@ -210,7 +284,7 @@ class BudgetService:
         if per_order:
             limits.append(BudgetLimit("order", self.calls_for_order(order), per_order, planned))
         per_slot = limit_value("PILOT_MAX_FULL_ATTEMPTS_PER_SLOT")
-        if per_slot and action in {"full_start", "retry", "regenerate", "force_retry"}:
+        if per_slot and action in {"full", "full_start", "retry", "regenerate", "force_retry"}:
             attempts = self.full_attempts(order)
             keys = list(slot_keys) if slot_keys is not None else self._open_slots(order)
             for key in keys:
@@ -219,7 +293,6 @@ class BudgetService:
 
     @staticmethod
     def _open_slots(order: Order) -> list[str]:
-        """Slots production may still run: selected emotions without a FINAL asset."""
         from apps.core.models import GeneratedAsset
 
         done = set(
@@ -227,43 +300,29 @@ class BudgetService:
         )
         return [key for key in (order.selection or {}).get("emotions") or [] if key not in done]
 
-    # ---------------------------------------------------------- evidence
+    # evidence
 
     @staticmethod
     def record_blocked(order: Order, decision: BudgetDecision, *, actor_ref: str = "") -> OrderEvent:
-        limit = decision.blocked
         return OrderEvent.objects.create(
             order=order,
             event_type=OrderEvent.BUDGET_BLOCKED,
             actor_kind=OrderEvent.Actor.OPERATOR,
             actor_ref=actor_ref,
-            payload={
-                "action": decision.action,
-                "limit": limit.key,
-                "slot_key": limit.slot_key,
-                "used": limit.used,
-                "max": limit.max,
-            },
+            payload=_event_payload(decision),
         )
 
     @staticmethod
-    def record_override(order: Order, decision: BudgetDecision, *, actor_ref: str = "") -> OrderEvent:
-        limit = decision.blocked
+    def record_override(order: Order, decision: BudgetDecision, override: BudgetOverride) -> OrderEvent:
         return OrderEvent.objects.create(
             order=order,
             event_type=OrderEvent.BUDGET_OVERRIDE,
             actor_kind=OrderEvent.Actor.OPERATOR,
-            actor_ref=actor_ref,
-            payload={
-                "action": decision.action,
-                "limit": limit.key,
-                "slot_key": limit.slot_key,
-                "used": limit.used,
-                "max": limit.max,
-            },
+            actor_ref=override.actor_ref,
+            payload=_event_payload(decision, reason=override.reason),
         )
 
-    # ------------------------------------------------------------- costs
+    # costs
 
     def order_costs(self, order: Order) -> dict:
         jobs = list(self._started().filter(order=order).values("task_type", "output_metadata"))
@@ -283,21 +342,59 @@ class BudgetService:
             "tokens": tokens,
             "rub": rub(len(jobs)),
             "max_attempts_per_slot": max(attempts.values(), default=0),
-            "slot_limit": limit_value("PILOT_MAX_FULL_ATTEMPTS_PER_SLOT"),
-            "order_limit": limit_value("PILOT_MAX_IMAGE_CALLS_PER_ORDER"),
+            "slot_limit": safe_limit("PILOT_MAX_FULL_ATTEMPTS_PER_SLOT"),
+            "order_limit": safe_limit("PILOT_MAX_IMAGE_CALLS_PER_ORDER"),
         }
 
     def summary(self) -> dict:
         today = self.calls_today()
         month = self.calls_this_month()
         return {
-            "today": {"used": today, "max": limit_value("PILOT_MAX_IMAGE_CALLS_PER_DAY"), "rub": rub(today)},
-            "month": {"used": month, "max": limit_value("PILOT_MAX_IMAGE_CALLS_PER_MONTH"), "rub": rub(month)},
+            "today": {"used": today, "max": safe_limit("PILOT_MAX_IMAGE_CALLS_PER_DAY"), "rub": rub(today)},
+            "month": {"used": month, "max": safe_limit("PILOT_MAX_IMAGE_CALLS_PER_MONTH"), "rub": rub(month)},
             "cost_rub_per_call": call_cost_rub(),
         }
 
 
-def percent(used: int, maximum: int | None) -> int | None:
-    if not maximum:
-        return None
-    return int(round(100 * used / maximum))
+# ---------------------------------------------------------------- guard
+
+
+def serialize_budget_counters() -> None:
+    """Take the transaction-scoped advisory lock on PostgreSQL (released at
+    commit/rollback) so concurrent job creations count the day/month usage
+    one after another. No-op on other backends (best-effort)."""
+    if connection.vendor == "postgresql":
+        with connection.cursor() as cursor:
+            cursor.execute("SELECT pg_advisory_xact_lock(%s)", [BUDGET_LOCK_KEY])
+
+
+class BudgetGuard:
+    """The single enforcement point. Call inside the job-creating transaction
+    (order already locked) right before the ``GenerationJob`` row is
+    written; ``planned`` = jobs already created by the same call + 1."""
+
+    def __init__(self, *, override: BudgetOverride | None = None):
+        self.override = override
+
+    def enforce(
+        self,
+        locked_order: Order,
+        task_type: str,
+        *,
+        slot_key: str = "",
+        action: str | None = None,
+        planned: int = 1,
+    ) -> BudgetDecision:
+        serialize_budget_counters()
+        action = action or TASK_ACTIONS.get(task_type, str(task_type))
+        if task_type == GenerationJob.TaskType.FULL:
+            slot_keys = [slot_key] if slot_key else []
+        else:
+            slot_keys = []
+        decision = BudgetService().check(locked_order, action, slot_keys=slot_keys, planned=planned)
+        if decision.blocked is None:
+            return decision
+        if self.override is None:
+            raise BudgetExceeded(decision)
+        BudgetService.record_override(locked_order, decision, self.override)
+        return decision

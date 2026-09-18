@@ -29,7 +29,7 @@ from apps.core.models import (
 )
 from apps.core.pilot_metrics_console import EventTypeFilter
 from apps.core.production_console import ProductionOrderAdmin
-from apps.core.services.budget import BudgetService, limit_value
+from apps.core.services.budget import BudgetConfigError, BudgetService, limit_value
 from apps.core.services.full_production import FullProductionService
 from apps.core.services.generation import GenerationService
 from apps.core.services.pilot_metrics import PilotMetricsService
@@ -75,8 +75,13 @@ class LimitParsingTests(TestCase):
     def test_env_is_read_when_setting_is_absent(self):
         with patch.dict("os.environ", {"PILOT_MAX_IMAGE_CALLS_PER_DAY": "7"}):
             self.assertEqual(limit_value("PILOT_MAX_IMAGE_CALLS_PER_DAY"), 7)
+        # invalid value → fail closed (BudgetConfigError), never "unlimited"
         with patch.dict("os.environ", {"PILOT_MAX_IMAGE_CALLS_PER_DAY": "garbage"}):
-            self.assertIsNone(limit_value("PILOT_MAX_IMAGE_CALLS_PER_DAY"))
+            with self.assertRaisesMessage(BudgetConfigError, "PILOT_MAX_IMAGE_CALLS_PER_DAY"):
+                limit_value("PILOT_MAX_IMAGE_CALLS_PER_DAY")
+        with patch.dict("os.environ", {"PILOT_MAX_IMAGE_CALLS_PER_DAY": "-1"}):
+            with self.assertRaises(BudgetConfigError):
+                limit_value("PILOT_MAX_IMAGE_CALLS_PER_DAY")
 
 
 class BudgetFixture(TestCase):
@@ -144,7 +149,8 @@ class BudgetFixture(TestCase):
                                       metadata={"internal_approved": True, "customer_approved": True})
         return order
 
-    def _calls(self, count, *, when=None, order=None, task=GenerationJob.TaskType.FULL, slot_key="", status=None):
+    def _calls(self, count, *, when=None, order=None, task=GenerationJob.TaskType.FULL, slot_key="", status=None,
+               ambiguous=False):
         target = order or self.order
         existing = GenerationJob.objects.filter(order=target, task_type=task).count()
         for index in range(count):
@@ -152,6 +158,7 @@ class BudgetFixture(TestCase):
                 order=target, task_type=task,
                 status=status or GenerationJob.Status.FAILED, attempt=existing + index + 1, provider="fake",
                 slot_key=slot_key, started_at=when or timezone.now(),
+                output_metadata={"failure_class": "ambiguous"} if ambiguous else {},
             )
 
     def _post(self, url_name, *args, data=None):
@@ -187,11 +194,12 @@ class ConsoleBudgetGateTests(BudgetFixture):
         self._calls(1)
         messages = self._post("core_order_start_full_production", self.order.pk, data={"force": "1"})
 
-        self.assertTrue(messages[0].startswith("Лимит переопределён суперпользователем"), messages)
         self.assertTrue(any(m.startswith("Производство:") for m in messages), messages)
         self.assertEqual(self._full_jobs().filter(status=GenerationJob.Status.SUCCEEDED).count(), 1)
         (event,) = self._events(OrderEvent.BUDGET_OVERRIDE)
         self.assertEqual(event.payload["limit"], "day")
+        self.assertEqual(event.actor_ref, "root")
+        self.assertEqual(event.payload["reason"], "console confirmation")
         self.assertEqual(self._events(OrderEvent.BUDGET_BLOCKED), [])
 
     @override_settings(PILOT_MAX_IMAGE_CALLS_PER_DAY=2)
@@ -234,8 +242,10 @@ class ConsoleBudgetGateTests(BudgetFixture):
 
     @override_settings(PILOT_MAX_FULL_ATTEMPTS_PER_SLOT=2)
     def test_slot_limit_blocks_force_retry_of_that_slot_only(self):
-        self._calls(2, slot_key="e0")
-        self._calls(1, slot_key="e1")
+        # force retry applies to ambiguous-failed slots; the guard runs inside
+        # the service after that domain check
+        self._calls(2, slot_key="e0", ambiguous=True)
+        self._calls(1, slot_key="e1", ambiguous=True)
         self.order.status = Order.Status.PACK_GENERATING
         self.order.save(update_fields=["status"])
 
