@@ -15,6 +15,12 @@ from apps.core.image_providers import (
     classify_provider_failure,
 )
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Payment
+from apps.core.services.generation_prompts import (
+    FULL_DEFAULT_PROMPT,
+    emotion_label,
+    render_expression,
+    render_reference_roles,
+)
 from apps.core.services.channel_order_flow import (
     order_emotion_codes,
     product_emotion_options,
@@ -432,33 +438,27 @@ class FullProductionService:
         product_config = order.product.config or {}
         style_config = order.style.config or {}
 
+        # DRF-2080: identity source = customer photos (first); the approved
+        # preview is passed LAST and only as a style/character reference.
+        # "generation_prompt" is the preview wording; FULL uses its own key.
+        photos = list(
+            order.photos.exclude(status=OrderPhoto.Status.REJECTED).order_by("created_at", "pk")
+        )
+        preview = GeneratedAsset.objects.get(pk=meta["source_preview_id"])
         prompt_parts = [
-            str(
-                product_config.get("generation_prompt")
-                or "Create a personalized sticker based on the reference images."
-            ),
+            str(product_config.get("full_generation_prompt") or FULL_DEFAULT_PROMPT),
             str(style_config.get("prompt") or f"Use the {order.style.name} style."),
-            f"Emotion: {slot_key}",
+            render_expression(order.product, slot_key),
+            render_reference_roles(photo_count=len(photos), has_preview=True),
         ]
         if order.customer_notes.strip():
             prompt_parts.append(f"Customer notes: {order.customer_notes.strip()}")
         if order.operator_notes.strip():
             prompt_parts.append(f"Operator notes: {order.operator_notes.strip()}")
+        prompt = "\n".join(part for part in prompt_parts if part)
 
-        # Identity lock: the customer-approved preview is the production
-        # reference and always comes first, before customer photos.
-        preview = GeneratedAsset.objects.get(pk=meta["source_preview_id"])
-        with self.storage.open(preview.storage_key, "rb") as source:
-            references = [
-                ReferenceImage(
-                    filename=f"approved-preview-{preview.pk}.png",
-                    mime_type=preview.mime_type or "image/png",
-                    content=source.read(),
-                )
-            ]
-        photos = order.photos.exclude(status=OrderPhoto.Status.REJECTED).order_by(
-            "created_at", "pk"
-        )
+        references = []
+        reference_order = []
         for photo in photos:
             with self.storage.open(photo.storage_key, "rb") as source:
                 references.append(
@@ -468,9 +468,29 @@ class FullProductionService:
                         content=source.read(),
                     )
                 )
+            reference_order.append(f"photo:{photo.pk}")
+        with self.storage.open(preview.storage_key, "rb") as source:
+            references.append(
+                ReferenceImage(
+                    filename=f"approved-preview-{preview.pk}.png",
+                    mime_type=preview.mime_type or "image/png",
+                    content=source.read(),
+                )
+            )
+        reference_order.append(f"preview:{preview.pk}")
+
+        # Live evidence: persist exactly what the model received.
+        label = emotion_label(order.product, slot_key)
+        job.input_metadata = {
+            **(job.input_metadata or {}),
+            "emotion_label": label,
+            "prompt": prompt,
+            "reference_order": reference_order,
+        }
+        job.save(update_fields=["input_metadata", "updated_at"])
 
         return ImageGenerationRequest(
-            prompt="\n".join(part for part in prompt_parts if part),
+            prompt=prompt,
             reference_images=references,
             metadata={
                 "order_id": order.pk,
@@ -478,6 +498,7 @@ class FullProductionService:
                 "task_type": GenerationJob.TaskType.FULL,
                 "slot_key": slot_key,
                 "emotion": slot_key,
+                "emotion_label": label,
                 "product": order.product.code,
                 "style": order.style.code,
             },
