@@ -16,6 +16,7 @@ from apps.core.image_providers import (
 )
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Payment
 from apps.core.services.generation_prompts import (
+    FRAMING_CLAUSE,
     FULL_DEFAULT_PROMPT,
     SAFE_FOR_WORK_CLAUSE,
     emotion_label,
@@ -475,6 +476,7 @@ class FullProductionService:
             str(product_config.get("full_generation_prompt") or FULL_DEFAULT_PROMPT),
             str(style_config.get("prompt") or f"Use the {order.style.name} style."),
             SAFE_FOR_WORK_CLAUSE,
+            FRAMING_CLAUSE,
             render_expression(order.product, slot_key),
             render_reference_roles(photo_count=len(photos), has_preview=True),
         ]

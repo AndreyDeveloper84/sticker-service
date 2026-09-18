@@ -42,7 +42,7 @@ from apps.core.services.generation import (
     GenerationError,
     GenerationService,
 )
-from apps.core.services.generation_prompts import SAFE_FOR_WORK_CLAUSE
+from apps.core.services.generation_prompts import FRAMING_CLAUSE, SAFE_FOR_WORK_CLAUSE
 from apps.core.storage import LocalMediaStorage
 from apps.core.tests_full_generation import FullProductionTestCase
 
@@ -278,7 +278,11 @@ class PreviewGuardAndModerationTests(TestCase):
         self.assertIn(SAFE_FOR_WORK_CLAUSE, provider.requests[0].prompt)
         self.assertIn(SAFE_FOR_WORK_CLAUSE, asset.job.input_metadata["prompt"])
         lines = provider.requests[0].prompt.split("\n")
-        self.assertEqual(lines[:3], ["Make preview", "Preserve likeness", SAFE_FOR_WORK_CLAUSE])
+        self.assertEqual(
+            lines[:4], ["Make preview", "Preserve likeness", SAFE_FOR_WORK_CLAUSE, FRAMING_CLAUSE]
+        )
+        self.assertIn(FRAMING_CLAUSE, asset.job.input_metadata["prompt"])
+        self.assertIn("nothing below the chest", asset.job.input_metadata["prompt"])
 
 
 # ---------------------------------------------------------------- FULL: moderation retryable + SFW
@@ -310,6 +314,11 @@ class FullProductionModerationTests(FullProductionTestCase):
         job = self._full_jobs(order).first()
         self.assertIn(SAFE_FOR_WORK_CLAUSE, job.input_metadata["prompt"])
         self.assertIn(SAFE_FOR_WORK_CLAUSE, provider.requests[0].prompt)
+        self.assertIn(FRAMING_CLAUSE, job.input_metadata["prompt"])
+        lines = job.input_metadata["prompt"].split(chr(10))
+        # framing sits right after the SFW clause, before the expression line
+        self.assertEqual(lines.index(FRAMING_CLAUSE), lines.index(SAFE_FOR_WORK_CLAUSE) + 1)
+        self.assertTrue(lines[lines.index(FRAMING_CLAUSE) + 1].startswith("Expression:"))
 
 
 # ---------------------------------------------------------------- console surface

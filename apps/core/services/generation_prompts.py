@@ -20,6 +20,11 @@ SAFE_FOR_WORK_CLAUSE = (
     "messenger sticker."
 )
 
+# Framing guard (DRF-2089, second moderation_blocked on a customer photo):
+# the output filter fires on the body the model invents below the photo's
+# crop; asking for a head-and-shoulders portrait removes that invention.
+FRAMING_CLAUSE = "Head-and-shoulders portrait, nothing below the chest."
+
 FULL_DEFAULT_PROMPT = (
     "Create one polished personalized final sticker of the person shown in the "
     "reference photos. Preserve the person's recognizable facial identity, key "

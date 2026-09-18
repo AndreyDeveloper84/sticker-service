@@ -15,7 +15,7 @@ from apps.core.image_providers import (
     describe_provider_failure,
 )
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
-from apps.core.services.generation_prompts import SAFE_FOR_WORK_CLAUSE
+from apps.core.services.generation_prompts import FRAMING_CLAUSE, SAFE_FOR_WORK_CLAUSE
 from apps.core.services.budget import BudgetGuard, BudgetOverride
 from apps.core.services.order_state import InvalidOrderTransition, OrderStateService
 from apps.core.storage import LocalMediaStorage
@@ -192,6 +192,7 @@ class GenerationService:
             str(product_config.get("generation_prompt") or "Create a personalized preview image based on the reference photos."),
             str(style_config.get("prompt") or f"Use the {order.style.name} style."),
             SAFE_FOR_WORK_CLAUSE,
+            FRAMING_CLAUSE,
         ]
         if order.customer_notes.strip():
             prompt_parts.append(f"Customer notes: {order.customer_notes.strip()}")
