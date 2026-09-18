@@ -180,17 +180,54 @@ class OrderSummaryTests(TestCase):
         self.assertEqual(summary["currency"], "RUB")
 
 
+class CustomPhraseSelectionTests(TestCase):
+    def setUp(self):
+        self.flow = ChannelOrderFlowService()
+        self.identity = ChannelIdentity.objects.create(
+            user=User.objects.create(), channel=ChannelIdentity.Channel.MAX, external_user_id="custom-1"
+        )
+        self.style = Style.objects.create(code="drawn", name="Рисованные")
+        self.product = Product.objects.create(
+            code="custom", name="С надписями",
+            config={
+                "quantity": 3, "emotion_count": 3, "requires_custom_phrases": True,
+                "requires_customer_contact": True,
+                "emotions": [{"code": "custom-1", "label": "Фраза 1"}, {"code": "custom-2", "label": "Фраза 2"}, {"code": "custom-3", "label": "Фраза 3"}],
+                "price_minor": 80000, "price_stars": 736,
+            },
+        )
+
+    def test_custom_phrases_fill_production_slots_and_contact_appears_in_summary(self):
+        order = self.flow.create_or_get_order(identity=self.identity, product_code="custom", style_code="drawn")
+        order.photos.create(storage_key=f"orders/{order.pk}/a.jpg", size_bytes=1)
+        self.flow.photos_ready(self.identity)
+        with self.assertRaises(ChannelFlowError):
+            self.flow.save_custom_phrases(identity=self.identity, text="Первая\nВторая")
+        order = self.flow.save_custom_phrases(identity=self.identity, text="Первая\nВторая\nТретья")
+        self.assertEqual(order_emotion_codes(order), ["custom-1", "custom-2", "custom-3"])
+        self.assertTrue(self.flow.selection_complete(order))
+        order = self.flow.save_customer_contact(identity=self.identity, text="Анна, @anna")
+        summary = self.flow.order_summary(order)
+        self.assertEqual(summary["emotions"], ["Первая", "Вторая", "Третья"])
+        self.assertEqual(summary["contact"], "Анна, @anna")
+
+
 class PilotSeedTests(TestCase):
-    def test_seed_is_idempotent_and_leaves_exactly_two_active_products(self):
+    def test_seed_is_idempotent_and_leaves_exactly_three_active_products(self):
         Product.objects.create(code="personal-sticker-pack", name="Old", is_active=True)
         for _ in range(2):
             call_command("seed_live_test", stdout=StringIO())
 
         active = list(Product.objects.filter(is_active=True).order_by("id"))
-        self.assertEqual([product.code for product in active], ["sticker-pack-9", "single-sticker"])
+        self.assertEqual([product.code for product in active], ["sticker-pack-9-custom", "sticker-pack-9", "single-sticker"])
         self.assertTrue(Product.objects.filter(code="personal-sticker-pack", is_active=False).exists())
 
-        pack, single = active
+        custom, pack, single = active
+        self.assertEqual(custom.config["kind"], "custom_pack")
+        self.assertEqual(custom.config["quantity"], 9)
+        self.assertTrue(custom.config["requires_custom_phrases"])
+        self.assertEqual(custom.config["price_minor"], 80000)
+        self.assertEqual(custom.config["price_stars"], 736)
         self.assertEqual(pack.config["kind"], "pack")
         self.assertEqual(pack.config["quantity"], 9)
         self.assertEqual(pack.config["emotion_count"], 9)
@@ -206,4 +243,16 @@ class PilotSeedTests(TestCase):
         self.assertEqual(single.config["price_minor"], 10000)
         self.assertEqual(single.config["price_stars"], 100)
 
-        self.assertEqual(Style.objects.get(code="comic").is_active, True)
+        self.assertEqual(
+            set(Style.objects.filter(is_active=True).values_list("code", flat=True)),
+            {"3d", "drawn", "meme", "embroidery", "help-choose"},
+        )
+        self.assertEqual(Style.objects.get(code="help-choose").name, "Помогите выбрать")
+        # Legacy comic style stays for historical orders, inactive and NOT renamed.
+        comic = Style.objects.get(code="comic")
+        self.assertFalse(comic.is_active)
+        self.assertEqual(comic.name, "Комикс")
+        # Names carry no price (bots render price from config); contact for all three.
+        self.assertEqual([p.name for p in active], ["9 стикеров с надписями", "9 стикеров без надписей", "1 стикер"])
+        self.assertTrue(all(p.config["requires_customer_contact"] for p in active))
+        self.assertIn("transparent background", custom.config["full_generation_prompt"])

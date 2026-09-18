@@ -6,7 +6,8 @@ from django.views.decorators.csrf import csrf_exempt
 
 import logging
 
-from apps.core.customer_hints import PHOTO_GUIDANCE, SINGLE_PHOTO_REMINDER, customer_hint
+from apps.core.customer_hints import PHOTO_GUIDANCE, customer_hint
+from apps.core.bot_menu import PAYLOAD_CONFIRM_ORDER, OrderStepper
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
@@ -90,9 +91,24 @@ def _handle_pre_checkout(query, *, adapter, payment_adapter, client):
     return client.answer_pre_checkout_query(pre_checkout_query_id=query["id"], ok=True)
 
 
+def _reply_markup(rows):
+    """bot_menu rows [(label, payload)] → Telegram inline keyboard."""
+    return {"inline_keyboard": [[{"text": label, "callback_data": payload} for label, payload in row] for row in rows]}
+
+
+def _stepper(*, chat_id, adapter, client):
+    def send(text, rows):
+        if rows:
+            return client.send_message(chat_id=chat_id, text=text, reply_markup=_reply_markup(rows))
+        return client.send_message(chat_id=chat_id, text=text)
+
+    return OrderStepper(adapter=adapter, send=send, telegram=True)
+
+
 def _handle_message(message, *, adapter, payment_adapter, client):
     identity = adapter.get_or_create_identity(message["from"])
     chat_id = message["chat"]["id"]
+    stepper = _stepper(chat_id=chat_id, adapter=adapter, client=client)
 
     successful_payment = message.get("successful_payment")
     if successful_payment:
@@ -105,8 +121,7 @@ def _handle_message(message, *, adapter, payment_adapter, client):
         return None
 
     if (message.get("text") or "").startswith("/start"):
-        buttons = [[{"text": p.name, "callback_data": f"product:{p.code}"}] for p in adapter.active_products()]
-        return client.send_message(chat_id=chat_id, text="Выберите продукт", reply_markup={"inline_keyboard": buttons})
+        return stepper.main_menu(identity)
 
     photos = message.get("photo") or []
     if photos:
@@ -118,7 +133,11 @@ def _handle_message(message, *, adapter, payment_adapter, client):
         content = client.download_file(file_path)
         mime_type = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
         adapter.save_photo_bytes(identity=identity, content=content, filename=file_path.rsplit("/", 1)[-1], mime_type=mime_type)
-        return client.send_message(chat_id=chat_id, text="Фото сохранено. Отправьте ещё или нажмите «Фото загружены».", reply_markup={"inline_keyboard": [[{"text": "Фото загружены", "callback_data": "photos_done"}]]})
+        return stepper.photo_saved(identity)
+
+    # free text: the 9 phrases or the name/contact, when the bot asked for them
+    stepper.handle_text(identity, message.get("text") or "")
+    return None
 
 
 def _feedback_order(identity):
@@ -138,31 +157,15 @@ CONSENT_REPLY_MARKUP = {"inline_keyboard": [[{"text": PILOT_CONSENT_BUTTON_LABEL
 PAY_REPLY_MARKUP = {"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]}
 
 
-def _emotion_step(adapter, order):
-    """Emotion step text + keyboard, driven entirely by Product.config.
-
-    A product whose deterministic emotion set matches the required count
-    (sticker pack) is confirmed as a whole; otherwise emotions are picked
-    one by one (single sticker).
-    """
-    options = adapter.emotion_options(product=order.product)
-    required = adapter.required_emotion_count(product=order.product)
-    if required == len(options):
-        labels = ", ".join(option["label"] for option in options)
-        text = f"В набор входят {required} эмоций: {labels}."
-        buttons = [[{"text": "Подтвердить набор", "callback_data": "emotions:confirm"}]]
-    else:
-        text = "Выберите эмоцию для стикера."
-        buttons = [[{"text": option["label"], "callback_data": f"emotion:{option['code']}"}] for option in options]
-    return text, {"inline_keyboard": buttons}
-
-
 def _summary_text(summary, *, price_stars):
     lines = [f"Ваш заказ: {summary['product_name']}", f"Стиль: {summary['style_name']}"]
     if summary["quantity"]:
         lines.append(f"Стикеров: {summary['quantity']}")
     if summary["emotions"]:
-        lines.append(f"Эмоции: {', '.join(summary['emotions'])}")
+        label = "Надписи" if summary.get("captioned") else "Эмоции"
+        lines.append(f"{label}: {', '.join(summary['emotions'])}")
+    if summary.get("contact"):
+        lines.append(f"Контакт: {summary['contact']}")
     if price_stars:
         lines.append(f"Цена: {price_stars} Stars")
     return "\n".join(lines)
@@ -193,34 +196,13 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
     identity = adapter.get_or_create_identity(callback["from"])
     chat_id = callback["message"]["chat"]["id"]
     data = callback.get("data") or ""
+    stepper = _stepper(chat_id=chat_id, adapter=adapter, client=client)
 
-    if data.startswith("product:"):
-        product_code = data.split(":", 1)[1]
-        if not adapter.active_products().filter(code=product_code).exists():
-            raise TelegramFlowError("Product is unavailable")
-        buttons = [[{"text": s.name, "callback_data": f"style:{product_code}:{s.code}"}] for s in adapter.active_styles()]
-        client.send_message(chat_id=chat_id, text="Выберите стиль", reply_markup={"inline_keyboard": buttons})
-    elif data.startswith("style:"):
-        _, product_code, style_code = data.split(":", 2)
-        order = adapter.create_or_get_order(identity=identity, product_code=product_code, style_code=style_code)
-        if adapter.required_emotion_count(product=order.product):
-            text, reply_markup = _emotion_step(adapter, order)
-            client.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
-        else:
-            client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
-    elif data.startswith("emotion:"):
-        adapter.select_emotion(identity=identity, emotion_code=data.split(":", 1)[1])
-        client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
-    elif data == "emotions:confirm":
-        adapter.confirm_emotions(identity=identity)
-        client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
-    elif data == "photos_done":
-        # Validate photos/selection now (same errors as before) but stay in
-        # AWAITING_PHOTOS: the invoice is reachable only through consent:accept.
-        order = adapter.photos_ready(identity)
-        if order.photos.count() == 1:
-            # soft reminder only — one photo is accepted (DRF-2090)
-            client.send_message(chat_id=chat_id, text=SINGLE_PHOTO_REMINDER)
+    if stepper.handle_callback(identity, data):
+        pass  # menu / navigation / product / style / emotions / photos_done
+    elif data == PAYLOAD_CONFIRM_ORDER:
+        # every step complete → the existing consent screen (pilot contract)
+        stepper.confirm_order(identity)
         client.send_message(chat_id=chat_id, text=CONSENT_TEXT, reply_markup=CONSENT_REPLY_MARKUP)
     elif data == "consent:accept":
         order = adapter.accept_consent(identity=identity)

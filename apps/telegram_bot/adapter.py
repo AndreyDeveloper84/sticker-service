@@ -47,6 +47,30 @@ class TelegramAdapter:
     def confirm_emotions(self, *, identity):
         return self.flow.confirm_emotions(identity=identity)
 
+    def save_custom_phrases(self, *, identity, text):
+        return self.flow.save_custom_phrases(identity=identity, text=text)
+
+    def set_awaiting_input(self, *, identity, value):
+        return self.flow.set_awaiting_input(identity=identity, value=value)
+
+    def awaiting_input(self, identity):
+        return self.flow.awaiting_input(identity)
+
+    def save_customer_contact(self, *, identity, text):
+        return self.flow.save_customer_contact(identity=identity, text=text)
+
+    def change_order_choice(self, *, identity, product_code: str, style_code: str):
+        return self.flow.change_order_choice(identity=identity, product_code=product_code, style_code=style_code)
+
+    def clear_awaiting_input(self, identity):
+        return self.flow.clear_awaiting_input(identity)
+
+    def order_ready_to_confirm(self, identity):
+        return self.flow.order_ready_to_confirm(identity)
+
+    def customer_contact_complete(self, order):
+        return self.flow.customer_contact_complete(order)
+
     def order_summary(self, order):
         return self.flow.order_summary(order)
 

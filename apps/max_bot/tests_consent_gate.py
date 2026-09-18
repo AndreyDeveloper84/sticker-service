@@ -37,6 +37,14 @@ def _callback(payload, callback_id="cb-1"):
     }
 
 
+def _text(text):
+    return {
+        "update_type": "message_created",
+        "message": {"sender": {"user_id": USER_ID, "first_name": "Ivan"}, "recipient": {"chat_id": CHAT_ID},
+                    "body": {"mid": "mid-text", "text": text}},
+    }
+
+
 def _photo_message(url="https://cdn.max.test/p.jpg"):
     return {
         "update_type": "message_created",
@@ -93,8 +101,11 @@ class MaxConsentWebhookFlowTests(TestCase):
             order = self._order_with_photo(client)
 
             response = self._post(_callback("photos_done", callback_id="cb-done"))
-
             self.assertEqual(response.status_code, 200)
+            # contact → order card → «✅ Подтвердить заказ» → consent screen
+            self._post(_text("Анна, @anna"))
+            self._post(_callback("order:confirm", callback_id="cb-confirm"))
+
             kwargs = client.send_message.call_args.kwargs
             self.assertIn("право использовать загруженные фотографии", kwargs["text"])
             self.assertIn("обработаны для создания заказанных стикеров", kwargs["text"])
@@ -104,7 +115,7 @@ class MaxConsentWebhookFlowTests(TestCase):
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
             self.assertFalse(order.consent_accepted)
             checkout_mock.assert_not_called()
-            client.answer_callback.assert_called_once_with(callback_id="cb-done")
+            self.assertEqual(client.answer_callback.call_count, 2)
 
     def test_photos_done_without_photos_is_rejected_before_consent(self):
         with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(

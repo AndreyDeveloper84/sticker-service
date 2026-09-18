@@ -53,6 +53,18 @@ def order_emotion_codes(order: Order) -> list[str]:
     return [str(code) for code in selection.get("emotions") or []]
 
 
+def product_requires_custom_phrases(product: Product) -> bool:
+    return bool((product.config or {}).get("requires_custom_phrases"))
+
+
+def product_requires_customer_contact(product: Product) -> bool:
+    return bool((product.config or {}).get("requires_customer_contact"))
+
+
+def order_custom_phrases(order: Order) -> list[str]:
+    return [str(value) for value in (order.selection or {}).get("custom_phrases") or []]
+
+
 class ChannelOrderFlowService:
     def __init__(self, *, media_service=None):
         self.media_service = media_service or MediaService()
@@ -127,6 +139,38 @@ class ChannelOrderFlowService:
         )
         return OrderStateService.transition(order=order, to_status=Order.Status.AWAITING_PHOTOS)
 
+    @transaction.atomic
+    def change_order_choice(self, *, identity, product_code: str, style_code: str) -> Order:
+        """Bot «⬅️ Назад» → a different product/style for the SAME in-progress
+        order (AWAITING_PHOTOS only). Photos and the customer contact are
+        kept; a product change resets emotions / custom phrases / awaiting
+        input so the new product's steps are asked again. Orders past
+        AWAITING_PHOTOS are never touched."""
+        product = Product.objects.filter(code=product_code, is_active=True).first()
+        style = Style.objects.filter(code=style_code, is_active=True).first()
+        if not product or not style:
+            raise ChannelFlowError("Product or style is unavailable")
+        order = (
+            Order.objects.select_for_update()
+            .filter(channel_identity=identity, status=Order.Status.AWAITING_PHOTOS)
+            .order_by("-id")
+            .first()
+        )
+        if order is None:
+            return self.create_or_get_order(identity=identity, product_code=product_code, style_code=style_code)
+        selection = dict(order.selection or {})
+        if order.product_id != product.id:
+            selection.pop("custom_phrases", None)
+            selection["emotions"] = []
+            if not product_emotion_count(product):
+                selection.pop("emotions", None)
+        selection.pop("awaiting_input", None)
+        order.product = product
+        order.style = style
+        order.selection = selection
+        order.save(update_fields=["product", "style", "selection", "updated_at"])
+        return order
+
     def required_emotion_count(self, *, product: Product) -> int:
         return product_emotion_count(product)
 
@@ -157,6 +201,8 @@ class ChannelOrderFlowService:
     def confirm_emotions(self, *, identity) -> Order:
         """Accept the product's full deterministic emotion set (sticker packs)."""
         order = self.current_photo_order(identity)
+        if product_requires_custom_phrases(order.product):
+            raise ChannelFlowError("This product requires custom phrases")
         required = product_emotion_count(order.product)
         codes = [option["code"] for option in product_emotion_options(order.product)]
         if required <= 0 or not codes:
@@ -170,7 +216,96 @@ class ChannelOrderFlowService:
     @staticmethod
     def selection_complete(order: Order) -> bool:
         required = product_emotion_count(order.product)
+        if product_requires_custom_phrases(order.product):
+            return len(order_custom_phrases(order)) == required
         return required <= 0 or len(order_emotion_codes(order)) == required
+
+    @transaction.atomic
+    def save_custom_phrases(self, *, identity, text: str) -> Order:
+        """Store the nine customer phrases in the canonical production slots.
+
+        One phrase per line is deliberately required: it maps unambiguously to
+        one generated sticker and prevents a long paragraph becoming a single
+        unusable prompt.
+        """
+        order = self.current_photo_order(identity)
+        if not product_requires_custom_phrases(order.product):
+            raise ChannelFlowError("This product does not accept custom phrases")
+        phrases = [line.strip() for line in str(text).splitlines() if line.strip()]
+        required = product_emotion_count(order.product)
+        if len(phrases) != required:
+            raise ChannelFlowError(f"Exactly {required} custom phrases are required")
+        selection = dict(order.selection or {})
+        selection["emotions"] = [option["code"] for option in product_emotion_options(order.product)]
+        selection["custom_phrases"] = phrases
+        selection.pop("awaiting_input", None)
+        order.selection = selection
+        order.save(update_fields=["selection", "updated_at"])
+        return order
+
+    @transaction.atomic
+    def set_awaiting_input(self, *, identity, value: str) -> Order:
+        order = self.current_photo_order(identity)
+        selection = dict(order.selection or {})
+        selection["awaiting_input"] = value
+        order.selection = selection
+        order.save(update_fields=["selection", "updated_at"])
+        return order
+
+    def awaiting_input(self, identity) -> str:
+        order = self.current_photo_order(identity)
+        return str((order.selection or {}).get("awaiting_input") or "")
+
+    @transaction.atomic
+    def clear_awaiting_input(self, identity) -> Order | None:
+        """Bot «⬅️ Назад» / «🏠 Главное меню»: stop waiting for free text on
+        the in-progress order (no-op without one; never touches later statuses)."""
+        order = (
+            Order.objects.select_for_update()
+            .filter(channel_identity=identity, status=Order.Status.AWAITING_PHOTOS)
+            .order_by("-id")
+            .first()
+        )
+        if order is None:
+            return None
+        selection = dict(order.selection or {})
+        if selection.pop("awaiting_input", None) is not None:
+            order.selection = selection
+            order.save(update_fields=["selection", "updated_at"])
+        return order
+
+    def order_ready_to_confirm(self, identity) -> Order:
+        """The order card / «✅ Подтвердить заказ» precondition: photos,
+        emotions or phrases, and the customer contact are all in place."""
+        order = self.current_photo_order(identity)
+        if not order.photos.exists():
+            raise ChannelFlowError("At least one photo is required")
+        if not self.selection_complete(order):
+            if product_requires_custom_phrases(order.product):
+                raise ChannelFlowError("Custom phrases are not complete")
+            raise ChannelFlowError("Emotion selection is not complete")
+        if not self.customer_contact_complete(order):
+            raise ChannelFlowError("A valid contact is required")
+        return order
+
+    @transaction.atomic
+    def save_customer_contact(self, *, identity, text: str) -> Order:
+        order = self.current_photo_order(identity)
+        contact = " ".join(str(text).split())
+        if len(contact) < 3 or len(contact) > 255:
+            raise ChannelFlowError("A valid contact is required")
+        selection = dict(order.selection or {})
+        selection["contact"] = contact
+        selection.pop("awaiting_input", None)
+        order.selection = selection
+        order.save(update_fields=["selection", "updated_at"])
+        return order
+
+    @staticmethod
+    def customer_contact_complete(order: Order) -> bool:
+        if not product_requires_customer_contact(order.product):
+            return True
+        return bool(str((order.selection or {}).get("contact") or "").strip())
 
     def order_summary(self, order: Order) -> dict:
         """Channel-agnostic checkout summary; adapters only format it for display."""
@@ -197,11 +332,20 @@ class ChannelOrderFlowService:
             "quantity": quantity,
             "emotion_count": product_emotion_count(product),
             "emotion_codes": codes,
-            "emotions": [labels.get(code, code) for code in codes],
+            "emotions": order_custom_phrases(order) if product_requires_custom_phrases(product) else [labels.get(code, code) for code in codes],
+            "contact": str((order.selection or {}).get("contact") or ""),
+            "captioned": product_requires_custom_phrases(product),
             "price_minor": _price("price_minor"),
             "price_stars": _price("price_stars"),
             "currency": str(config.get("currency") or "RUB").upper(),
         }
+
+    def current_photo_order_or_none(self, identity):
+        return (
+            Order.objects.filter(channel_identity=identity, status=Order.Status.AWAITING_PHOTOS)
+            .order_by("-id")
+            .first()
+        )
 
     def current_photo_order(self, identity) -> Order:
         order = (
@@ -236,7 +380,12 @@ class ChannelOrderFlowService:
     def photos_ready(self, identity) -> Order:
         """The in-progress order, validated but NOT transitioned (consent step)."""
         order = self.current_photo_order(identity)
-        self.assert_photos_complete(order)
+        if not order.photos.exists():
+            raise ChannelFlowError("At least one photo is required")
+        # Phrases are collected after the photos for the custom product.
+        # Standard products retain the existing emotion-before-photo gate.
+        if not product_requires_custom_phrases(order.product) and not self.selection_complete(order):
+            raise ChannelFlowError("Emotion selection is not complete")
         return order
 
     @transaction.atomic

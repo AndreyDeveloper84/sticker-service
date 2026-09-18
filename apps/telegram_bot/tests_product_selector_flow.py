@@ -12,6 +12,7 @@ from unittest import mock
 
 from django.test import TestCase, override_settings
 
+from apps.core.bot_menu import CONTACT_PROMPT
 from apps.core.customer_hints import EMOTION_CHOICE_HINT, NEED_PHOTO_HINT
 from apps.core.models import Order, Product, Style
 from apps.core.services.channel_order_flow import order_emotion_codes
@@ -85,10 +86,16 @@ class TelegramProductSelectorFlowTests(TestCase):
     def _start_flow(self, client, product_code):
         response = self._post(_message("/start"))
         self.assertEqual(response.status_code, 200)
+        # /start → main menu (6 items); «🎨 Заказать стикеры» → products
+        keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
+        self.assertEqual(keyboard[0][0]["callback_data"], "menu:order")
+        self.assertEqual(len(keyboard), 6)
+        response = self._post(_callback("menu:order"))
+        self.assertEqual(response.status_code, 200)
         keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
         self.assertEqual(
             [row[0]["callback_data"] for row in keyboard],
-            ["product:sticker-pack-9", "product:single-sticker"],
+            ["product:sticker-pack-9", "product:single-sticker", "menu:main"],
         )
 
         client.reset_mock()
@@ -129,7 +136,8 @@ class TelegramProductSelectorFlowTests(TestCase):
             self.assertIn("3 эмоций", kwargs["text"])
             self.assertIn("Привет", kwargs["text"])
             keyboard = kwargs["reply_markup"]["inline_keyboard"]
-            self.assertEqual(keyboard, [[{"text": "Подтвердить набор", "callback_data": "emotions:confirm"}]])
+            self.assertEqual(keyboard[0], [{"text": "Подтвердить набор", "callback_data": "emotions:confirm"}])
+            self.assertEqual([row[0]["callback_data"] for row in keyboard[1:]], ["back:style", "menu:main"])
 
             # photos_done before the emotion step is rejected with a hint (200), no state mutation
             client.reset_mock()
@@ -150,8 +158,15 @@ class TelegramProductSelectorFlowTests(TestCase):
                 self._send_photo_and_finish(client, media_root)
 
             order.refresh_from_db()
-            # photos_done → consent screen only; checkout waits for consent:accept
+            # photos_done → contact step → order card → confirm → consent screen;
+            # the invoice waits for consent:accept + pay
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            self.assertEqual(client.send_message.call_args.kwargs["text"], CONTACT_PROMPT)
+            self._post(_message("Анна, @anna"))
+            card = client.send_message.call_args.kwargs
+            self.assertEqual(card["reply_markup"]["inline_keyboard"][0][0]["callback_data"], "order:confirm")
+            self.assertIn("Контакт: Анна, @anna", card["text"])
+            self._post(_callback("order:confirm", callback_id="cb-confirm"))
             keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
             self.assertEqual(keyboard, [[{"text": "Принимаю", "callback_data": "consent:accept"}]])
             client.send_invoice.assert_not_called()
@@ -186,7 +201,7 @@ class TelegramProductSelectorFlowTests(TestCase):
             keyboard = kwargs["reply_markup"]["inline_keyboard"]
             self.assertEqual(
                 [row[0]["callback_data"] for row in keyboard],
-                ["emotion:hello", "emotion:bye", "emotion:thanks"],
+                ["emotion:hello", "emotion:bye", "emotion:thanks", "back:style", "menu:main"],
             )
 
             # unknown emotion is rejected with a hint (200), selection unchanged
@@ -207,8 +222,15 @@ class TelegramProductSelectorFlowTests(TestCase):
                 self._send_photo_and_finish(client, media_root)
 
             order.refresh_from_db()
-            # photos_done → consent screen only; checkout waits for consent:accept
+            # photos_done → contact step → order card → confirm → consent screen;
+            # the invoice waits for consent:accept + pay
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            self.assertEqual(client.send_message.call_args.kwargs["text"], CONTACT_PROMPT)
+            self._post(_message("Анна, @anna"))
+            card = client.send_message.call_args.kwargs
+            self.assertEqual(card["reply_markup"]["inline_keyboard"][0][0]["callback_data"], "order:confirm")
+            self.assertIn("Контакт: Анна, @anna", card["text"])
+            self._post(_callback("order:confirm", callback_id="cb-confirm"))
             keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
             self.assertEqual(keyboard, [[{"text": "Принимаю", "callback_data": "consent:accept"}]])
             client.send_invoice.assert_not_called()

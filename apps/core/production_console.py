@@ -21,13 +21,15 @@ from .console_text import (
     PRODUCTION_SLOT_STATES,
     REVISION_CATEGORIES,
     REVISION_STATUSES,
+    custom_phrases,
+    customer_contact,
     humanize_error,
     job_error_text,
     label,
     slot_title,
 )
 from .image_providers import get_image_provider
-from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
+from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Product, Revision
 from .services.budget import BudgetConfigError, BudgetError, BudgetExceeded, BudgetOverride, BudgetService
 from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
@@ -62,6 +64,19 @@ class RussianStatusFilter(admin.SimpleListFilter):
     def queryset(self, request, queryset):
         if self.value():
             return queryset.filter(status=self.value())
+        return queryset
+
+
+class RussianProductFilter(admin.SimpleListFilter):
+    title = "продукт"
+    parameter_name = "product"
+
+    def lookups(self, request, model_admin):
+        return [(p.pk, p.name) for p in Product.objects.order_by("-is_active", "id")]
+
+    def queryset(self, request, queryset):
+        if self.value():
+            return queryset.filter(product_id=self.value())
         return queryset
 
 
@@ -136,7 +151,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         "calls_cost",
         "created_at",
     )
-    list_filter = (RussianStatusFilter, RussianChannelFilter, "product", "style")
+    list_filter = (RussianStatusFilter, RussianChannelFilter, RussianProductFilter, "style")
     change_list_template = "admin/core/order/change_list.html"
     search_fields = (
         "=id",
@@ -162,6 +177,8 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             "product",
             "style",
             "status_title",
+            "customer_block",
+            "custom_phrases_block",
             "customer_notes",
             "revision_request",
             "preview_assets",
@@ -182,9 +199,10 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 {
                     "fields": (
                         "status_title",
-                        "channel_identity",
+                        "customer_block",
                         "product",
                         "style",
+                        "custom_phrases_block",
                         "customer_notes",
                         "operator_notes",
                     )
@@ -247,6 +265,41 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         if not order or not order.pk:
             return "—"
         return self.status_badge(order)
+
+    @admin.display(description="Клиент")
+    def customer_block(self, order):
+        if not order or not order.pk:
+            return "—"
+        identity = order.channel_identity
+        lines = [
+            format_html(
+                "{} · {} · id {}{}",
+                identity.get_channel_display(),
+                identity.display_name or "—",
+                identity.external_user_id,
+                f" · @{identity.username}" if identity.username else "",
+            )
+        ]
+        contact = customer_contact(order)
+        if contact:
+            lines.append(format_html("Контакт для связи: <strong>{}</strong>", contact))
+        elif (order.product.config or {}).get("requires_customer_contact"):
+            lines.append("Контакт для связи: ещё не указан")
+        return lines_html(lines)
+
+    @admin.display(description="Фразы для стикеров")
+    def custom_phrases_block(self, order):
+        if not order or not order.pk:
+            return "—"
+        phrases = custom_phrases(order)
+        if not phrases:
+            if (order.product.config or {}).get("requires_custom_phrases"):
+                return "Клиент ещё не прислал фразы."
+            return "—"
+        return format_html(
+            "<ol style=\"margin:0;padding-left:1.4em\">{}</ol>",
+            format_html_join("", "<li>{}</li>", ((phrase,) for phrase in phrases)),
+        )
 
     # -------------------------------------------------------- next step
 

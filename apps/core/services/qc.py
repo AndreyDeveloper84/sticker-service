@@ -49,6 +49,7 @@ HUMAN_CRITERIA = (
     "hair_edges",
     "crop",
     "transparent_background",
+    "white_outline",
     "emotion_readability",
     "ai_artifacts",
 )

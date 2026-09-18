@@ -9,8 +9,11 @@ role of every reference so the customer photos stay the identity source.
 
 from __future__ import annotations
 
-from apps.core.models import Product
-from apps.core.services.channel_order_flow import product_emotion_options
+from apps.core.models import Order, Product
+from apps.core.services.channel_order_flow import (
+    order_custom_phrases,
+    product_emotion_options,
+)
 
 # Safe-for-work guard appended to every preview / revision / FULL prompt
 # (DRF-2089): the output-stage moderation rejected 3/3 renders of an
@@ -25,12 +28,24 @@ SAFE_FOR_WORK_CLAUSE = (
 # crop; asking for a head-and-shoulders portrait removes that invention.
 FRAMING_CLAUSE = "Head-and-shoulders portrait, nothing below the chest."
 
+# Output requirements of a final sticker (owner spec): part of the FULL default
+# so production does not depend on the seed carrying them in product config.
+FULL_OUTPUT_REQUIREMENTS = (
+    "Use a transparent background, keep the entire head, hairstyle, hands and any "
+    "lettering inside the canvas, and add a neat white outline around the sticker."
+)
+
 FULL_DEFAULT_PROMPT = (
     "Create one polished personalized final sticker of the person shown in the "
     "reference photos. Preserve the person's recognizable facial identity, key "
     "hairstyle and distinctive features. Use a clean sticker composition with an "
-    "isolated subject suitable for messaging apps."
+    "isolated subject suitable for messaging apps. "
+    + FULL_OUTPUT_REQUIREMENTS
 )
+
+# Custom-caption products (kind "custom_pack"): slot_key "custom-N" carries the
+# customer's N-th phrase (Order.selection["custom_phrases"]) instead of an emotion.
+CUSTOM_SLOT_PREFIX = "custom-"
 
 # Short expression descriptions for the Pilot emotion catalog (seed_live_test).
 # A product may override or extend these with a "description" key on its
@@ -61,6 +76,33 @@ def emotion_description(product: Product, code: str) -> str:
         if isinstance(item, dict) and str(item.get("code")) == code and item.get("description"):
             return str(item["description"]).strip()
     return EMOTION_EXPRESSIONS.get(code, "")
+
+
+def is_custom_slot(slot_key: str) -> bool:
+    suffix = slot_key[len(CUSTOM_SLOT_PREFIX):]
+    return slot_key.startswith(CUSTOM_SLOT_PREFIX) and suffix.isdigit() and int(suffix) >= 1
+
+
+def custom_phrase_for_slot(order: Order, slot_key: str) -> str:
+    """The customer phrase for slot "custom-N" (1-based), "" if not a custom
+    slot or the phrase is missing/blank."""
+    if not is_custom_slot(slot_key):
+        return ""
+    index = int(slot_key[len(CUSTOM_SLOT_PREFIX):]) - 1
+    phrases = order_custom_phrases(order)
+    if index >= len(phrases):
+        return ""
+    return phrases[index].strip()
+
+
+def render_caption(phrase: str) -> str:
+    """Caption instruction for a custom-phrase sticker (no "Expression:" line):
+    the text must appear verbatim, readable and fully inside the canvas."""
+    return (
+        f"Add the caption text «{phrase.strip()}» on the sticker, exactly as written, "
+        "in bold clean readable lettering, fully inside the canvas, not cropped; "
+        "keep the character's expression friendly/neutral."
+    )
 
 
 def render_expression(product: Product, code: str) -> str:

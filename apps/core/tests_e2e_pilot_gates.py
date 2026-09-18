@@ -42,7 +42,10 @@ from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFee
 from apps.core.services.qc import HUMAN_CRITERIA, QcError, QcService
 from apps.max_bot.payments import MaxExternalPaymentAdapter, MaxPaymentError
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
+from apps.core.bot_menu import CONTACT_PROMPT
 from apps.core.tests_e2e_pilot_matrix import (
+    CONTACT_VALUE,
+    STYLE,
     ALL_EMOTIONS,
     PACK,
     SINGLE,
@@ -304,7 +307,7 @@ class PilotNegativeGateTests(PilotE2ECase):
     def test_G9_max_checkout_requires_consent_and_accept_is_idempotent(self):
         driver = MaxDriver(self)
         driver._post({"update_type": "bot_started", "chat_id": driver.chat_id, "user": driver.user})
-        for payload in (f"product:{SINGLE}", f"style:{SINGLE}:comic", "emotion:laugh"):
+        for payload in (f"product:{SINGLE}", f"style:{SINGLE}:{STYLE}", "emotion:laugh"):
             driver._post(driver._callback(payload))
         photo = {
             "update_type": "message_created",
@@ -337,7 +340,7 @@ class PilotNegativeGateTests(PilotE2ECase):
         bypass = MaxDriver(self)
         bypass.user = {"user_id": 770909, "first_name": "Bypass"}
         bypass._post({"update_type": "bot_started", "chat_id": 880909, "user": bypass.user})
-        for payload in (f"product:{SINGLE}", f"style:{SINGLE}:comic", "emotion:laugh"):
+        for payload in (f"product:{SINGLE}", f"style:{SINGLE}:{STYLE}", "emotion:laugh"):
             bypass._post(bypass._callback(payload))
         bypass._post({**photo, "message": {**photo["message"], "sender": bypass.user}})
         bypass_order = Order.objects.get(channel_identity__external_user_id="770909")
@@ -350,8 +353,12 @@ class PilotNegativeGateTests(PilotE2ECase):
             )
         self.assertFalse(Payment.objects.filter(order=bypass_order).exists())
         self.assertEqual(bypass.yookassa.checkouts, [])
-        # a second photos_done just repeats the consent screen
+        # a second photos_done just repeats the contact step; contact + confirm
+        # lead to the consent screen
         self.assertEqual(driver._post(driver._callback("photos_done", "cb-again")).status_code, 200)
+        self.assertEqual(driver.bot.send_message.call_args.kwargs["text"], CONTACT_PROMPT)
+        self.assertEqual(driver._post(driver._text(CONTACT_VALUE)).status_code, 200)
+        self.assertEqual(driver._post(driver._callback("order:confirm")).status_code, 200)
         self.assertEqual(
             driver.bot.send_message.call_args.kwargs["buttons"][0][0]["payload"], "consent:accept"
         )
@@ -374,7 +381,7 @@ class PilotNegativeGateTests(PilotE2ECase):
         # consent never leaks to the customer's next order
         driver.pay(order)
         driver._post(driver._callback(f"product:{SINGLE}"))
-        driver._post(driver._callback(f"style:{SINGLE}:comic"))
+        driver._post(driver._callback(f"style:{SINGLE}:{STYLE}"))
         new_order = Order.objects.filter(channel_identity=order.channel_identity).order_by("-id").first()
         self.assertNotEqual(new_order.pk, order.pk)
         self.assertFalse(new_order.consent_accepted)
@@ -385,7 +392,7 @@ class PilotNegativeGateTests(PilotE2ECase):
     def test_G9_telegram_invoice_requires_consent_and_accept_is_idempotent(self):
         driver = TelegramDriver(self)
         driver._post(driver._message(text="/start"))
-        for data in (f"product:{SINGLE}", f"style:{SINGLE}:comic", "emotion:laugh"):
+        for data in (f"product:{SINGLE}", f"style:{SINGLE}:{STYLE}", "emotion:laugh"):
             driver._post(driver._callback(data))
         driver._post(driver._message(photo=[{"file_id": "big"}]))
         self.assertEqual(driver._post(driver._callback("photos_done")).status_code, 200)
@@ -405,7 +412,7 @@ class PilotNegativeGateTests(PilotE2ECase):
         bypass = TelegramDriver(self)
         bypass.user = {"id": 770910, "first_name": "Bypass"}
         bypass._post(bypass._message(text="/start"))
-        for data in (f"product:{SINGLE}", f"style:{SINGLE}:comic", "emotion:laugh"):
+        for data in (f"product:{SINGLE}", f"style:{SINGLE}:{STYLE}", "emotion:laugh"):
             bypass._post(bypass._callback(data))
         bypass._post(bypass._message(photo=[{"file_id": "big"}]))
         bypass_order = Order.objects.get(channel_identity__external_user_id="770910")
@@ -418,8 +425,12 @@ class PilotNegativeGateTests(PilotE2ECase):
         self.assertFalse(response.json()["ok"])
         bypass.bot.send_invoice.assert_not_called()
         self.assertFalse(Payment.objects.filter(order=bypass_order).exists())
-        # a second photos_done just repeats the consent screen
+        # a second photos_done just repeats the contact step; contact + confirm
+        # lead to the consent screen
         self.assertEqual(driver._post(driver._callback("photos_done", "cb-again")).status_code, 200)
+        self.assertEqual(driver.bot.send_message.call_args.kwargs["text"], CONTACT_PROMPT)
+        self.assertEqual(driver._post(driver._message(text=CONTACT_VALUE)).status_code, 200)
+        self.assertEqual(driver._post(driver._callback("order:confirm")).status_code, 200)
         self.assertEqual(
             driver.bot.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
             "consent:accept",
@@ -448,7 +459,7 @@ class PilotNegativeGateTests(PilotE2ECase):
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.PAID)
         next_order = ChannelOrderFlowService().create_or_get_order(
-            identity=order.channel_identity, product_code=SINGLE, style_code="comic"
+            identity=order.channel_identity, product_code=SINGLE, style_code=STYLE
         )
         self.assertNotEqual(next_order.pk, order.pk)
         self.assertFalse(next_order.consent_accepted)

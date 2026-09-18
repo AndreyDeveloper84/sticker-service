@@ -9,6 +9,8 @@ silence. Pure presentation: no domain behaviour changes.
 
 from __future__ import annotations
 
+import re
+
 START_HINT = "Сначала выберите продукт: нажмите /start."
 CONTINUE_ORDER_HINT = (
     "У вас уже есть незавершённый заказ — продолжите его: отправьте фото "
@@ -21,6 +23,8 @@ PRODUCT_UNAVAILABLE_HINT = "Этот вариант недоступен. Наж
 NO_PREVIEW_HINT = "Сейчас нет превью, ожидающего вашей оценки. Мы напишем, когда оно будет готово."
 REVISION_USED_HINT = "Бесплатная правка по этому заказу уже использована. Мы продолжаем работу над стикерами."
 GENERIC_HINT = "Не удалось выполнить это действие на текущем шаге. Нажмите /start, чтобы продолжить."
+NEED_PHRASES_HINT = "Сначала напишите фразы для надписей — по одной в каждой строке."
+NEED_CONTACT_HINT = "Оставьте имя и удобный способ связи (@username, телефон или ссылку) — не короче 3 символов."
 
 # --- photo step (DRF-2090) ----------------------------------------------
 # Live evidence (Orders 3/13): the provider's output moderation reacted to
@@ -54,6 +58,10 @@ _FLOW_HINTS = {
     "Product or style is unavailable": PRODUCT_UNAVAILABLE_HINT,
     "Product is unavailable": PRODUCT_UNAVAILABLE_HINT,
     "Order is past the consent step without consent": GENERIC_HINT,
+    "This product requires custom phrases": NEED_PHRASES_HINT,
+    "This product does not accept custom phrases": GENERIC_HINT,
+    "Custom phrases are not complete": NEED_PHRASES_HINT,
+    "A valid contact is required": NEED_CONTACT_HINT,
     # preview feedback
     "Нет превью, ожидающего вашей оценки": NO_PREVIEW_HINT,
     "No delivered approved preview": NO_PREVIEW_HINT,
@@ -63,6 +71,20 @@ _FLOW_HINTS = {
 }
 
 
-def customer_hint(exc: Exception) -> str:
+_PHRASE_COUNT = re.compile(r"^Exactly (\d+) custom phrases are required$")
+
+
+def phrases_count_hint(required: int, received: int) -> str:
+    return (
+        f"Нужно ровно {required} фраз — по одной в каждой строке, одним сообщением. "
+        f"Сейчас строк: {received}. Отправьте список ещё раз."
+    )
+
+
+def customer_hint(exc: Exception, *, received_lines: int | None = None) -> str:
     """Short Russian hint for a domain flow/feedback error."""
-    return _FLOW_HINTS.get(str(exc), GENERIC_HINT)
+    text = str(exc)
+    match = _PHRASE_COUNT.match(text)
+    if match:
+        return phrases_count_hint(int(match.group(1)), received_lines if received_lines is not None else 0)
+    return _FLOW_HINTS.get(text, GENERIC_HINT)
