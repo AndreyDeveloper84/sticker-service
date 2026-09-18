@@ -25,8 +25,13 @@ from apps.core.services.channel_order_flow import (
     order_emotion_codes,
     product_emotion_options,
 )
+from apps.core.services.budget import BudgetGuard, BudgetOverride
 from apps.core.services.order_state import OrderStateService
 from apps.core.storage import LocalMediaStorage
+
+
+# Budget action names per _prepare mode (event payload / decision).
+_BUDGET_ACTIONS = {"start": "full_start", "retry": "retry", "regenerate": "regenerate", "force": "force_retry"}
 
 
 class FullProductionError(ValueError):
@@ -154,7 +159,9 @@ class FullProductionService:
 
     # ---------------------------------------------------------- entries
 
-    def start(self, *, order: Order, max_slots: int | None = 1) -> list[SlotState]:
+    def start(
+        self, *, order: Order, max_slots: int | None = 1, budget_override: BudgetOverride | None = None
+    ) -> list[SlotState]:
         """Run full production; safe to re-enter (no duplicate assets).
 
         Pending slots are started (up to max_slots per call). Succeeded
@@ -163,12 +170,15 @@ class FullProductionService:
         stay blocked until force_retry_slot().
         """
         jobs, _blocked = self._prepare(
-            order=order, allow_entry=True, mode="start", max_slots=max_slots
+            order=order, allow_entry=True, mode="start", max_slots=max_slots,
+            budget_override=budget_override,
         )
         self._run_jobs(jobs=jobs)
         return self._finalize(order=order)
 
-    def retry_failed(self, *, order: Order, max_slots: int | None = 1) -> list[SlotState]:
+    def retry_failed(
+        self, *, order: Order, max_slots: int | None = 1, budget_override: BudgetOverride | None = None
+    ) -> list[SlotState]:
         """Selective retry: failed retryable slots only, never succeeded ones.
 
         Slots whose latest failure was classified "ambiguous" (post-submit
@@ -177,7 +187,8 @@ class FullProductionService:
         the other slots have been processed.
         """
         jobs, blocked = self._prepare(
-            order=order, allow_entry=False, mode="retry", max_slots=max_slots
+            order=order, allow_entry=False, mode="retry", max_slots=max_slots,
+            budget_override=budget_override,
         )
         self._run_jobs(jobs=jobs)
         plan = self._finalize(order=order)
@@ -189,7 +200,8 @@ class FullProductionService:
         return plan
 
     def regenerate_slots(
-        self, *, order: Order, slot_keys, max_slots: int | None = 1
+        self, *, order: Order, slot_keys, max_slots: int | None = 1,
+        budget_override: BudgetOverride | None = None,
     ) -> list[SlotState]:
         """Regenerate explicitly requested slots (QC FAIL path, DRF-2052).
 
@@ -206,6 +218,7 @@ class FullProductionService:
             mode="regenerate",
             slot_keys=slot_keys,
             max_slots=max_slots,
+            budget_override=budget_override,
         )
         self._run_jobs(jobs=jobs)
         plan = self._finalize(order=order)
@@ -216,7 +229,9 @@ class FullProductionService:
             )
         return plan
 
-    def force_retry_slot(self, *, order: Order, slot_key: str) -> list[SlotState]:
+    def force_retry_slot(
+        self, *, order: Order, slot_key: str, budget_override: BudgetOverride | None = None
+    ) -> list[SlotState]:
         """Explicit operator override for one ambiguous-blocked slot.
 
         PACK_GENERATING only; the slot's latest attempt must be FAILED
@@ -231,6 +246,7 @@ class FullProductionService:
             mode="force",
             slot_keys=[slot_key],
             max_slots=1,
+            budget_override=budget_override,
         )
         self._run_jobs(jobs=jobs)
         return self._finalize(order=order)
@@ -300,6 +316,7 @@ class FullProductionService:
         mode: str,
         slot_keys=None,
         max_slots: int | None,
+        budget_override: BudgetOverride | None = None,
     ):
         """Create RUNNING attempts for slots that need (re)generation.
 
@@ -376,6 +393,14 @@ class FullProductionService:
 
                 if max_slots is not None and len(new_jobs) >= max_slots:
                     break
+                # Pilot Budget Guard (DRF-2086): inside the order lock, before
+                # the billable attempt exists. Jobs already created by this
+                # call are visible to the counters (same transaction), so a
+                # multi-slot run is checked cumulatively. Raises → the whole
+                # call rolls back → no job, no provider call.
+                BudgetGuard(override=budget_override).enforce(
+                    locked, GenerationJob.TaskType.FULL, slot_key=slot, action=_BUDGET_ACTIONS[mode]
+                )
                 new_jobs.append(self._create_attempt(locked, slot, preview, photo_ids))
             return new_jobs, blocked
 

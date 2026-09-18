@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from apps.core.image_providers import ImageGenerationRequest, ImageProvider, ReferenceImage
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
+from apps.core.services.budget import BudgetGuard, BudgetOverride
 from apps.core.services.order_state import InvalidOrderTransition, OrderStateService
 from apps.core.storage import LocalMediaStorage
 
@@ -22,12 +23,24 @@ class GenerationService:
         self.provider = provider
         self.storage = storage or LocalMediaStorage()
 
-    def generate_preview(self, *, order: Order) -> GeneratedAsset:
-        job = self._start_job(order=order, task_type=GenerationJob.TaskType.PREVIEW)
+    def generate_preview(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+        job = self._start_job(order=order, task_type=GenerationJob.TaskType.PREVIEW, budget_override=budget_override)
         return self._run_job(job)
 
-    def generate_revision(self, *, order: Order) -> GeneratedAsset:
-        job = self._start_job(order=order, task_type=GenerationJob.TaskType.REVISION)
+    def generate_revision(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+        job = self._start_job(order=order, task_type=GenerationJob.TaskType.REVISION, budget_override=budget_override)
+        return self._run_job(job)
+
+    def restart_preview(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+        """Console «Перегенерировать превью»: INTERNAL_PREVIEW_REVIEW →
+        PREVIEW_GENERATING and the new attempt in ONE transaction, so a
+        budget refusal (or any other error before the job exists) leaves
+        the order on internal review instead of a dangling PREVIEW_GENERATING."""
+        with transaction.atomic():
+            OrderStateService.transition(order=order, to_status=Order.Status.PREVIEW_GENERATING)
+            job = self._start_job(
+                order=order, task_type=GenerationJob.TaskType.PREVIEW, budget_override=budget_override
+            )
         return self._run_job(job)
 
     def _run_job(self, job):
@@ -44,7 +57,9 @@ class GenerationService:
             raise GenerationError(str(exc)) from exc
 
     @transaction.atomic
-    def _start_job(self, *, order: Order, task_type: str) -> GenerationJob:
+    def _start_job(
+        self, *, order: Order, task_type: str, budget_override: BudgetOverride | None = None
+    ) -> GenerationJob:
         locked_order = (
             Order.objects.select_for_update()
             .select_related("product", "style")
@@ -106,6 +121,11 @@ class GenerationService:
             )
             revision.status = Revision.Status.GENERATING
             revision.save(update_fields=["status", "updated_at"])
+
+        # Pilot Budget Guard (DRF-2086): last statement before the billable
+        # attempt exists. Raises BudgetExceeded / BudgetConfigError → this
+        # transaction rolls back → no RUNNING job, no provider call.
+        BudgetGuard(override=budget_override).enforce(locked_order, task_type)
 
         return GenerationJob.objects.create(
             order=locked_order,

@@ -2,6 +2,7 @@ import os
 from io import BytesIO
 
 from django.contrib import admin, messages
+from django.db import transaction
 from django.http import FileResponse, Http404
 from django.shortcuts import redirect
 from django.template.response import TemplateResponse
@@ -26,7 +27,7 @@ from .console_text import (
 )
 from .image_providers import get_image_provider
 from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
-from .services.budget import ACTION_TITLES, BudgetService
+from .services.budget import BudgetConfigError, BudgetError, BudgetExceeded, BudgetOverride, BudgetService
 from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
 from .services.order_state import InvalidOrderTransition, OrderStateService
@@ -689,30 +690,25 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         }
         return super().changelist_view(request, extra_context=extra_context)
 
-    def _budget_gate(self, request, order, action, *, slot_keys=None):
-        """Console-level budget gate (DRF-2086).
+    def _budget_override(self, request):
+        """Pilot Budget Guard (DRF-2086): the ONLY way to exceed a limit.
 
-        Returns True when the paid action may run. Blocked: records
-        ``budget.blocked``, shows the Russian error, returns False — the
-        service is never called. A superuser who confirmed ``force=1`` on the
-        confirmation page proceeds with a ``budget.override`` record.
+        Returns a BudgetOverride solely when a superuser ticked
+        «Переопределить лимит» on the confirmation page and confirmed
+        (POST force=1); everyone else — including a superuser without the
+        explicit confirmation — gets None and is blocked by the service.
         """
-        decision = BudgetService().check(order, action, slot_keys=slot_keys)
-        if decision.blocked is None:
-            return True
-        actor = request.user.get_username()
         if request.user.is_superuser and request.POST.get("force") == "1":
-            BudgetService.record_override(order, decision, actor_ref=actor)
-            self.message_user(
-                request,
-                f"Лимит переопределён суперпользователем: {decision.blocked.title} "
-                f"{decision.blocked.used}/{decision.blocked.max}. Записано в журнал.",
-                level=messages.WARNING,
-            )
-            return True
-        BudgetService.record_blocked(order, decision, actor_ref=actor)
-        self.message_user(request, decision.message, level=messages.ERROR)
-        return False
+            return BudgetOverride(actor_ref=request.user.get_username(), reason="console confirmation")
+        return None
+
+    def _budget_blocked(self, request, order, exc: BudgetError) -> None:
+        """One handler for every paid action: the service refused before any
+        job/provider call (its transaction rolled back); persist the
+        evidence and tell the operator in Russian."""
+        if isinstance(exc, BudgetExceeded):
+            BudgetService.record_blocked(order, exc.decision, actor_ref=request.user.get_username())
+        self.message_user(request, str(exc), level=messages.ERROR)
 
     @staticmethod
     def _retry_slots(order) -> list[str]:
@@ -727,10 +723,14 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         return [key for key, status in latest.items() if status == GenerationJob.Status.FAILED]
 
     def _budget_context(self, request, order, action, *, slot_keys=None) -> dict:
-        """Confirmation-page context: warning text and the override control."""
-        decision = BudgetService().check(order, action, slot_keys=slot_keys)
-        blocked = decision.blocked
-        if blocked is None:
+        """Confirmation-page context (informational preview of the guard):
+        warning text and the override control. The service re-checks under
+        the order lock on POST."""
+        try:
+            decision = BudgetService().check(order, action, slot_keys=slot_keys)
+        except BudgetConfigError as exc:
+            return {"budget_blocked": str(exc).replace(" Генерация не запущена.", ""), "budget_can_override": False}
+        if decision.blocked is None:
             return {}
         return {
             "budget_blocked": decision.message.replace(" Генерация не запущена.", ""),
@@ -824,7 +824,9 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         """QC-retry slots are succeeded slots: start()/retry_failed() would keep
         their rejected asset and re-enter QC with the same set. Route them to
         regenerate_slots() (DRF-2051 semantics untouched)."""
-        plan = service.regenerate_slots(order=order, slot_keys=pending)
+        plan = service.regenerate_slots(
+            order=order, slot_keys=pending, budget_override=self._budget_override(request)
+        )
         names = ", ".join(slot_title(order, key) for key in pending)
         self.message_user(
             request,
@@ -879,10 +881,12 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
                 **self._budget_context(request, order, "preview"),
             )
-        if not self._budget_gate(request, order, "preview"):
-            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
-            asset = self.get_generation_service().generate_preview(order=order)
+            asset = self.get_generation_service().generate_preview(
+                order=order, budget_override=self._budget_override(request)
+            )
+        except BudgetError as exc:
+            self._budget_blocked(request, order, exc)
         except GenerationError as exc:
             self._fail(request, exc)
         else:
@@ -924,10 +928,12 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 level=messages.ERROR,
             )
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
-        if not self._budget_gate(request, order, "revision"):
-            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
-            asset = self.get_generation_service().generate_revision(order=order)
+            asset = self.get_generation_service().generate_revision(
+                order=order, budget_override=self._budget_override(request)
+            )
+        except BudgetError as exc:
+            self._budget_blocked(request, order, exc)
         except (InvalidOrderTransition, GenerationError) as exc:
             self._fail(request, exc)
         else:
@@ -961,11 +967,12 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 level=messages.ERROR,
             )
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
-        if not self._budget_gate(request, order, "preview"):
-            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
-            OrderStateService.transition(order=order, to_status=Order.Status.PREVIEW_GENERATING)
-            asset = self.get_generation_service().generate_preview(order=order)
+            asset = self.get_generation_service().restart_preview(
+                order=order, budget_override=self._budget_override(request)
+            )
+        except BudgetError as exc:
+            self._budget_blocked(request, order, exc)
         except (InvalidOrderTransition, GenerationError) as exc:
             self._fail(request, exc)
         else:
@@ -1059,8 +1066,6 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             )
         service = self.get_full_production_service()
         pending = self.pending_retry_slots(order)
-        if not self._budget_gate(request, order, "full_start", slot_keys=pending or None):
-            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             if pending:
                 plan = self._regenerate_pending_retry(
@@ -1068,7 +1073,9 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     instead_of="Запустить производство",
                 )
             else:
-                plan = service.start(order=order)
+                plan = service.start(order=order, budget_override=self._budget_override(request))
+        except BudgetError as exc:
+            self._budget_blocked(request, order, exc)
         except (InvalidOrderTransition, FullProductionError) as exc:
             self._fail(request, exc)
         else:
@@ -1108,8 +1115,6 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             )
         service = self.get_full_production_service()
         pending = self.pending_retry_slots(order)
-        if not self._budget_gate(request, order, "retry", slot_keys=self._retry_slots(order)):
-            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             if pending:
                 self._regenerate_pending_retry(
@@ -1117,8 +1122,10 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     instead_of="Повторить неудавшиеся слоты",
                 )
             else:
-                plan = service.retry_failed(order=order)
+                plan = service.retry_failed(order=order, budget_override=self._budget_override(request))
                 self.message_user(request, self._plan_message(plan, order), level=messages.SUCCESS)
+        except BudgetError as exc:
+            self._budget_blocked(request, order, exc)
         except (InvalidOrderTransition, FullProductionError) as exc:
             self._fail(request, exc)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
@@ -1157,10 +1164,12 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             )
         slot_keys = [key.strip() for key in slot_keys_value.split(",") if key.strip()]
         service = self.get_full_production_service()
-        if not self._budget_gate(request, order, "regenerate", slot_keys=slot_keys):
-            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
-            plan = service.regenerate_slots(order=order, slot_keys=slot_keys)
+            plan = service.regenerate_slots(
+                order=order, slot_keys=slot_keys, budget_override=self._budget_override(request)
+            )
+        except BudgetError as exc:
+            self._budget_blocked(request, order, exc)
         except (InvalidOrderTransition, FullProductionError) as exc:
             self._fail(request, exc)
         else:
@@ -1188,10 +1197,12 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 **self._budget_context(request, order, "force_retry", slot_keys=[slot_key]),
             )
         service = self.get_full_production_service()
-        if not self._budget_gate(request, order, "force_retry", slot_keys=[slot_key]):
-            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
-            plan = service.force_retry_slot(order=order, slot_key=slot_key)
+            plan = service.force_retry_slot(
+                order=order, slot_key=slot_key, budget_override=self._budget_override(request)
+            )
+        except BudgetError as exc:
+            self._budget_blocked(request, order, exc)
         except (InvalidOrderTransition, FullProductionError) as exc:
             self._fail(request, exc)
         else:
