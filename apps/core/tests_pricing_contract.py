@@ -277,7 +277,7 @@ class PilotSeedPricingTests(TestCase):
         second = {p.code: p.config for p in Product.objects.filter(is_active=True)}
 
         self.assertEqual(first, second)
-        self.assertEqual(Product.objects.count(), 2)
+        self.assertEqual(Product.objects.count(), 3)
         expected = {
             "sticker-pack-9": (9, 9, PACK_RUB_MINOR, PACK_STARS),
             "single-sticker": (1, 1, SINGLE_RUB_MINOR, SINGLE_STARS),

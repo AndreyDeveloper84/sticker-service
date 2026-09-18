@@ -7,8 +7,9 @@ from django.views.decorators.csrf import csrf_exempt
 import logging
 
 from apps.core.customer_hints import PHOTO_GUIDANCE, SINGLE_PHOTO_REMINDER, customer_hint
+from apps.core.bot_menu import CONTACT_TEXT, EXAMPLES_TEXT, MAIN_MENU, ORDER_HOW_IT_WORKS, PHOTO_REQUIREMENTS, main_menu_rows, prices_text
 from apps.core.models import Order, Revision
-from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
+from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT, product_requires_custom_phrases, product_requires_customer_contact
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
 from apps.telegram_bot.client import TelegramAPIError, TelegramBotClient
@@ -105,8 +106,7 @@ def _handle_message(message, *, adapter, payment_adapter, client):
         return None
 
     if (message.get("text") or "").startswith("/start"):
-        buttons = [[{"text": p.name, "callback_data": f"product:{p.code}"}] for p in adapter.active_products()]
-        return client.send_message(chat_id=chat_id, text="Выберите продукт", reply_markup={"inline_keyboard": buttons})
+        return _send_main_menu(chat_id=chat_id, client=client)
 
     photos = message.get("photo") or []
     if photos:
@@ -119,6 +119,17 @@ def _handle_message(message, *, adapter, payment_adapter, client):
         mime_type = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
         adapter.save_photo_bytes(identity=identity, content=content, filename=file_path.rsplit("/", 1)[-1], mime_type=mime_type)
         return client.send_message(chat_id=chat_id, text="Фото сохранено. Отправьте ещё или нажмите «Фото загружены».", reply_markup={"inline_keyboard": [[{"text": "Фото загружены", "callback_data": "photos_done"}]]})
+
+    order = identity.orders.filter(status=Order.Status.AWAITING_PHOTOS).order_by("-id").first()
+    awaiting = str((order.selection or {}).get("awaiting_input") or "") if order else ""
+    text = (message.get("text") or "").strip()
+    if awaiting == "phrases" and text:
+        adapter.save_custom_phrases(identity=identity, text=text)
+        adapter.set_awaiting_input(identity=identity, value="contact")
+        return client.send_message(chat_id=chat_id, text="Оставьте имя и удобный способ связи: @username, телефон или ссылку.")
+    if awaiting == "contact" and text:
+        order = adapter.save_customer_contact(identity=identity, text=text)
+        return client.send_message(chat_id=chat_id, text=_summary_text(adapter.order_summary(order), price_stars=_summary_stars_price(order.product)), reply_markup={"inline_keyboard": [[{"text": "✅ Подтвердить заказ", "callback_data": "order:confirm"}]]})
 
 
 def _feedback_order(identity):
@@ -136,6 +147,17 @@ PHOTO_PROMPT = PHOTO_GUIDANCE
 CONSENT_TEXT = PILOT_CONSENT_TEXT
 CONSENT_REPLY_MARKUP = {"inline_keyboard": [[{"text": PILOT_CONSENT_BUTTON_LABEL, "callback_data": "consent:accept"}]]}
 PAY_REPLY_MARKUP = {"inline_keyboard": [[{"text": "Оплатить", "callback_data": "pay"}]]}
+
+
+def _send_main_menu(*, chat_id, client):
+    buttons = [[{"text": label, "callback_data": payload}] for label, payload in main_menu_rows("menu")]
+    return client.send_message(chat_id=chat_id, text=MAIN_MENU, reply_markup={"inline_keyboard": buttons})
+
+
+def _send_products(*, chat_id, adapter, client):
+    buttons = [[{"text": p.name, "callback_data": f"product:{p.code}"}] for p in adapter.active_products()]
+    buttons.append([{"text": "🏠 Главное меню", "callback_data": "menu:main"}])
+    return client.send_message(chat_id=chat_id, text="Выберите вариант", reply_markup={"inline_keyboard": buttons})
 
 
 def _emotion_step(adapter, order):
@@ -194,7 +216,21 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
     chat_id = callback["message"]["chat"]["id"]
     data = callback.get("data") or ""
 
-    if data.startswith("product:"):
+    if data == "menu:main":
+        _send_main_menu(chat_id=chat_id, client=client)
+    elif data == "menu:order":
+        _send_products(chat_id=chat_id, adapter=adapter, client=client)
+    elif data == "menu:prices":
+        client.send_message(chat_id=chat_id, text=prices_text(telegram=True))
+    elif data == "menu:examples":
+        client.send_message(chat_id=chat_id, text=EXAMPLES_TEXT)
+    elif data == "menu:photos":
+        client.send_message(chat_id=chat_id, text=PHOTO_REQUIREMENTS)
+    elif data == "menu:how":
+        client.send_message(chat_id=chat_id, text=ORDER_HOW_IT_WORKS)
+    elif data == "menu:contact":
+        client.send_message(chat_id=chat_id, text=CONTACT_TEXT)
+    elif data.startswith("product:"):
         product_code = data.split(":", 1)[1]
         if not adapter.active_products().filter(code=product_code).exists():
             raise TelegramFlowError("Product is unavailable")
@@ -203,7 +239,9 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
     elif data.startswith("style:"):
         _, product_code, style_code = data.split(":", 2)
         order = adapter.create_or_get_order(identity=identity, product_code=product_code, style_code=style_code)
-        if adapter.required_emotion_count(product=order.product):
+        if product_requires_custom_phrases(order.product):
+            client.send_message(chat_id=chat_id, text=PHOTO_PROMPT)
+        elif adapter.required_emotion_count(product=order.product):
             text, reply_markup = _emotion_step(adapter, order)
             client.send_message(chat_id=chat_id, text=text, reply_markup=reply_markup)
         else:
@@ -221,6 +259,18 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
         if order.photos.count() == 1:
             # soft reminder only — one photo is accepted (DRF-2090)
             client.send_message(chat_id=chat_id, text=SINGLE_PHOTO_REMINDER)
+        if product_requires_custom_phrases(order.product):
+            adapter.set_awaiting_input(identity=identity, value="phrases")
+            client.send_message(chat_id=chat_id, text="Напишите 9 желаемых фраз — по одной в каждой строке.")
+        elif product_requires_customer_contact(order.product):
+            adapter.set_awaiting_input(identity=identity, value="contact")
+            client.send_message(chat_id=chat_id, text="Оставьте имя и удобный способ связи: @username, телефон или ссылку.")
+        else:
+            client.send_message(chat_id=chat_id, text=CONSENT_TEXT, reply_markup=CONSENT_REPLY_MARKUP)
+    elif data == "order:confirm":
+        order = adapter.current_photo_order(identity)
+        if not adapter.flow.customer_contact_complete(order):
+            raise TelegramFlowError("A valid contact is required")
         client.send_message(chat_id=chat_id, text=CONSENT_TEXT, reply_markup=CONSENT_REPLY_MARKUP)
     elif data == "consent:accept":
         order = adapter.accept_consent(identity=identity)

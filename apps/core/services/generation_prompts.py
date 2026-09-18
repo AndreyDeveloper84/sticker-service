@@ -48,7 +48,9 @@ EMOTION_EXPRESSIONS = {
 }
 
 
-def emotion_label(product: Product, code: str) -> str:
+def emotion_label(product: Product, code: str, *, label_override: str = "") -> str:
+    if label_override.strip():
+        return label_override.strip()
     for option in product_emotion_options(product):
         if option["code"] == code:
             return option["label"]
@@ -63,12 +65,12 @@ def emotion_description(product: Product, code: str) -> str:
     return EMOTION_EXPRESSIONS.get(code, "")
 
 
-def render_expression(product: Product, code: str) -> str:
+def render_expression(product: Product, code: str, *, label_override: str = "") -> str:
     """'Expression: «Привет» — friendly greeting, …' (label alone if unknown).
 
     The bare emotion code is deliberately NOT part of the prompt.
     """
-    label = emotion_label(product, code)
+    label = emotion_label(product, code, label_override=label_override)
     description = emotion_description(product, code)
     if description:
         return f"Expression: «{label}» — {description}."

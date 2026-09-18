@@ -477,7 +477,14 @@ class FullProductionService:
             str(style_config.get("prompt") or f"Use the {order.style.name} style."),
             SAFE_FOR_WORK_CLAUSE,
             FRAMING_CLAUSE,
-            render_expression(order.product, slot_key),
+            render_expression(
+                order.product,
+                slot_key,
+                label_override=(order.selection or {}).get("custom_phrases", [])[int(slot_key.rsplit("-", 1)[-1]) - 1]
+                if slot_key.startswith("custom-") and slot_key.rsplit("-", 1)[-1].isdigit()
+                and len((order.selection or {}).get("custom_phrases", [])) >= int(slot_key.rsplit("-", 1)[-1])
+                else "",
+            ),
             render_reference_roles(photo_count=len(photos), has_preview=True),
         ]
         if order.customer_notes.strip():
@@ -509,7 +516,14 @@ class FullProductionService:
         reference_order.append(f"preview:{preview.pk}")
 
         # Live evidence: persist exactly what the model received.
-        label = emotion_label(order.product, slot_key)
+        label = emotion_label(
+            order.product,
+            slot_key,
+            label_override=(order.selection or {}).get("custom_phrases", [])[int(slot_key.rsplit("-", 1)[-1]) - 1]
+            if slot_key.startswith("custom-") and slot_key.rsplit("-", 1)[-1].isdigit()
+            and len((order.selection or {}).get("custom_phrases", [])) >= int(slot_key.rsplit("-", 1)[-1])
+            else "",
+        )
         job.input_metadata = {
             **(job.input_metadata or {}),
             "emotion_label": label,

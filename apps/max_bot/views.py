@@ -11,8 +11,9 @@ from django.views.decorators.csrf import csrf_exempt
 logger = logging.getLogger(__name__)
 
 from apps.core.customer_hints import PHOTO_GUIDANCE, SINGLE_PHOTO_REMINDER, customer_hint
+from apps.core.bot_menu import CONTACT_TEXT, EXAMPLES_TEXT, MAIN_MENU, ORDER_HOW_IT_WORKS, PHOTO_REQUIREMENTS, main_menu_rows, prices_text
 from apps.core.models import Order, Revision
-from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
+from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT, product_requires_custom_phrases, product_requires_customer_contact
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.max_bot.adapter import MaxAdapter, MaxFlowError
 from apps.max_bot.checkout import start_checkout
@@ -100,8 +101,7 @@ def _reply_hint(client, event: MaxEvent, exc: Exception) -> None:
 
 def _handle_event(event: MaxEvent, *, adapter, client):
     if event.update_type == "bot_started":
-        identity = adapter.get_or_create_identity(event.user)
-        return _send_products(event, adapter=adapter, client=client)
+        return _send_main_menu(event, client=client)
     if event.update_type == "message_created":
         return _handle_message(event, adapter=adapter, client=client)
     if event.update_type == "message_callback":
@@ -111,14 +111,20 @@ def _handle_event(event: MaxEvent, *, adapter, client):
 
 def _send_products(event: MaxEvent, *, adapter, client):
     buttons = [[{"text": product.name, "payload": f"product:{product.code}"}] for product in adapter.active_products()]
-    return _reply(client, event, text="Выберите продукт", buttons=buttons)
+    buttons.append([{"text": "🏠 Главное меню", "payload": "menu:main"}])
+    return _reply(client, event, text="Выберите вариант", buttons=buttons)
+
+
+def _send_main_menu(event: MaxEvent, *, client):
+    buttons = [[{"text": label, "payload": payload}] for label, payload in main_menu_rows("menu")]
+    return _reply(client, event, text=MAIN_MENU, buttons=buttons)
 
 
 def _handle_message(event: MaxEvent, *, adapter, client):
     identity = adapter.get_or_create_identity(event.user)
 
     if event.text.startswith("/start"):
-        return _send_products(event, adapter=adapter, client=client)
+        return _send_main_menu(event, client=client)
 
     for attachment in event.attachments:
         if not isinstance(attachment, dict) or attachment.get("type") != "image":
@@ -154,6 +160,15 @@ def _handle_message(event: MaxEvent, *, adapter, client):
             text="Фото сохранено. Отправьте ещё или нажмите «Фото загружены».",
             buttons=[[{"text": "Фото загружены", "payload": "photos_done"}]],
         )
+    order = identity.orders.filter(status=Order.Status.AWAITING_PHOTOS).order_by("-id").first()
+    awaiting = str((order.selection or {}).get("awaiting_input") or "") if order else ""
+    if awaiting == "phrases" and event.text.strip():
+        adapter.save_custom_phrases(identity=identity, text=event.text)
+        adapter.set_awaiting_input(identity=identity, value="contact")
+        return _reply(client, event, text="Оставьте имя и удобный способ связи: @username, телефон или ссылку.")
+    if awaiting == "contact" and event.text.strip():
+        order = adapter.save_customer_contact(identity=identity, text=event.text)
+        return _reply(client, event, text=_summary_text(adapter.order_summary(order)), buttons=[[{"text": "✅ Подтвердить заказ", "payload": "order:confirm"}]])
     return None
 
 
@@ -225,7 +240,21 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
     identity = adapter.get_or_create_identity(event.user)
     payload = event.callback_payload
 
-    if payload.startswith("product:"):
+    if payload == "menu:main":
+        _send_main_menu(event, client=client)
+    elif payload == "menu:order":
+        _send_products(event, adapter=adapter, client=client)
+    elif payload == "menu:prices":
+        _reply(client, event, text=prices_text(telegram=False))
+    elif payload == "menu:examples":
+        _reply(client, event, text=EXAMPLES_TEXT)
+    elif payload == "menu:photos":
+        _reply(client, event, text=PHOTO_REQUIREMENTS)
+    elif payload == "menu:how":
+        _reply(client, event, text=ORDER_HOW_IT_WORKS)
+    elif payload == "menu:contact":
+        _reply(client, event, text=CONTACT_TEXT)
+    elif payload.startswith("product:"):
         product_code = payload.split(":", 1)[1]
         if not adapter.active_products().filter(code=product_code).exists():
             raise MaxFlowError("Product is unavailable")
@@ -237,7 +266,9 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
     elif payload.startswith("style:"):
         _, product_code, style_code = payload.split(":", 2)
         order = adapter.create_or_get_order(identity=identity, product_code=product_code, style_code=style_code)
-        if adapter.required_emotion_count(product=order.product):
+        if product_requires_custom_phrases(order.product):
+            _reply(client, event, text=PHOTO_PROMPT)
+        elif adapter.required_emotion_count(product=order.product):
             text, buttons = _emotion_step(adapter, order)
             _reply(client, event, text=text, buttons=buttons)
         else:
@@ -255,6 +286,18 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
         if order.photos.count() == 1:
             # soft reminder only — one photo is accepted (DRF-2090)
             _reply(client, event, text=SINGLE_PHOTO_REMINDER)
+        if product_requires_custom_phrases(order.product):
+            adapter.set_awaiting_input(identity=identity, value="phrases")
+            _reply(client, event, text="Напишите 9 желаемых фраз — по одной в каждой строке.")
+        elif product_requires_customer_contact(order.product):
+            adapter.set_awaiting_input(identity=identity, value="contact")
+            _reply(client, event, text="Оставьте имя и удобный способ связи: @username, телефон или ссылку.")
+        else:
+            _reply(client, event, text=CONSENT_TEXT, buttons=CONSENT_BUTTONS)
+    elif payload == "order:confirm":
+        order = adapter.current_photo_order(identity)
+        if not adapter.flow.customer_contact_complete(order):
+            raise MaxFlowError("A valid contact is required")
         _reply(client, event, text=CONSENT_TEXT, buttons=CONSENT_BUTTONS)
     elif payload == "consent:accept":
         order = adapter.accept_consent(identity=identity)

@@ -755,7 +755,7 @@ class PilotMatrixCrossChannelTests(PilotE2ECase):
             {ChannelIdentity.Channel.TELEGRAM, ChannelIdentity.Channel.MAX},
         )
         self.assertEqual(GeneratedAsset.objects.filter(kind=GeneratedAsset.Kind.FINAL).count(), 10)
-        self.assertEqual(Product.objects.filter(is_active=True).count(), 2)
+        self.assertEqual(Product.objects.filter(is_active=True).count(), 3)
 
         self.client.force_login(self.operator)
         response = self.client.get(reverse("admin:core_order_changelist"))
