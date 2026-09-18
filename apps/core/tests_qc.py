@@ -726,8 +726,8 @@ class QcConsoleTests(QcTestCase):
         response = self.client.get(reverse("admin:core_order_change", args=[order.pk]))
         self.assertEqual(response.status_code, 200)
         content = response.content.decode()
-        self.assertIn("Ожидается: 1 · Готово: 0", content)
-        self.assertIn("DELIVERY: заблокирован", content)
+        self.assertIn("Ожидается стикеров: 1 · Готово: 0", content)
+        self.assertIn("Доставка: заблокирована", content)
 
     def test_console_start_and_finalize_fail_flow(self):
         with tempfile.TemporaryDirectory() as root, override_settings(MEDIA_ROOT=Path(root)):
@@ -741,10 +741,10 @@ class QcConsoleTests(QcTestCase):
 
             finalize_url = reverse("admin:core_order_qc_finalize", args=[order.pk])
             self.assertEqual(self.client.get(finalize_url).status_code, 200)
-            # no final assets yet -> even a fully ticked checklist cannot PASS
+            # no final assets yet -> even an all-«Норма» checklist cannot PASS
             response = self.client.post(
                 finalize_url,
-                {criterion: "1" for criterion in HUMAN_CRITERIA},
+                {**{criterion: "ok" for criterion in HUMAN_CRITERIA}, "decision": "pass"},
                 follow=True,
             )
             self.assertEqual(response.status_code, 200)
@@ -771,9 +771,9 @@ class QcConsoleTests(QcTestCase):
             service.finalize_report(report=report, checklist=all_pass_checklist())
             response = self.client.get(reverse("admin:core_order_change", args=[order.pk]))
             content = response.content.decode()
-            self.assertIn("undecodable_image", content)
-            self.assertIn("Retry этот slot", content)
-            self.assertIn("DELIVERY: заблокирован", content)
+            self.assertIn("файл не читается", content)
+            self.assertIn("Доработать этот слот", content)
+            self.assertIn("Доставка: заблокирована", content)
 
             retry_url = reverse("admin:core_order_qc_retry", args=[order.pk, "wow"])
             self.assertEqual(self.client.get(retry_url).status_code, 200)

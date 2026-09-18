@@ -18,13 +18,13 @@ from apps.telegram_bot.preview_delivery import TelegramPreviewDeliveryAdapter
 
 
 class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
-    @admin.display(description="Preview assets")
+    @admin.display(description="Превью")
     def preview_assets(self, order):
         if not order or not order.pk:
             return "—"
         assets = order.generated_assets.filter(kind=GeneratedAsset.Kind.PREVIEW).order_by("-created_at")
         if not assets:
-            return "Preview assets пока нет."
+            return "Превью пока нет."
 
         rows = []
         for asset in assets:
@@ -37,29 +37,31 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
             action = ""
             if order.status == Order.Status.INTERNAL_PREVIEW_REVIEW and not approved:
                 action = format_html(
-                    ' · <a class="button" href="{}">Approve this preview</a>',
+                    ' · <a class="button" href="{}">Одобрить это превью</a>',
                     reverse("admin:core_order_approve_preview", args=[order.pk, asset.pk]),
                 )
             elif order.status == Order.Status.INTERNAL_PREVIEW_REVIEW and approved and not sent:
                 action = format_html(
-                    ' · <a class="button" href="{}">Deliver preview</a>',
+                    ' · <a class="button" href="{}">Отправить клиенту</a>',
                     reverse("admin:core_order_deliver_preview", args=[order.pk]),
                 )
             delivery_text = ""
             if sent:
                 latest = sent[-1]
-                delivery_text = f" · SENT {latest.get('channel')} message={latest.get('message_id') or '—'}"
+                delivery_text = f" · ОТПРАВЛЕНО ({latest.get('channel')}, сообщение {latest.get('message_id') or '—'})"
             elif failed:
                 latest = failed[-1]
-                delivery_text = f" · DELIVERY FAILED: {(latest.get('metadata') or {}).get('error', 'unknown error')}"
+                delivery_text = f" · СБОЙ ОТПРАВКИ: {(latest.get('metadata') or {}).get('error', 'неизвестная ошибка')}"
+            customer = " · КЛИЕНТ ОДОБРИЛ" if metadata.get("customer_approved") else ""
             rows.append(
                 format_html(
-                    '#{} · attempt {} · <a href="{}" target="_blank" rel="noopener">Открыть preview</a>{}{}{}',
+                    '#{} · попытка {} · <a href="{}" target="_blank" rel="noopener">Открыть</a>{}{}{}{}',
                     asset.pk,
                     asset.job.attempt,
                     open_url,
-                    " · APPROVED" if approved else "",
+                    " · ОДОБРЕНО" if approved else "",
                     delivery_text,
+                    customer,
                     action,
                 )
             )
@@ -106,15 +108,15 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
             return self._confirmation(
                 request,
                 order=order,
-                title=f"Approve preview #{asset.pk}",
+                title=f"Одобрить превью #{asset.pk}",
                 action_url=action_url,
-                detail="Asset будет отмечен как одобренный. PREVIEW_REVIEW начнётся только после успешной доставки клиенту.",
+                detail="Превью будет отмечено как одобренное. Клиент увидит его только после нажатия «Отправить превью клиенту».",
             )
         if order.status != Order.Status.INTERNAL_PREVIEW_REVIEW:
-            self.message_user(request, "Approve доступен только на internal preview review.", level=messages.ERROR)
+            self.message_user(request, "Одобрение доступно только на внутренней проверке превью.", level=messages.ERROR)
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if asset.job.status != GenerationJob.Status.SUCCEEDED:
-            self.message_user(request, "Нельзя одобрить asset от неуспешного generation job.", level=messages.ERROR)
+            self.message_user(request, "Нельзя одобрить превью от неуспешной генерации.", level=messages.ERROR)
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
         for previous in order.generated_assets.filter(kind=GeneratedAsset.Kind.PREVIEW):
@@ -133,7 +135,7 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
         metadata["internal_approved_at"] = timezone.now().isoformat()
         asset.metadata = metadata
         asset.save(update_fields=["metadata", "updated_at"])
-        self.message_user(request, f"Preview #{asset.pk} approved. Deliver it to start customer review.", level=messages.SUCCESS)
+        self.message_user(request, f"Превью #{asset.pk} одобрено. Теперь отправьте его клиенту.", level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
     def deliver_preview_view(self, request, order_id):
@@ -145,16 +147,16 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
             return self._confirmation(
                 request,
                 order=order,
-                title="Deliver approved preview",
+                title="Отправить превью клиенту",
                 action_url=action_url,
-                detail="Одобренный preview будет отправлен клиенту через исходный канал. После успешной отправки заказ перейдёт в PREVIEW_REVIEW.",
+                detail="Одобренное превью будет отправлено клиенту в канал заказа. После успешной отправки заказ перейдёт в «Ждём ответ клиента».",
             )
         try:
             asset = self.get_delivery_service(order).deliver(order=order)
         except PreviewDeliveryError as exc:
-            self.message_user(request, str(exc), level=messages.ERROR)
+            self._fail(request, exc)
         else:
-            self.message_user(request, f"Preview #{asset.pk} delivered successfully.", level=messages.SUCCESS)
+            self.message_user(request, f"Превью #{asset.pk} отправлено клиенту.", level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
 

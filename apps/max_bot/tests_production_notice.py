@@ -149,7 +149,7 @@ class ProductionNoticeConsoleTests(ProductionNoticeFixture):
     def test_first_start_sends_exactly_one_notice(self):
         messages = self._start()
 
-        self.assertTrue(messages[0].startswith("Full production plan:"), messages)
+        self.assertTrue(messages[0].startswith("Производство:"), messages)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PACK_GENERATING)
         self.assertEqual(len(self.max_client.sent), 1)
@@ -174,7 +174,7 @@ class ProductionNoticeConsoleTests(ProductionNoticeFixture):
         with self.assertLogs("apps.max_bot.production_notice", level="WARNING"):
             messages = self._start(max_client=failing)
 
-        self.assertTrue(messages[0].startswith("Full production plan:"), messages)
+        self.assertTrue(messages[0].startswith("Производство:"), messages)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PACK_GENERATING)
         self.assertEqual(GenerationJob.objects.filter(task_type=GenerationJob.TaskType.FULL).count(), 1)
@@ -193,7 +193,7 @@ class ProductionNoticeConsoleTests(ProductionNoticeFixture):
         messages = self._start()
 
         self.assertEqual(len(messages), 1)
-        self.assertFalse(messages[0].startswith("Full production plan:"), messages)
+        self.assertFalse(messages[0].startswith("Производство:"), messages)
         self.assertEqual(self.max_client.sent, [])
         self.assertEqual(self._notice(), {})
 
@@ -204,7 +204,7 @@ class ProductionNoticeTelegramTests(ProductionNoticeFixture):
     def test_telegram_order_gets_no_max_notice(self):
         messages = self._start()
 
-        self.assertTrue(messages[0].startswith("Full production plan:"), messages)
+        self.assertTrue(messages[0].startswith("Производство:"), messages)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.PACK_GENERATING)
         self.assertEqual(self.max_client.sent, [])

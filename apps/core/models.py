@@ -65,25 +65,25 @@ class Style(TimestampedModel):
 
 class Order(TimestampedModel):
     class Status(models.TextChoices):
-        DRAFT = "draft", "Draft"
-        AWAITING_PHOTOS = "awaiting_photos", "Awaiting photos"
-        READY_FOR_CHECKOUT = "ready_for_checkout", "Ready for checkout"
-        AWAITING_PAYMENT = "awaiting_payment", "Awaiting payment"
-        PAID = "paid", "Paid"
-        PREVIEW_GENERATING = "preview_generating", "Preview generating"
-        INTERNAL_PREVIEW_REVIEW = "internal_preview_review", "Internal preview review"
-        PREVIEW_REVIEW = "preview_review", "Preview review"
-        REVISION_REQUESTED = "revision_requested", "Revision requested"
-        REVISION_GENERATING = "revision_generating", "Revision generating"
-        PACK_GENERATING = "pack_generating", "Pack generating"
-        QUALITY_CONTROL = "quality_control", "Quality control"
-        READY_FOR_DELIVERY = "ready_for_delivery", "Ready for delivery"
+        DRAFT = "draft", "Черновик"
+        AWAITING_PHOTOS = "awaiting_photos", "Ждём фото"
+        READY_FOR_CHECKOUT = "ready_for_checkout", "Готов к оплате"
+        AWAITING_PAYMENT = "awaiting_payment", "Ждём оплату"
+        PAID = "paid", "Оплачен"
+        PREVIEW_GENERATING = "preview_generating", "Генерация превью"
+        INTERNAL_PREVIEW_REVIEW = "internal_preview_review", "Внутренняя проверка превью"
+        PREVIEW_REVIEW = "preview_review", "Ждём ответ клиента"
+        REVISION_REQUESTED = "revision_requested", "Правка запрошена"
+        REVISION_GENERATING = "revision_generating", "Генерация правки"
+        PACK_GENERATING = "pack_generating", "Производство"
+        QUALITY_CONTROL = "quality_control", "Контроль качества"
+        READY_FOR_DELIVERY = "ready_for_delivery", "Готов к доставке"
         # Final delivery (DRF-2053): entered from READY_FOR_DELIVERY (QC PASS,
         # DRF-2052); DELIVERED is terminal.
-        DELIVERY_IN_PROGRESS = "delivery_in_progress", "Delivery in progress"
-        DELIVERED = "delivered", "Delivered"
-        CANCELLED = "cancelled", "Cancelled"
-        FAILED = "failed", "Failed"
+        DELIVERY_IN_PROGRESS = "delivery_in_progress", "Доставка"
+        DELIVERED = "delivered", "Доставлен"
+        CANCELLED = "cancelled", "Отменён"
+        FAILED = "failed", "Ошибка"
 
     user = models.ForeignKey(User, on_delete=models.PROTECT, related_name="orders")
     channel_identity = models.ForeignKey(

@@ -96,17 +96,17 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         with self._patched():
             response = self.client.get(reverse("admin:core_order_change", args=[self.order.pk]))
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Deliver final set")
+        self.assertContains(response, "Отправить набор клиенту")
         self.assertContains(response, reverse("admin:core_order_deliver_final", args=[self.order.pk]))
-        self.assertNotContains(response, "Resume delivery")
-        self.assertContains(response, "hello · pending")
+        self.assertNotContains(response, "Продолжить доставку")
+        self.assertContains(response, "Слот «Label hello» · ожидает отправки")
 
     def test_deliver_requires_confirmation_then_sends_batch(self):
         url = reverse("admin:core_order_deliver_final", args=[self.order.pk])
         with self._patched():
             response = self.client.get(url)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Deliver final set")
+        self.assertContains(response, "Отправить набор клиенту")
         self.assertEqual(self.adapter.items, [])
 
         with self._patched():
@@ -115,10 +115,10 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         self.assertEqual(len(self.adapter.items), CONSOLE_MAX_ITEMS)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.DELIVERY_IN_PROGRESS)
-        self.assertContains(response, "Resume delivery")
-        self.assertContains(response, "hello · sent")
-        self.assertContains(response, "message=msg-1")
-        self.assertContains(response, "great · pending")
+        self.assertContains(response, "Продолжить доставку")
+        self.assertContains(response, "Слот «Label hello» · отправлен")
+        self.assertContains(response, "сообщение msg-1")
+        self.assertContains(response, "Слот «Label great» · ожидает отправки")
 
     def test_resume_completes_delivery_without_duplicates(self):
         deliver_url = reverse("admin:core_order_deliver_final", args=[self.order.pk])
@@ -134,9 +134,9 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         self.assertEqual(len(self.adapter.summaries), 1)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.DELIVERED)
-        self.assertContains(response, "Final set delivered")
-        self.assertNotContains(response, "Resume delivery")
-        self.assertNotContains(response, "Deliver final set")
+        self.assertContains(response, "Набор доставлен клиенту")
+        self.assertNotContains(response, "Продолжить доставку")
+        self.assertNotContains(response, "Отправить набор клиенту")
 
     def test_failed_slot_is_reported_and_resume_retries_only_it(self):
         self.adapter.fail_slots = {"bye"}
@@ -145,16 +145,16 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         resume_url = reverse("admin:core_order_resume_final_delivery", args=[self.order.pk])
         with self._patched():
             response = self.client.post(deliver_url, follow=True)
-        self.assertContains(response, "bye · failed")
-        self.assertContains(response, "retryable: send failed for bye")
-        self.assertContains(response, "сбой на slots bye")
+        self.assertContains(response, "Слот «Label bye» · сбой")
+        self.assertContains(response, "временный сбой: send failed for bye")
+        self.assertContains(response, "сбой на слотах «Label bye»")
         self.assertEqual(len(self.adapter.items), 2)
 
         with self._patched():
             response = self.client.post(resume_url, follow=True)
         sent = [item["filename"].split("-", 2)[2].rsplit(".", 1)[0] for item in self.adapter.items]
         self.assertEqual(sent, ["hello", "thanks", "bye", "great", "no"])
-        self.assertContains(response, "bye · sent")
+        self.assertContains(response, "Слот «Label bye» · отправлен")
         self.assertEqual(FinalDelivery.objects.filter(order=self.order).count(), 2)
 
     def test_deliver_is_rejected_outside_ready_for_delivery(self):
@@ -164,7 +164,7 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         with self._patched():
             response = self.client.post(url, follow=True)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "только из READY_FOR_DELIVERY")
+        self.assertContains(response, "только из статуса «Готов к доставке»")
         self.assertEqual(self.adapter.items, [])
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.QUALITY_CONTROL)
@@ -173,22 +173,22 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         url = reverse("admin:core_order_resume_final_delivery", args=[self.order.pk])
         with self._patched():
             response = self.client.post(url, follow=True)
-        self.assertContains(response, "use deliver()")
+        self.assertContains(response, "Доставка ещё не начиналась")
         self.assertEqual(self.adapter.items, [])
 
     def test_incomplete_set_is_shown_and_blocks_delivery(self):
         GeneratedAsset.objects.filter(order=self.order, slot_key="laugh").delete()
         with self._patched():
             response = self.client.get(reverse("admin:core_order_change", args=[self.order.pk]))
-        self.assertContains(response, "laugh · pending · NO CURRENT ASSET")
+        self.assertContains(response, "Слот «Label laugh» · ожидает отправки · НЕТ ГОТОВОГО ФАЙЛА")
         # The QC PASS no longer matches the set, so no action is offered ...
-        self.assertContains(response, "QC gate:")
+        self.assertContains(response, "Контроль качества:</strong> доставка заблокирована")
         self.assertNotContains(response, reverse("admin:core_order_deliver_final", args=[self.order.pk]))
         # ... and a direct POST is rejected by the gate before any send.
         url = reverse("admin:core_order_deliver_final", args=[self.order.pk])
         with self._patched():
             response = self.client.post(url, follow=True)
-        self.assertContains(response, "changed after QC PASS")
+        self.assertContains(response, "изменился после QC")
         self.assertEqual(self.adapter.items, [])
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, READY_FOR_DELIVERY)
@@ -199,12 +199,12 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         deliver_url = reverse("admin:core_order_deliver_final", args=[self.order.pk])
         with self._patched():
             response = self.client.get(change_url)
-        self.assertContains(response, "QC gate:")
-        self.assertContains(response, "DELIVERY: заблокирован")  # QC panel, inherited
+        self.assertContains(response, "Контроль качества:</strong> доставка заблокирована")
+        self.assertContains(response, "Доставка: заблокирована")  # QC panel, inherited
         self.assertNotContains(response, deliver_url)
         with self._patched():
             response = self.client.post(deliver_url, follow=True)
-        self.assertContains(response, "no passed QC report")
+        self.assertContains(response, "нет пройденного QC-отчёта")
         self.assertEqual(self.adapter.items, [])
         self.assertFalse(FinalDelivery.objects.filter(order=self.order).exists())
         self.order.refresh_from_db()
@@ -238,10 +238,12 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         self.assertEqual(
             sum(1 for model in admin.site._registry if model is Order), 1
         )
-        self.assertIn("qc_panel", registered.fields)
-        self.assertIn("final_delivery_panel", registered.fields)
-        self.assertIn("qc_panel", registered.readonly_fields)
-        self.assertIn("final_delivery_panel", registered.readonly_fields)
+        readonly = registered.get_readonly_fields(None)
+        fieldset_fields = [f for _t, opts in registered.get_fieldsets(None) for f in opts["fields"]]
+        self.assertIn("qc_panel", fieldset_fields)
+        self.assertIn("final_delivery_panel", fieldset_fields)
+        self.assertIn("qc_panel", readonly)
+        self.assertIn("final_delivery_panel", readonly)
 
     def test_qc_and_delivery_actions_coexist_on_change_page(self):
         # QC URLs (DRF-2052) and delivery URLs (DRF-2053) resolve side by side.
@@ -257,9 +259,9 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         self.assertTrue(all(qc_urls) and all(delivery_urls))
         with self._patched():
             response = self.client.get(reverse("admin:core_order_change", args=[self.order.pk]))
-        self.assertContains(response, "QC — финальные стикеры")
-        self.assertContains(response, "DELIVERY: разрешён (QC PASS)")
-        self.assertContains(response, "Final delivery — набор клиенту")
+        self.assertContains(response, "Контроль качества")
+        self.assertContains(response, "Доставка: разрешена (QC пройден)")
+        self.assertContains(response, "Доставка набора клиенту")
         self.assertContains(response, delivery_urls[0])
 
     def test_qc_start_action_still_works_through_delivery_admin(self):
@@ -270,14 +272,14 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         with self._patched():
             response = self.client.get(reverse("admin:core_order_change", args=[self.order.pk]))
         self.assertContains(response, reverse("admin:core_order_qc_start", args=[self.order.pk]))
-        self.assertContains(response, "Открыть QC report")
-        self.assertContains(response, "Доставка доступна после QC PASS")
+        self.assertContains(response, "Открыть QC-отчёт")
+        self.assertContains(response, "Доставка станет доступна после прохождения контроля качества")
         self.assertNotContains(response, reverse("admin:core_order_deliver_final", args=[self.order.pk]))
         with self._patched():
             response = self.client.post(
                 reverse("admin:core_order_qc_start", args=[self.order.pk]), follow=True
             )
-        self.assertContains(response, "QC attempt 1 открыт")
+        self.assertContains(response, "QC-попытка 1 открыта")
         self.assertEqual(QcReport.objects.filter(order=self.order).count(), 1)
 
     def test_quantity_mismatch_is_shown_as_set_error(self):
@@ -286,7 +288,7 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
         with self._patched():
             response = self.client.get(reverse("admin:core_order_change", args=[self.order.pk]))
         self.assertContains(response, "Ошибка набора")
-        self.assertContains(response, "does not match product quantity 9")
+        self.assertContains(response, "не совпадает с количеством стикеров в продукте (9)")
 
     @patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": "1:test", "MAX_BOT_TOKEN": "max-test"})
     def test_channel_routing_builds_matching_adapter(self):

@@ -621,7 +621,10 @@ class PilotE2ECase(TestCase):
             for name in AUTOMATED_CHECKS:
                 if name != "expected_count":
                     self.assertTrue(checks[slot][name], f"{slot}:{name}")
-        self._console("core_order_qc_finalize", order.pk, data={c: "on" for c in HUMAN_CRITERIA})
+        self._console(
+            "core_order_qc_finalize", order.pk,
+            data={**{c: "ok" for c in HUMAN_CRITERIA}, "decision": "pass"},
+        )
         report.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual(report.status, QcReport.Status.PASSED)

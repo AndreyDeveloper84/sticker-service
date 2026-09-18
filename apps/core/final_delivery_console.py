@@ -7,6 +7,13 @@ from django.urls import path, reverse
 from django.utils.html import format_html
 
 from apps.core.console_html import buttons_html, lines_html
+from apps.core.console_text import (
+    DELIVERY_FAILURE_CLASSES,
+    DELIVERY_SLOT_STATES,
+    humanize_error,
+    label,
+    slot_title,
+)
 from apps.core.models import Order
 from apps.core.qc_console import QcOrderAdmin
 from apps.core.services.final_delivery import (
@@ -33,8 +40,27 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
     class only adds the delivery panel and its two operator actions.
     """
 
-    readonly_fields = QcOrderAdmin.readonly_fields + ("final_delivery_panel",)
-    fields = QcOrderAdmin.fields + ("final_delivery_panel",)
+    panel_sections = QcOrderAdmin.panel_sections + (("Доставка", "final_delivery_panel"),)
+
+    def secondary_links(self, order):
+        links = super().secondary_links(order)
+        if order.status == Order.Status.DELIVERY_IN_PROGRESS and self._gate_open(order):
+            links.append(
+                (
+                    "Продолжить доставку",
+                    reverse("admin:core_order_resume_final_delivery", args=[order.pk]),
+                    f"Досылает только ещё не отправленные стикеры (до {CONSOLE_MAX_ITEMS} за нажатие); "
+                    "уже отправленные не дублируются.",
+                )
+            )
+        return links
+
+    def _gate_open(self, order):
+        try:
+            self.get_qc_service().assert_delivery_allowed(order=order)
+        except QcError:
+            return False
+        return True
 
     def get_final_delivery_service(self, order):
         if order.channel_identity.channel == "telegram":
@@ -49,7 +75,7 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
             raise FinalDeliveryError("Unsupported delivery channel")
         return FinalDeliveryService(adapter=adapter)
 
-    @admin.display(description="Final delivery — набор клиенту")
+    @admin.display(description="Доставка набора клиенту")
     def final_delivery_panel(self, order):
         if not order or not order.pk:
             return "—"
@@ -58,12 +84,12 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
             Order.Status.DELIVERY_IN_PROGRESS,
             Order.Status.DELIVERED,
         } and not order.final_deliveries.exists():
-            return "Доставка доступна после QC PASS (READY_FOR_DELIVERY)."
+            return "Доставка станет доступна после прохождения контроля качества."
         service = self.get_final_delivery_service(order)
         try:
             plan = service.delivery_plan(order)
         except FinalDeliveryError as exc:
-            return format_html("<strong>Ошибка набора:</strong> {}", str(exc))
+            return format_html("<strong>Ошибка набора:</strong> {}", humanize_error(exc))
 
         gate_blocked = ""
         if order.status != Order.Status.DELIVERED:
@@ -77,43 +103,54 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
             pass  # no send action is offered while the QC gate rejects the set
         elif order.status == Order.Status.READY_FOR_DELIVERY:
             actions.append(
-                (reverse("admin:core_order_deliver_final", args=[order.pk]), "Deliver final set")
+                (reverse("admin:core_order_deliver_final", args=[order.pk]), "Отправить набор клиенту")
             )
         elif order.status == Order.Status.DELIVERY_IN_PROGRESS:
             actions.append(
                 (
                     reverse("admin:core_order_resume_final_delivery", args=[order.pk]),
-                    "Resume delivery",
+                    "Продолжить доставку",
                 )
             )
         lines = [
             format_html(
-                "<strong>Runs: {} · Summary message: {}</strong>",
+                "<strong>Запусков доставки: {} · Финальное сообщение: {}</strong>",
                 plan.attempts,
-                plan.summary_status,
+                label(DELIVERY_SLOT_STATES, plan.summary_status),
             )
         ]
         if gate_blocked:
-            lines.append(format_html("<strong>QC gate:</strong> заблокирован ({})", gate_blocked))
+            lines.append(
+                format_html(
+                    "<strong>Контроль качества:</strong> доставка заблокирована ({})",
+                    humanize_error(QcError(gate_blocked)),
+                )
+            )
         for slot in plan.slots:
             if slot.asset_id:
                 asset_link = format_html(
-                    ' · <a href="{}" target="_blank" rel="noopener">asset #{}</a>',
-                    reverse("admin:core_preview_asset_file", args=[slot.asset_id]),
+                    ' · файл #{} · <a href="{}" target="_blank" rel="noopener">Открыть</a>',
                     slot.asset_id,
+                    reverse("admin:core_preview_asset_file", args=[slot.asset_id]),
                 )
             else:
-                asset_link = " · NO CURRENT ASSET (set incomplete)"
+                asset_link = " · НЕТ ГОТОВОГО ФАЙЛА (набор неполный)"
             detail = ""
             if slot.status == "sent":
-                detail = f" · message={slot.message_id or '—'} · run {slot.attempt}"
+                detail = f" · сообщение {slot.message_id or '—'} · запуск {slot.attempt}"
             elif slot.status == "failed":
                 detail = (
-                    f" · {slot.failure_class or 'failed'}: {slot.error or 'unknown error'}"
-                    f" · run {slot.attempt}"
+                    f" · {label(DELIVERY_FAILURE_CLASSES, slot.failure_class, 'сбой')}: "
+                    f"{slot.error or 'неизвестная ошибка'} · запуск {slot.attempt}"
                 )
             lines.append(
-                format_html("{} · {}{}{}", slot.slot_key, slot.status, asset_link, detail)
+                format_html(
+                    "Слот {} · {}{}{}",
+                    slot_title(order, slot.slot_key),
+                    label(DELIVERY_SLOT_STATES, slot.status),
+                    asset_link,
+                    detail,
+                )
             )
         if actions:
             lines.append(
@@ -137,18 +174,26 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
         return custom + super().get_urls()
 
     @staticmethod
-    def _delivery_plan_message(plan) -> str:
-        summary = ", ".join(f"{slot.slot_key}: {slot.status}" for slot in plan.slots)
+    def _delivery_plan_message(plan, order=None) -> str:
+        def name(key):
+            return slot_title(order, key) if order is not None else key
+
+        summary = ", ".join(
+            f"{name(slot.slot_key)}: {label(DELIVERY_SLOT_STATES, slot.status)}" for slot in plan.slots
+        )
         if plan.complete:
-            return f"Final set delivered: {summary}"
-        failed = [slot.slot_key for slot in plan.slots if slot.status == "failed"]
-        hint = " — запустите Resume delivery, чтобы дослать оставшиеся стикеры."
+            return f"Набор доставлен клиенту: {summary}"
+        failed = [name(slot.slot_key) for slot in plan.slots if slot.status == "failed"]
+        hint = " — нажмите «Продолжить доставку», чтобы дослать оставшиеся стикеры."
         if failed:
             hint = (
-                f" — сбой на slots {', '.join(failed)}; проверьте причину и "
-                "запустите Resume delivery (уже отправленные не дублируются)."
+                f" — сбой на слотах {', '.join(failed)}; проверьте причину и "
+                "нажмите «Продолжить доставку» (уже отправленные не дублируются)."
             )
-        return f"Delivery plan: {summary}; summary message: {plan.summary_status}{hint}"
+        return (
+            f"Доставка: {summary}; финальное сообщение: "
+            f"{label(DELIVERY_SLOT_STATES, plan.summary_status)}{hint}"
+        )
 
     def deliver_final_view(self, request, order_id):
         order = self.get_object(request, str(order_id))
@@ -159,19 +204,19 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
             return self._confirmation(
                 request,
                 order=order,
-                title="Deliver final set",
+                title="Отправить набор клиенту",
                 action_url=action_url,
                 detail=(
-                    "Финальные стикеры будут отправлены клиенту в канал заказа в "
-                    f"порядке выбора эмоций (до {CONSOLE_MAX_ITEMS} за запуск). "
-                    "Заказ перейдёт в DELIVERY_IN_PROGRESS и станет DELIVERED, "
+                    "Готовые стикеры будут отправлены клиенту в канал заказа в "
+                    f"порядке выбора эмоций (до {CONSOLE_MAX_ITEMS} за нажатие). "
+                    "Заказ перейдёт в «Доставка» и станет «Доставлен», "
                     "когда отправлен весь набор и финальное сообщение."
                 ),
             )
         if order.status != Order.Status.READY_FOR_DELIVERY:
             self.message_user(
                 request,
-                "Deliver final set доступен только из READY_FOR_DELIVERY.",
+                "Отправка набора доступна только из статуса «Готов к доставке».",
                 level=messages.ERROR,
             )
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
@@ -180,9 +225,9 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
                 order=order, max_items=CONSOLE_MAX_ITEMS
             )
         except FinalDeliveryError as exc:
-            self.message_user(request, str(exc), level=messages.ERROR)
+            self._fail(request, exc)
         else:
-            self.message_user(request, self._delivery_plan_message(plan), level=messages.SUCCESS)
+            self.message_user(request, self._delivery_plan_message(plan, order), level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
     def resume_final_delivery_view(self, request, order_id):
@@ -194,11 +239,11 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
             return self._confirmation(
                 request,
                 order=order,
-                title="Resume final delivery",
+                title="Продолжить доставку",
                 action_url=action_url,
                 detail=(
                     "Будут отправлены только ещё не доставленные стикеры "
-                    f"(до {CONSOLE_MAX_ITEMS} за запуск); уже отправленные "
+                    f"(до {CONSOLE_MAX_ITEMS} за нажатие); уже отправленные "
                     "клиенту не дублируются."
                 ),
             )
@@ -207,9 +252,9 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
                 order=order, max_items=CONSOLE_MAX_ITEMS
             )
         except FinalDeliveryError as exc:
-            self.message_user(request, str(exc), level=messages.ERROR)
+            self._fail(request, exc)
         else:
-            self.message_user(request, self._delivery_plan_message(plan), level=messages.SUCCESS)
+            self.message_user(request, self._delivery_plan_message(plan, order), level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
 

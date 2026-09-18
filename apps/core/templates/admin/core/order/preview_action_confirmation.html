@@ -1,15 +1,23 @@
 {% extends "admin/base_site.html" %}
 {% block content %}
   <div id="content-main">
-    <p><strong>Order #{{ order.pk }}</strong> · {{ order.get_status_display }}</p>
+    <p><strong>Заказ #{{ order.pk }}</strong> · {{ order.get_status_display }}</p>
     <p>{{ detail }}</p>
+    {% if warning %}
+      <p style="color:#8a5a00"><strong>Внимание:</strong> {{ warning }}</p>
+    {% endif %}
     <form method="post" action="{{ action_url }}">
       {% csrf_token %}
       {% if slot_input %}
         <p>
-          <label for="slot_keys">Slot keys (через запятую):</label>
+          <label for="slot_keys">Слоты для перегенерации (коды эмоций через запятую):</label>
           <input type="text" id="slot_keys" name="slot_keys" value="{{ slot_keys_value }}" size="40">
         </p>
+        {% if slot_options %}
+          <p>Слоты заказа:
+            {% for code, title in slot_options %}<code>{{ code }}</code> — {{ title }}{% if not forloop.last %}, {% endif %}{% endfor %}
+          </p>
+        {% endif %}
       {% endif %}
       <input type="submit" value="Подтвердить">
       <a href="{% url 'admin:core_order_change' order.pk %}">Отмена</a>

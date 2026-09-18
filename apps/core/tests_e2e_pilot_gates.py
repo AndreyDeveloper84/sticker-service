@@ -216,7 +216,10 @@ class PilotNegativeGateTests(PilotE2ECase):
         self.assertTrue(checks["dimensions"])
         self.assertFalse(checks["alpha_channel"])
         self.assertTrue(checks["decodable"])
-        self._console("core_order_qc_finalize", order.pk, data={c: "on" for c in HUMAN_CRITERIA})
+        self._console(
+            "core_order_qc_finalize", order.pk,
+            data={**{c: "ok" for c in HUMAN_CRITERIA}, "decision": "pass"},
+        )
         report.refresh_from_db()
         order.refresh_from_db()
         self.assertEqual(report.status, QcReport.Status.FAILED)
@@ -237,8 +240,9 @@ class PilotNegativeGateTests(PilotE2ECase):
         self._console("core_order_qc_start", order.pk)
         second = QcReport.objects.get(order=order, attempt=2)
         self.assertTrue(all(second.automated_checks["laugh"][k] for k in second.automated_checks["laugh"] if k != "asset_id"))
-        checklist = {c: "on" for c in HUMAN_CRITERIA}
-        checklist.pop("likeness_face")
+        checklist = {c: "ok" for c in HUMAN_CRITERIA}
+        checklist["likeness_face"] = "defect"
+        checklist["decision"] = "fail"
         self._console("core_order_qc_finalize", order.pk, data=checklist)
         second.refresh_from_db()
         order.refresh_from_db()

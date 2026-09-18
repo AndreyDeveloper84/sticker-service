@@ -130,10 +130,10 @@ class RegisteredAdminProductionActionsTests(TestCase):
         for step in range(1, 4):
             messages = self._post(url)
             self.assertEqual(len(messages), 1, f"slot {step}")
-            self.assertTrue(messages[0].startswith("Full production plan:"), messages[0])
+            self.assertTrue(messages[0].startswith("Производство:"), messages[0])
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.QUALITY_CONTROL)
-        self.assertIn("e0: succeeded, e1: succeeded, e2: succeeded", messages[0])
+        self.assertIn("«E0»: готов, «E1»: готов, «E2»: готов", messages[0])
 
     def test_retry_and_regenerate_through_registered_admin_do_not_crash(self):
         self._post(reverse("admin:core_order_start_full_production", args=[self.order.pk]))
@@ -158,7 +158,7 @@ class RegisteredAdminProductionActionsTests(TestCase):
         with patch.object(FinalDeliveryOrderAdmin, "get_final_delivery_service", return_value=service):
             messages = self._post(reverse("admin:core_order_deliver_final", args=[self.order.pk]))
         self.assertEqual(len(messages), 1)
-        self.assertTrue(messages[0].startswith("Final set delivered:"), messages[0])
+        self.assertTrue(messages[0].startswith("Набор доставлен клиенту:"), messages[0])
         self.assertEqual(len(adapter.items), 3)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.DELIVERED)

@@ -169,4 +169,4 @@ class ProductionConsolePreviewTests(TestCase):
             reverse("admin:core_order_change", args=[self.order.pk])
         )
         self.assertContains(response, "provider exploded")
-        self.assertContains(response, "Failed")
+        self.assertContains(response, "ошибка")

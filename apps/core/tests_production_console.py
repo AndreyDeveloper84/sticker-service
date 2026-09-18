@@ -51,17 +51,21 @@ class ProductionConsoleTests(TestCase):
         )
 
         response = self.client.get(reverse("admin:core_order_changelist"))
-        self.assertContains(response, f"Order #{telegram_order.pk}")
-        self.assertContains(response, f"Order #{max_order.pk}")
+        self.assertContains(response, f">#{telegram_order.pk}<")
+        self.assertContains(response, f">#{max_order.pk}<")
         self.assertContains(response, "Telegram")
         self.assertContains(response, "MAX")
+        # Russian column headers and status badge (DRF-2084)
+        for header in ("Канал", "Клиент", "Статус", "Продукт", "Стиль"):
+            self.assertContains(response, header)
+        self.assertContains(response, "Ждём фото")
 
         response = self.client.get(
             reverse("admin:core_order_changelist"),
-            {"channel_identity__channel__exact": ChannelIdentity.Channel.MAX},
+            {"channel": ChannelIdentity.Channel.MAX},
         )
-        self.assertNotContains(response, f"Order #{telegram_order.pk}")
-        self.assertContains(response, f"Order #{max_order.pk}")
+        self.assertNotContains(response, f">#{telegram_order.pk}<")
+        self.assertContains(response, f">#{max_order.pk}<")
 
     def test_order_card_shows_source_photo_and_controlled_file_link(self):
         order = self._order(
