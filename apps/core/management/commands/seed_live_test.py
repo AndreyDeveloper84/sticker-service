@@ -1,11 +1,17 @@
 from django.core.management.base import BaseCommand
 
 from apps.core.models import Product, Style
+from apps.core.services.generation_prompts import FULL_DEFAULT_PROMPT
 
 
 # Deterministic pilot emotion set (00-product/product-catalog.md, Standard Pack).
 # Codes are the canonical identifiers stored in Order.selection["emotions"];
 # labels are user-facing and safe to change without data migration.
+LEGACY_COMIC_PROMPT = (
+    "Use a friendly modern comic illustration style with clear contours, expressive but natural features, "
+    "and strong likeness to the reference person."
+)
+
 PILOT_EMOTIONS = [
     {"code": "hello", "label": "Привет"},
     {"code": "bye", "label": "Пока"},
@@ -24,13 +30,9 @@ GENERATION_PROMPT = (
     "Use a clean sticker composition suitable for messaging apps."
 )
 # FULL production wording (DRF-2080): "final sticker", never "preview".
-FULL_GENERATION_PROMPT = (
-    "Create one polished personalized final sticker of the person shown in the reference photos. "
-    "Preserve the person's recognizable facial identity, key hairstyle, and distinctive features. "
-    "Use a clean sticker composition with an isolated subject suitable for messaging apps. "
-    "Use a transparent background, keep the entire head, hairstyle, hands and any lettering inside the canvas, "
-    "and add a neat white outline around the sticker."
-)
+# Single source: generation_prompts.FULL_DEFAULT_PROMPT (incl. output
+# requirements) — the seed only pins it into product config.
+FULL_GENERATION_PROMPT = FULL_DEFAULT_PROMPT
 
 # Pricing (DRF-2057): price_minor/currency is the RUB price used by the
 # MAX/YooKassa path; price_stars is the Telegram Stars (XTR) price used by the
@@ -39,7 +41,7 @@ FULL_GENERATION_PROMPT = (
 PILOT_PRODUCTS = [
     {
         "code": "sticker-pack-9-custom",
-        "name": "9 стикеров с надписями — 800 ₽",
+        "name": "9 стикеров с надписями",
         "config": {
             "kind": "custom_pack",
             "quantity": 9,
@@ -53,14 +55,13 @@ PILOT_PRODUCTS = [
             "price_minor": 80000,
             "price_stars": 736,
             "currency": "RUB",
-            "requires_customer_contact": True,
             "generation_prompt": GENERATION_PROMPT,
             "full_generation_prompt": FULL_GENERATION_PROMPT,
         },
     },
     {
         "code": "sticker-pack-9",
-        "name": "Стикерпак — 9 стикеров",
+        "name": "9 стикеров без надписей",
         "config": {
             "kind": "pack",
             "quantity": 9,
@@ -76,7 +77,7 @@ PILOT_PRODUCTS = [
     },
     {
         "code": "single-sticker",
-        "name": "Один стикер",
+        "name": "1 стикер",
         "config": {
             "kind": "single",
             "quantity": 1,
@@ -85,6 +86,7 @@ PILOT_PRODUCTS = [
             "price_minor": 10000,
             "price_stars": 100,
             "currency": "RUB",
+            "requires_customer_contact": True,
             "generation_prompt": GENERATION_PROMPT,
             "full_generation_prompt": FULL_GENERATION_PROMPT,
         },
@@ -117,7 +119,7 @@ class Command(BaseCommand):
             ("drawn", "Рисованные", "Use a warm hand-drawn illustration style with clean expressive lines and strong likeness."),
             ("meme", "Мемные", "Use a clear, funny meme-sticker style; keep the expression readable and the person recognizable."),
             ("embroidery", "Вышивка", "Use a tactile embroidered-patch style with visible thread texture and strong likeness."),
-            ("comic", "Помогите выбрать", "Choose the most suitable friendly modern illustration style for the supplied photos, with clear contours and strong likeness."),
+            ("help-choose", "Помогите выбрать", "Choose the most suitable friendly modern illustration style for the supplied photos, with clear contours and strong likeness."),
         ]
         style_codes = []
         for code, name, prompt in styles:
@@ -126,6 +128,13 @@ class Command(BaseCommand):
                 defaults={"name": name, "is_active": True, "config": {"prompt": prompt}},
             )
             style_codes.append(style.code)
+        # Legacy pilot style: Orders 11–13 reference it (FK PROTECT), so it is
+        # kept with its original name and only hidden from the selectors —
+        # never renamed into "Помогите выбрать".
+        Style.objects.get_or_create(
+            code="comic",
+            defaults={"name": "Комикс", "is_active": False, "config": {"prompt": LEGACY_COMIC_PROMPT}},
+        )
         Style.objects.exclude(code__in=style_codes).update(is_active=False)
         self.stdout.write(
             self.style.SUCCESS(

@@ -19,7 +19,10 @@ from apps.core.services.generation_prompts import (
     FRAMING_CLAUSE,
     FULL_DEFAULT_PROMPT,
     SAFE_FOR_WORK_CLAUSE,
+    custom_phrase_for_slot,
     emotion_label,
+    is_custom_slot,
+    render_caption,
     render_expression,
     render_reference_roles,
 )
@@ -472,19 +475,26 @@ class FullProductionService:
             order.photos.exclude(status=OrderPhoto.Status.REJECTED).order_by("created_at", "pk")
         )
         preview = GeneratedAsset.objects.get(pk=meta["source_preview_id"])
+        # Custom-caption slot: the customer's phrase is rendered as a caption
+        # instruction (never as an emotion "Expression:"); a custom slot
+        # without a phrase fails closed before any billable call.
+        phrase = custom_phrase_for_slot(order, slot_key)
+        if is_custom_slot(slot_key):
+            if not phrase:
+                raise FullProductionError(
+                    f"Order #{order.pk} slot {slot_key} has no customer phrase"
+                )
+            slot_line = render_caption(phrase)
+            label = phrase
+        else:
+            slot_line = render_expression(order.product, slot_key)
+            label = emotion_label(order.product, slot_key)
         prompt_parts = [
             str(product_config.get("full_generation_prompt") or FULL_DEFAULT_PROMPT),
             str(style_config.get("prompt") or f"Use the {order.style.name} style."),
             SAFE_FOR_WORK_CLAUSE,
             FRAMING_CLAUSE,
-            render_expression(
-                order.product,
-                slot_key,
-                label_override=(order.selection or {}).get("custom_phrases", [])[int(slot_key.rsplit("-", 1)[-1]) - 1]
-                if slot_key.startswith("custom-") and slot_key.rsplit("-", 1)[-1].isdigit()
-                and len((order.selection or {}).get("custom_phrases", [])) >= int(slot_key.rsplit("-", 1)[-1])
-                else "",
-            ),
+            slot_line,
             render_reference_roles(photo_count=len(photos), has_preview=True),
         ]
         if order.customer_notes.strip():
@@ -516,14 +526,6 @@ class FullProductionService:
         reference_order.append(f"preview:{preview.pk}")
 
         # Live evidence: persist exactly what the model received.
-        label = emotion_label(
-            order.product,
-            slot_key,
-            label_override=(order.selection or {}).get("custom_phrases", [])[int(slot_key.rsplit("-", 1)[-1]) - 1]
-            if slot_key.startswith("custom-") and slot_key.rsplit("-", 1)[-1].isdigit()
-            and len((order.selection or {}).get("custom_phrases", [])) >= int(slot_key.rsplit("-", 1)[-1])
-            else "",
-        )
         job.input_metadata = {
             **(job.input_metadata or {}),
             "emotion_label": label,

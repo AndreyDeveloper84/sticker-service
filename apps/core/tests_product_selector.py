@@ -243,4 +243,16 @@ class PilotSeedTests(TestCase):
         self.assertEqual(single.config["price_minor"], 10000)
         self.assertEqual(single.config["price_stars"], 100)
 
-        self.assertEqual(set(Style.objects.filter(is_active=True).values_list("code", flat=True)), {"3d", "drawn", "meme", "embroidery", "comic"})
+        self.assertEqual(
+            set(Style.objects.filter(is_active=True).values_list("code", flat=True)),
+            {"3d", "drawn", "meme", "embroidery", "help-choose"},
+        )
+        self.assertEqual(Style.objects.get(code="help-choose").name, "Помогите выбрать")
+        # Legacy comic style stays for historical orders, inactive and NOT renamed.
+        comic = Style.objects.get(code="comic")
+        self.assertFalse(comic.is_active)
+        self.assertEqual(comic.name, "Комикс")
+        # Names carry no price (bots render price from config); contact for all three.
+        self.assertEqual([p.name for p in active], ["9 стикеров с надписями", "9 стикеров без надписей", "1 стикер"])
+        self.assertTrue(all(p.config["requires_customer_contact"] for p in active))
+        self.assertIn("transparent background", custom.config["full_generation_prompt"])
