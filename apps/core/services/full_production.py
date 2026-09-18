@@ -12,11 +12,12 @@ from apps.core.image_providers import (
     ImageGenerationRequest,
     ImageProvider,
     ReferenceImage,
-    classify_provider_failure,
+    describe_provider_failure,
 )
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Payment
 from apps.core.services.generation_prompts import (
     FULL_DEFAULT_PROMPT,
+    SAFE_FOR_WORK_CLAUSE,
     emotion_label,
     render_expression,
     render_reference_roles,
@@ -473,6 +474,7 @@ class FullProductionService:
         prompt_parts = [
             str(product_config.get("full_generation_prompt") or FULL_DEFAULT_PROMPT),
             str(style_config.get("prompt") or f"Use the {order.style.name} style."),
+            SAFE_FOR_WORK_CLAUSE,
             render_expression(order.product, slot_key),
             render_reference_roles(photo_count=len(photos), has_preview=True),
         ]
@@ -568,9 +570,7 @@ class FullProductionService:
             return
         locked_job.status = GenerationJob.Status.FAILED
         locked_job.error = str(exc)[:4000]
-        locked_job.output_metadata = {
-            "failure_class": classify_provider_failure(self.provider, exc)
-        }
+        locked_job.output_metadata = describe_provider_failure(self.provider, exc)
         locked_job.finished_at = timezone.now()
         locked_job.save(
             update_fields=["status", "error", "output_metadata", "finished_at", "updated_at"]

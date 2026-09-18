@@ -12,6 +12,14 @@ from __future__ import annotations
 from apps.core.models import Product
 from apps.core.services.channel_order_flow import product_emotion_options
 
+# Safe-for-work guard appended to every preview / revision / FULL prompt
+# (DRF-2089): the output-stage moderation rejected 3/3 renders of an
+# ordinary customer photo; the prompt now states the intended register.
+SAFE_FOR_WORK_CLAUSE = (
+    "Fully clothed character, neutral non-suggestive pose, family-friendly "
+    "messenger sticker."
+)
+
 FULL_DEFAULT_PROMPT = (
     "Create one polished personalized final sticker of the person shown in the "
     "reference photos. Preserve the person's recognizable facial identity, key "

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import timedelta
 from io import BytesIO
 from uuid import uuid4
 
@@ -7,15 +8,32 @@ from django.db import transaction
 from django.db.models import Max
 from django.utils import timezone
 
-from apps.core.image_providers import ImageGenerationRequest, ImageProvider, ReferenceImage
+from apps.core.image_providers import (
+    ImageGenerationRequest,
+    ImageProvider,
+    ReferenceImage,
+    describe_provider_failure,
+)
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
+from apps.core.services.generation_prompts import SAFE_FOR_WORK_CLAUSE
 from apps.core.services.budget import BudgetGuard, BudgetOverride
 from apps.core.services.order_state import InvalidOrderTransition, OrderStateService
 from apps.core.storage import LocalMediaStorage
 
 
 class GenerationError(ValueError):
-    pass
+    """Domain error; ``failure`` carries the provider failure facts
+    (failure_class, moderation_*) when the provider call itself failed."""
+
+    failure: dict | None = None
+
+
+ALREADY_RUNNING_MESSAGE = "Генерация уже выполняется, дождитесь завершения (~1–1.5 мин)"
+
+# A RUNNING preview/revision job older than this is a dead worker (gunicorn
+# times out at 300 s): it is failed closed as "ambiguous" so the operator
+# is not locked out forever, mirroring FullProductionService re-entry.
+STALE_RUNNING_AFTER = timedelta(minutes=15)
 
 
 class GenerationService:
@@ -51,10 +69,12 @@ class GenerationService:
                 raise GenerationError("Image provider returned empty content")
             return self._complete(job=job, result=result)
         except Exception as exc:
-            self._fail_job(job=job, exc=exc)
+            failure = self._fail_job(job=job, exc=exc)
             if isinstance(exc, GenerationError):
                 raise
-            raise GenerationError(str(exc)) from exc
+            error = GenerationError(str(exc))
+            error.failure = failure
+            raise error from exc
 
     @transaction.atomic
     def _start_job(
@@ -65,6 +85,10 @@ class GenerationService:
             .select_related("product", "style")
             .get(pk=order.pk)
         )
+        # DRF-2089: one billable attempt at a time. A second click while the
+        # first request is still running (browser 499, double submit) must
+        # not open a parallel provider call.
+        self._guard_running(locked_order=locked_order, task_type=task_type)
         if task_type == GenerationJob.TaskType.PREVIEW:
             if locked_order.status == Order.Status.PAID:
                 OrderStateService.transition(
@@ -137,6 +161,25 @@ class GenerationService:
             started_at=timezone.now(),
         )
 
+    @staticmethod
+    def _guard_running(*, locked_order: Order, task_type: str) -> None:
+        running = GenerationJob.objects.select_for_update().filter(
+            order=locked_order,
+            task_type=task_type,
+            status=GenerationJob.Status.RUNNING,
+        )
+        stale_before = timezone.now() - STALE_RUNNING_AFTER
+        for job in running:
+            started = job.started_at or job.created_at
+            if started and started < stale_before:
+                job.status = GenerationJob.Status.FAILED
+                job.error = "stale RUNNING job (worker gone); failed closed"
+                job.output_metadata = {**(job.output_metadata or {}), "failure_class": "ambiguous"}
+                job.finished_at = timezone.now()
+                job.save(update_fields=["status", "error", "output_metadata", "finished_at", "updated_at"])
+                continue
+            raise GenerationError(ALREADY_RUNNING_MESSAGE)
+
     def _build_request(self, *, job: GenerationJob) -> ImageGenerationRequest:
         order = (
             Order.objects.select_related("product", "style")
@@ -148,6 +191,7 @@ class GenerationService:
         prompt_parts = [
             str(product_config.get("generation_prompt") or "Create a personalized preview image based on the reference photos."),
             str(style_config.get("prompt") or f"Use the {order.style.name} style."),
+            SAFE_FOR_WORK_CLAUSE,
         ]
         if order.customer_notes.strip():
             prompt_parts.append(f"Customer notes: {order.customer_notes.strip()}")
@@ -238,13 +282,19 @@ class GenerationService:
         return asset
 
     @transaction.atomic
-    def _fail_job(self, *, job: GenerationJob, exc: Exception) -> None:
+    def _fail_job(self, *, job: GenerationJob, exc: Exception) -> dict | None:
+        """Mark the job FAILED; returns the provider failure facts recorded
+        in output_metadata (failure_class, moderation_*), None if the job
+        was not RUNNING any more."""
         locked_job = GenerationJob.objects.select_for_update().get(pk=job.pk)
         if locked_job.status != GenerationJob.Status.RUNNING:
-            return
+            return None
+        failure = describe_provider_failure(self.provider, exc)
         locked_job.status = GenerationJob.Status.FAILED
         locked_job.error = str(exc)[:4000]
+        locked_job.output_metadata = {**(locked_job.output_metadata or {}), **failure}
         locked_job.finished_at = timezone.now()
         locked_job.save(
-            update_fields=["status", "error", "finished_at", "updated_at"]
+            update_fields=["status", "error", "output_metadata", "finished_at", "updated_at"]
         )
+        return failure
