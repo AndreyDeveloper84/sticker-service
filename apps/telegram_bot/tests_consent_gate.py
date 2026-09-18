@@ -71,8 +71,11 @@ class TelegramConsentWebhookFlowTests(TestCase):
             order = self._order_with_photo(client)
 
             response = self._post(_callback("photos_done", "cb-done"))
-
             self.assertEqual(response.status_code, 200)
+            # contact → order card → «✅ Подтвердить заказ» → consent screen
+            self._post({"message": {"from": USER, "chat": {"id": CHAT_ID}, "text": "Анна, @anna"}})
+            self._post(_callback("order:confirm", "cb-confirm"))
+
             kwargs = client.send_message.call_args.kwargs
             self.assertEqual(kwargs["text"], PILOT_CONSENT_TEXT)
             self.assertEqual(
@@ -82,7 +85,7 @@ class TelegramConsentWebhookFlowTests(TestCase):
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
             self.assertFalse(order.consent_accepted)
             client.send_invoice.assert_not_called()
-            client.answer_callback_query.assert_called_once_with(callback_query_id="cb-done")
+            self.assertEqual(client.answer_callback_query.call_count, 2)
 
     def test_pay_without_consent_sends_no_invoice(self):
         with mock.patch("apps.telegram_bot.views.TelegramBotClient") as client_cls:

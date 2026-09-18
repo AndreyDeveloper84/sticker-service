@@ -51,6 +51,7 @@ from apps.core.models import (
     Revision,
 )
 from apps.core.production_console import ProductionOrderAdmin
+from apps.core.bot_menu import CONTACT_PROMPT
 from apps.core.services.channel_order_flow import PILOT_CONSENT_VERSION, order_emotion_codes
 from apps.core.services.full_production import FullProductionService
 from apps.core.services.generation import GenerationService
@@ -73,9 +74,11 @@ TELEGRAM_WEBHOOK = "/telegram/webhook/"
 MAX_WEBHOOK = "/max/webhook/"
 MAX_PAYMENT_WEBHOOK = "/max/payment/webhook/"
 
+CONTACT_VALUE = "Анна, @anna"
 PACK = "sticker-pack-9"
 SINGLE = "single-sticker"
-STYLE = "comic"
+STYLE = "3d"
+CUSTOM = "sticker-pack-9-custom"
 
 # Owner-approved pilot contract (DRF-2057 / seed_live_test).
 PRICES = {
@@ -217,9 +220,13 @@ class TelegramDriver:
         t = self.test
         t.assertEqual(self._post(self._message(text="/start")).status_code, 200)
         keyboard = self.bot.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
+        t.assertEqual(len(keyboard), 6, "main menu: six items")
+        t.assertEqual(keyboard[0][0]["callback_data"], "menu:order")
+        t.assertEqual(self._post(self._callback("menu:order")).status_code, 200)
+        keyboard = self.bot.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
         t.assertEqual(
             [row[0]["callback_data"] for row in keyboard],
-            [f"product:{PACK}", f"product:{SINGLE}"],
+            [f"product:{CUSTOM}", f"product:{PACK}", f"product:{SINGLE}", "menu:main"],
         )
         t.assertEqual(self._post(self._callback(f"product:{product_code}")).status_code, 200)
         t.assertEqual(self._post(self._callback(f"style:{product_code}:{STYLE}")).status_code, 200)
@@ -236,9 +243,17 @@ class TelegramDriver:
 
         photo = self._message(photo=[{"file_id": "small"}, {"file_id": "big"}])
         t.assertEqual(self._post(photo).status_code, 200)
-        # photos_done → consent screen only (parity with MAX): the order stays
-        # in AWAITING_PHOTOS and no invoice/payment exists until accept.
+        # photos_done → contact step → order card → «✅ Подтвердить заказ» →
+        # consent screen; the order stays in AWAITING_PHOTOS and no
+        # invoice/payment exists until accept.
         t.assertEqual(self._post(self._callback("photos_done", "cb-done")).status_code, 200)
+        t.assertEqual(self.bot.send_message.call_args.kwargs["text"], CONTACT_PROMPT)
+        t.assertEqual(self._post(self._message(text=CONTACT_VALUE)).status_code, 200)
+        card = self.bot.send_message.call_args.kwargs
+        t.assertIn(f"Контакт: {CONTACT_VALUE}", card["text"])
+        t.assertIn(f"{PRICES[product_code]['stars']} Stars", card["text"])
+        t.assertEqual(card["reply_markup"]["inline_keyboard"][0][0]["callback_data"], "order:confirm")
+        t.assertEqual(self._post(self._callback("order:confirm", "cb-confirm")).status_code, 200)
         order.refresh_from_db()
         t.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
         t.assertFalse(order.consent_accepted)
@@ -367,6 +382,12 @@ class MaxDriver:
         ), mock.patch("apps.max_bot.views.download_photo", return_value=b"customer-photo-bytes"):
             return self.client.post(MAX_WEBHOOK, data=json.dumps(payload), content_type="application/json")
 
+    def _text(self, text):
+        return {
+            "update_type": "message_created",
+            "message": {"sender": self.user, "recipient": {"chat_id": self.chat_id}, "body": {"mid": "mid-text", "text": text}},
+        }
+
     def _callback(self, payload, callback_id="cb"):
         return {
             "update_type": "message_callback",
@@ -382,7 +403,14 @@ class MaxDriver:
         started = {"update_type": "bot_started", "chat_id": self.chat_id, "user": self.user}
         t.assertEqual(self._post(started).status_code, 200)
         buttons = self.bot.send_message.call_args.kwargs["buttons"]
-        t.assertEqual([row[0]["payload"] for row in buttons], [f"product:{PACK}", f"product:{SINGLE}"])
+        t.assertEqual(len(buttons), 6, "main menu: six items")
+        t.assertEqual(buttons[0][0]["payload"], "menu:order")
+        t.assertEqual(self._post(self._callback("menu:order")).status_code, 200)
+        buttons = self.bot.send_message.call_args.kwargs["buttons"]
+        t.assertEqual(
+            [row[0]["payload"] for row in buttons],
+            [f"product:{CUSTOM}", f"product:{PACK}", f"product:{SINGLE}", "menu:main"],
+        )
         t.assertEqual(self._post(self._callback(f"product:{product_code}")).status_code, 200)
         t.assertEqual(self._post(self._callback(f"style:{product_code}:{STYLE}")).status_code, 200)
         order = Order.objects.get(channel_identity__external_user_id=self.recipient_id())
@@ -408,9 +436,17 @@ class MaxDriver:
             },
         }
         t.assertEqual(self._post(photo).status_code, 200)
-        # photos_done → consent screen only; the order stays in AWAITING_PHOTOS
-        # and no checkout exists until the customer explicitly accepts.
+        # photos_done → contact step → order card → «✅ Подтвердить заказ» →
+        # consent screen; the order stays in AWAITING_PHOTOS and no checkout
+        # exists until the customer explicitly accepts.
         t.assertEqual(self._post(self._callback("photos_done", "cb-done")).status_code, 200)
+        t.assertEqual(self.bot.send_message.call_args.kwargs["text"], CONTACT_PROMPT)
+        t.assertEqual(self._post(self._text(CONTACT_VALUE)).status_code, 200)
+        card = self.bot.send_message.call_args.kwargs
+        t.assertIn(f"Контакт: {CONTACT_VALUE}", card["text"])
+        t.assertIn(f"{PRICES[product_code]['rub_minor'] // 100} ₽", card["text"])
+        t.assertEqual(card["buttons"][0][0]["payload"], "order:confirm")
+        t.assertEqual(self._post(self._callback("order:confirm", "cb-confirm")).status_code, 200)
         order.refresh_from_db()
         t.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
         t.assertFalse(order.consent_accepted)

@@ -62,6 +62,12 @@ class MaxStickerFlowRegressionTests(TestCase):
             client.send_message.assert_called_once()
             kwargs = client.send_message.call_args.kwargs
             self.assertEqual(kwargs["chat_id"], "9001")
+            self.assertEqual(kwargs["buttons"][0][0]["payload"], "menu:order")
+            # «🎨 Заказать стикеры» → products list
+            client.reset_mock()
+            response = self._post(_callback_payload(payload="menu:order", callback_id="cb-0"))
+            self.assertEqual(response.status_code, 200)
+            kwargs = client.send_message.call_args.kwargs
             buttons = kwargs["buttons"]
             self.assertEqual(buttons[0][0]["payload"], "product:stickers")
 
@@ -108,7 +114,8 @@ class MaxStickerFlowRegressionTests(TestCase):
                     kwargs = client.send_message.call_args.kwargs
                     self.assertEqual(kwargs["buttons"][0][0]["payload"], "photos_done")
 
-        # photos_done → consent screen (no checkout yet, order stays in AWAITING_PHOTOS)
+        # photos_done → contact step → card → confirm → consent screen
+        # (no checkout yet, order stays in AWAITING_PHOTOS)
         with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(
             "apps.max_bot.views.start_checkout"
         ) as checkout_mock:
@@ -120,8 +127,16 @@ class MaxStickerFlowRegressionTests(TestCase):
             self.assertFalse(order.consent_accepted)
             checkout_mock.assert_not_called()
             kwargs = client.send_message.call_args.kwargs
-            self.assertEqual(kwargs["buttons"][0][0]["payload"], "consent:accept")
+            self.assertEqual(kwargs["buttons"][-1][0]["payload"], "menu:main")
             client.answer_callback.assert_called_once_with(callback_id="cb-9")
+            self._post({
+                "update_type": "message_created",
+                "message": {"sender": {"user_id": 7001, "first_name": "Ivan"}, "recipient": {"chat_id": 9001},
+                            "body": {"mid": "mid-contact", "text": "Иван, +7 900 000-00-00"}},
+            })
+            self.assertEqual(client.send_message.call_args.kwargs["buttons"][0][0]["payload"], "order:confirm")
+            self._post(_callback_payload(payload="order:confirm", callback_id="cb-9b"))
+            self.assertEqual(client.send_message.call_args.kwargs["buttons"][0][0]["payload"], "consent:accept")
 
         # consent:accept → consent persisted, summary, checkout started
         with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(
