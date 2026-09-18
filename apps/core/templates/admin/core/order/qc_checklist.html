@@ -1,37 +1,67 @@
 {% extends "admin/base_site.html" %}
 {% block content %}
   <div id="content-main">
-    <p><strong>Order #{{ order.pk }}</strong> · {{ order.get_status_display }} · QC attempt {{ report.attempt }}</p>
-    <p>Ожидается assets: {{ report.expected_count }} · Проверяется slots: {{ report.slot_keys|length }}</p>
+    <p><strong>Заказ #{{ order.pk }}</strong> · {{ order.get_status_display }} · QC-попытка {{ report.attempt }} ({{ report_status }})</p>
+    <p>Ожидается стикеров: {{ report.expected_count }} · Проверяется: {{ slots|length }}
+      {% if not expected_count_ok %}· <strong style="color:#a12622">комплект неполный — QC пройден невозможен</strong>{% endif %}
+    </p>
 
-    <h3>Automated checks</h3>
-    <ul>
-      {% for key, checks in automated_checks.items %}
-        <li>
-          {% if key == "expected_count" %}
-            expected_count: {{ checks }}
+    {% if errors %}
+      <ul class="errorlist" style="margin-bottom:12px">
+        {% for error in errors %}<li>{{ error }}</li>{% endfor %}
+      </ul>
+    {% endif %}
+
+    <h3>Стикеры</h3>
+    <div style="display:flex;flex-wrap:wrap;gap:12px">
+      {% for slot in slots %}
+        <div style="border:1px solid #ddd;padding:8px;width:150px;text-align:center">
+          {% if slot.file_url %}
+            <a href="{{ slot.file_url }}" target="_blank" rel="noopener">
+              <img src="{{ slot.file_url }}" alt="{{ slot.title }}" style="max-width:128px;max-height:128px;background:repeating-conic-gradient(#ccc 0 25%,#fff 0 50%) 0 0/16px 16px">
+            </a>
           {% else %}
-            slot {{ key }}:
-            {% for name, ok in checks.items %}{% if name != "asset_id" %}{{ name }}={% if ok %}OK{% else %}FAIL{% endif %}{% if not forloop.last %}, {% endif %}{% endif %}{% endfor %}
+            <span style="color:#a12622">нет файла</span>
           {% endif %}
-        </li>
+          <div><strong>{{ slot.title }}</strong>{% if slot.asset_id %} · #{{ slot.asset_id }}{% endif %}</div>
+          {% if slot.auto_failed %}
+            <div style="color:#a12622">автопроверки: {{ slot.auto_failed|join:", " }}</div>
+          {% else %}
+            <div style="color:#1d6f42">автопроверки: OK</div>
+          {% endif %}
+        </div>
       {% endfor %}
-    </ul>
+    </div>
 
-    <h3>Human checklist</h3>
-    <p>Отметьте только критерии, которые проходят. PASS возможен только при полном комплекте, зелёных automated checks и всех отмеченных критериях.</p>
+    <h3>Чек-лист</h3>
+    <p>Для каждого критерия выберите «Норма» или «Дефект» — оценивайте весь набор. Без выбора по всем критериям форма не отправится.</p>
     <form method="post" action="{{ action_url }}">
       {% csrf_token %}
-      {% for criterion in criteria %}
-        <p>
-          <label>
-            <input type="checkbox" name="{{ criterion }}" value="1">
-            {{ criterion }}
-          </label>
-        </p>
-      {% endfor %}
-      <input type="submit" value="Завершить QC">
-      <a href="{% url 'admin:core_order_change' order.pk %}">Отмена</a>
+      <table>
+        <thead>
+          <tr><th>Критерий</th><th>Что смотреть</th><th>Норма</th><th>Дефект</th></tr>
+        </thead>
+        <tbody>
+          {% for item in criteria %}
+            <tr{% if not item.value %} class="qc-unanswered"{% endif %}>
+              <td><strong>{{ item.title }}</strong></td>
+              <td>{{ item.hint }}</td>
+              <td style="text-align:center">
+                <label><input type="radio" name="{{ item.code }}" value="ok" required{% if item.value == "ok" %} checked{% endif %}> ✅ Норма</label>
+              </td>
+              <td style="text-align:center">
+                <label><input type="radio" name="{{ item.code }}" value="defect"{% if item.value == "defect" %} checked{% endif %}> ❌ Дефект</label>
+              </td>
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p style="margin-top:14px">
+        <button type="submit" name="decision" value="pass" class="default" style="padding:8px 18px">QC пройден</button>
+        <button type="submit" name="decision" value="fail" style="padding:8px 18px">Отправить на доработку</button>
+        <a href="{% url 'admin:core_order_change' order.pk %}" style="margin-left:12px">Отмена</a>
+      </p>
+      <p style="color:#666">«QC пройден» возможен только при полном комплекте, зелёных автопроверках и «Норма» по всем критериям. После «Отправить на доработку» выберите слоты для перегенерации в блоке «Контроль качества».</p>
     </form>
   </div>
 {% endblock %}

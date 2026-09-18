@@ -161,18 +161,18 @@ class ProductionConsoleRevisionTests(TestCase):
         self.assertEqual(revision.status, Revision.Status.COMPLETED)
         self.assertIn("Make the face closer", self.provider.requests[-1].prompt)
 
-        self.assertContains(response, f"Revision preview #{new_asset.pk} generated")
-        self.assertContains(response, f"job #{revision_job.pk}")
+        self.assertContains(response, f"Превью с правкой #{new_asset.pk} сгенерировано")
+        self.assertContains(response, f"генерация #{revision_job.pk}")
         # Back on internal review: the usual preview actions, no revision button.
-        self.assertContains(response, "Regenerate Preview")
-        self.assertNotContains(response, "Retry Revision")
+        self.assertContains(response, "Перегенерировать превью")
+        self.assertNotContains(response, "Сгенерировать правку")
 
     def test_get_shows_confirmation_and_does_not_generate(self):
         self.request_revision()
         with self._patched():
             response = self.client.get(self.action_url)
         self.assertEqual(response.status_code, 200)
-        self.assertContains(response, "Generate revision")
+        self.assertContains(response, "Сгенерировать правку")
         self.assertContains(response, f'action="{self.action_url}"')
         # Only the fixture preview call reached the provider, no revision call.
         self.assertEqual(
@@ -202,7 +202,7 @@ class ProductionConsoleRevisionTests(TestCase):
                     response = self.client.post(self.action_url, follow=True)
                 self.assertEqual(response.status_code, 200)
                 self.assertContains(
-                    response, "доступен только из REVISION_REQUESTED / REVISION_GENERATING"
+                    response, "только из статусов «Правка запрошена» / «Генерация правки»"
                 )
                 self.order.refresh_from_db()
                 self.assertEqual(self.order.status, status)
@@ -219,7 +219,7 @@ class ProductionConsoleRevisionTests(TestCase):
         Order.objects.filter(pk=self.order.pk).update(status=Order.Status.REVISION_REQUESTED)
         with self._patched():
             response = self.client.post(self.action_url, follow=True)
-        self.assertContains(response, "Order has no revision request")
+        self.assertContains(response, "Клиент не запрашивал правку.")
         self.order.refresh_from_db()
         # _start_job is atomic: the REVISION_GENERATING transition rolled back.
         self.assertEqual(self.order.status, Order.Status.REVISION_REQUESTED)
@@ -244,7 +244,7 @@ class ProductionConsoleRevisionTests(TestCase):
         self.assertEqual(failed.status, GenerationJob.Status.FAILED)
         self.assertIn("provider unavailable", failed.error)
         # Generation history on the order page exposes the failure ...
-        self.assertContains(response, "attempt 1 · Failed · fake · provider unavailable")
+        self.assertContains(response, "попытка 1 · правка · ошибка · fake · provider unavailable")
         # ... no new asset, the source preview is untouched, revision still open.
         self.assertEqual(
             GeneratedAsset.objects.filter(order=self.order, kind=GeneratedAsset.Kind.PREVIEW).count(),
@@ -253,7 +253,7 @@ class ProductionConsoleRevisionTests(TestCase):
         revision.refresh_from_db()
         self.assertEqual(revision.status, Revision.Status.GENERATING)
         # Retry is offered from REVISION_GENERATING (service accepts re-entry).
-        self.assertContains(response, "Generate / Retry Revision")
+        self.assertContains(response, "Сгенерировать правку")
         self.assertContains(response, self.action_url)
 
         with self._patched():
@@ -271,7 +271,7 @@ class ProductionConsoleRevisionTests(TestCase):
         )
         revision.refresh_from_db()
         self.assertEqual(revision.status, Revision.Status.COMPLETED)
-        self.assertContains(response, "Revision preview #")
+        self.assertContains(response, "Превью с правкой #")
 
     def test_button_rendered_only_in_revision_statuses(self):
         self.request_revision()
@@ -283,10 +283,9 @@ class ProductionConsoleRevisionTests(TestCase):
                     response = self.client.get(self.change_url)
                 self.assertEqual(response.status_code, 200)
                 if status in shown:
-                    self.assertContains(response, "Generate / Retry Revision")
+                    self.assertContains(response, "Сгенерировать правку")
                     self.assertContains(response, self.action_url)
                 else:
-                    self.assertNotContains(response, "Retry Revision")
                     self.assertNotContains(response, self.action_url)
 
     def test_order_page_shows_revision_request_details(self):
@@ -295,15 +294,15 @@ class ProductionConsoleRevisionTests(TestCase):
         )
         with self._patched():
             response = self.client.get(self.change_url)
-        self.assertContains(response, "Revision (запрос клиента)")
-        self.assertContains(response, f"Revision #{revision.pk}")
-        self.assertContains(response, "category: <strong>Hair</strong>")
+        self.assertContains(response, "Правка клиента")
+        self.assertContains(response, f"Правка #{revision.pk}")
+        self.assertContains(response, "что исправить: <strong>Волосы</strong>")
         self.assertContains(response, "Hair should be curly")
-        self.assertContains(response, f"source preview: <a href=\"{reverse('admin:core_preview_asset_file', args=[source.pk])}\"")
+        self.assertContains(response, f"исходное превью: <a href=\"{reverse('admin:core_preview_asset_file', args=[source.pk])}\"")
         self.assertContains(response, f"#{source.pk}</a>")
 
     def test_order_page_without_revision_says_so(self):
         with self._patched():
             response = self.client.get(self.change_url)
-        self.assertContains(response, "Клиент не запрашивал revision.")
-        self.assertNotContains(response, "Retry Revision")
+        self.assertContains(response, "Клиент не запрашивал правку.")
+        self.assertNotContains(response, "Сгенерировать правку")

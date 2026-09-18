@@ -169,9 +169,11 @@ class ConsoleRoutingTests(QcRetryConsoleTestCase):
         self.produce_and_fail_qc_on("hello")
         response = self.client.get(reverse("admin:core_order_change", args=[self.order.pk]))
         content = response.content.decode()
-        self.assertIn("QC RETRY pending", content)
+        self.assertIn("на доработке после QC", content)
         self.assertIn(self.url("core_order_regenerate_slots") + "?slots=hello", content)
-        self.assertIn("QC retry ожидает регенерации slots: hello", content)
+        self.assertIn("Ждёт перегенерации после QC: «Привет»", content)
+        # «Следующий шаг» points at the same regeneration
+        self.assertIn("Перегенерировать слот «Привет»", content)
 
     def test_retry_failed_with_pending_retry_regenerates_instead_of_reentering_qc(self):
         self.produce_and_fail_qc_on("hello")
@@ -186,7 +188,7 @@ class ConsoleRoutingTests(QcRetryConsoleTestCase):
         after = self.current_by_slot()
         self.assertNotEqual(after["hello"], before["hello"])
         self.assertEqual(after["bye"], before["bye"])
-        self.assertTrue(any("Regenerate вместо «Retry Failed Slots»" in m for m in messages), messages)
+        self.assertTrue(any("вместо «Повторить неудавшиеся слоты»" in m for m in messages), messages)
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.QUALITY_CONTROL)
         # a fresh attempt on the NEW asset set is allowed
@@ -201,18 +203,18 @@ class ConsoleRoutingTests(QcRetryConsoleTestCase):
         messages = self.post("core_order_start_full_production")
         self.assertEqual(self.provider.requests, ["bye"])
         self.assertEqual(self.full_jobs(), jobs_before + 1)
-        self.assertTrue(any("Regenerate вместо «Start / Resume Full Production»" in m for m in messages), messages)
+        self.assertTrue(any("вместо «Запустить производство»" in m for m in messages), messages)
 
     def test_without_pending_retry_actions_keep_their_normal_semantics(self):
         # Start: real production, one slot per request
         messages = self.post("core_order_start_full_production")
-        self.assertTrue(messages[0].startswith("Full production plan:"), messages)
+        self.assertTrue(messages[0].startswith("Производство:"), messages)
         self.assertEqual(self.full_jobs(), 1)
         # Retry failed with nothing pending from QC: DRF-2051 semantics
         # untouched (plain plan message, succeeded slot never regenerated)
         messages = self.post("core_order_retry_failed_production")
-        self.assertTrue(messages[0].startswith("Full production plan:"), messages)
-        self.assertFalse(any("Regenerate вместо" in m for m in messages))
+        self.assertTrue(messages[0].startswith("Производство:"), messages)
+        self.assertFalse(any("вместо «" in m for m in messages))
         self.assertEqual(
             sorted(GenerationJob.objects.filter(order=self.order, task_type=GenerationJob.TaskType.FULL).values_list("slot_key", flat=True)),
             sorted(set(self.provider.requests)),
@@ -234,7 +236,7 @@ class QcStartGuardTests(QcRetryConsoleTestCase):
         self.produce_and_fail_qc_on("hello")
         FullProductionService(provider=self.provider, storage=self.storage).retry_failed(order=self.order, max_slots=None)
         messages = self.post("core_order_qc_start")
-        self.assertTrue(any("Nothing was regenerated" in m for m in messages), messages)
+        self.assertTrue(any("ничего не перегенерировано" in m for m in messages), messages)
         self.assertEqual(QcReport.objects.filter(order=self.order).count(), 1)
         # recovery: QC retry again → PACK_GENERATING → Regenerate (prefilled) → attempt 2
         self.post("core_order_qc_retry", "hello")
@@ -244,7 +246,7 @@ class QcStartGuardTests(QcRetryConsoleTestCase):
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.QUALITY_CONTROL)
         messages = self.post("core_order_qc_start")
-        self.assertTrue(any("QC attempt 2" in m for m in messages), messages)
+        self.assertTrue(any("QC-попытка 2" in m for m in messages), messages)
         self.assertEqual(QcReport.objects.filter(order=self.order).count(), 2)
 
     def test_new_report_allowed_after_any_asset_changed(self):
@@ -275,7 +277,7 @@ class PanelRenderingTests(QcRetryConsoleTestCase):
         content = response.content.decode()
         self.assertNotIn("&lt;br&gt;", content)
         self.assertNotIn("&amp;nbsp;", content)
-        # both panels are present and the buttons are real anchors
-        self.assertIn("Preview — действия", content)
-        self.assertIn("QC — финальные стикеры", content)
+        # panels are present and the buttons are real anchors
+        self.assertIn("Что делать сейчас", content)
+        self.assertIn("Контроль качества", content)
         self.assertIn('class="button" href="' + self.url("core_order_regenerate_slots"), content)
