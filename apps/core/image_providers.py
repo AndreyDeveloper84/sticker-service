@@ -56,6 +56,50 @@ def _usage_metadata(usage) -> dict:
     return result
 
 
+MODERATION_BLOCKED_CODE = "moderation_blocked"
+
+
+def _error_payload(exc: Exception) -> dict:
+    """The provider's error object from an SDK/httpx failure, {} if none.
+
+    openai.APIStatusError.body is the inner ``error`` dict in the SDK, but a
+    full ``{"error": {...}}`` envelope is unwrapped too.
+    """
+    body = getattr(exc, "body", None)
+    if body is None:
+        response = getattr(exc, "response", None)
+        try:
+            body = response.json() if response is not None else None
+        except Exception:
+            body = None
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        body = body["error"]
+    return body if isinstance(body, dict) else {}
+
+
+def moderation_details(exc: Exception) -> dict | None:
+    """Structured facts of a moderation rejection, or None.
+
+    OpenAI answers HTTP 400 ``code: moderation_blocked`` with
+    ``moderation_stage`` (input|output) and ``safety_violations`` (categories).
+    The request was refused (output stage: generated but withheld) — no
+    image, but the call is billable, so the operator must see WHY.
+    """
+    status = getattr(exc, "status_code", None)
+    payload = _error_payload(exc)
+    code = getattr(exc, "code", None) or payload.get("code")
+    if status != 400 or code != MODERATION_BLOCKED_CODE:
+        return None
+    categories = payload.get("safety_violations") or payload.get("categories") or []
+    if isinstance(categories, str):
+        categories = [categories]
+    return {
+        "moderation_stage": str(payload.get("moderation_stage") or ""),
+        "moderation_categories": [str(item) for item in categories],
+        "request_id": str(getattr(exc, "request_id", None) or ""),
+    }
+
+
 def classify_provider_failure(provider, exc: Exception) -> str:
     """Best-effort failure classification for retry/cost-safety decisions.
 
@@ -68,6 +112,16 @@ def classify_provider_failure(provider, exc: Exception) -> str:
     if callable(classifier):
         return classifier(exc)
     return "unknown"
+
+
+def describe_provider_failure(provider, exc: Exception) -> dict:
+    """output_metadata for a failed GenerationJob: failure_class plus the
+    moderation facts (stage / categories / request id) when applicable."""
+    details = {"failure_class": classify_provider_failure(provider, exc)}
+    moderation = moderation_details(exc)
+    if moderation:
+        details.update(moderation)
+    return details
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -189,6 +243,9 @@ class OpenAIImageProvider:
         - "ambiguous": possible post-submit failure (e.g. read timeout) — the
           provider may already be generating; fail closed, NO retry, to avoid
           duplicate billable generations.
+        - "moderation": definitive 400 moderation_blocked — the safety system
+          refused the input or withheld the output; not a proxy problem, no
+          rotation, but the slot stays retryable (another photo / retry).
         - "api": definitive upstream answer (400/401/429/...) — not a proxy
           problem; no rotation.
         """
@@ -198,6 +255,8 @@ class OpenAIImageProvider:
         if isinstance(exc, APIStatusError):
             if exc.status_code == 403 and GEO_BLOCK_MARKER in str(exc):
                 return "geo"
+            if moderation_details(exc) is not None:
+                return "moderation"
             return "api"
         if isinstance(exc, APITimeoutError):
             # Connect timeout = never reached the provider; read/write/pool

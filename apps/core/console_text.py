@@ -186,6 +186,7 @@ _ERROR_PATTERNS = [
     (r"Order has no usable reference photos", "У заказа нет пригодных фотографий."),
     (r"Image provider returned empty content", "Провайдер изображений вернул пустой ответ."),
     (r"Transition (\S+) -> (\S+) is not allowed", "Переход «{status:0}» → «{status:1}» недопустим."),
+    (r"moderation_blocked", "Провайдер отклонил генерацию модерацией. " + "Попробуйте ещё раз или запросите у клиента другое фото (лицо и плечи, нейтральная одежда)."),
 ]
 
 
@@ -196,10 +197,43 @@ def status_title(value: str) -> str:
         return str(value)
 
 
+MODERATION_ADVICE = (
+    "Попробуйте ещё раз или запросите у клиента другое фото "
+    "(лицо и плечи, нейтральная одежда)."
+)
+
+
+def moderation_text(details: dict) -> str:
+    """RU sentence for a provider moderation rejection (DRF-2089)."""
+    categories = ", ".join(details.get("moderation_categories") or []) or "не указана"
+    stage = details.get("moderation_stage") or "не указана"
+    text = (
+        "Провайдер отклонил результат генерации модерацией "
+        f"(категория: {categories}, стадия: {stage}). {MODERATION_ADVICE}"
+    )
+    request_id = details.get("request_id")
+    if request_id:
+        text += f" Request ID: {request_id}."
+    return text
+
+
+def job_error_text(job) -> str:
+    """Operator-facing text for a FAILED GenerationJob (history line)."""
+    metadata = job.output_metadata or {}
+    if metadata.get("failure_class") == "moderation":
+        return moderation_text(metadata)
+    return job.error or ""
+
+
 def humanize_error(exc: Exception) -> str:
     """Operator-facing sentence for a domain error; unknown texts are kept
     verbatim behind a Russian prefix so nothing is lost."""
+    failure = getattr(exc, "failure", None)
+    if isinstance(failure, dict) and failure.get("failure_class") == "moderation":
+        return moderation_text(failure)
     text = str(exc)
+    if text.startswith("Генерация уже выполняется"):
+        return text + "."
     for pattern, template in _ERROR_PATTERNS:
         match = re.search(pattern, text)
         if not match:

@@ -22,6 +22,7 @@ from .console_text import (
     REVISION_CATEGORIES,
     REVISION_STATUSES,
     humanize_error,
+    job_error_text,
     label,
     slot_title,
 )
@@ -546,7 +547,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     label(JOB_TASKS, job.task_type),
                     label(JOB_STATUSES, job.status),
                     job.provider,
-                    f" · {job.error}" if job.error else "",
+                    f" · {job_error_text(job)}" if job.error else "",
                 )
                 for job in jobs
             ),
