@@ -22,6 +22,7 @@ the matrix; nothing here reaches Telegram, MAX, YooKassa or OpenAI.
 
 from __future__ import annotations
 
+from apps.core.customer_hints import REVISION_USED_HINT
 from apps.core.image_providers import ImageGenerationResult
 from apps.core.models import (
     ChannelIdentity,
@@ -273,9 +274,12 @@ class PilotNegativeGateTests(PilotE2ECase):
         order.refresh_from_db()
         self.operator_approve_and_deliver(driver, order, revised)
 
-        # second revision request via the webhook is refused (409), state intact
+        # second revision request via the webhook is refused with a customer
+        # hint (200, no redelivery loop), state intact
         response = driver._post(driver._callback(f"preview_revision:{Revision.Category.FACE}"))
-        self.assertEqual(response.status_code, 409)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["ok"], True)
+        self.assertEqual(driver.bot.send_message.call_args.kwargs["text"], REVISION_USED_HINT)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.PREVIEW_REVIEW)
         self.assertEqual(Revision.objects.filter(order=order).count(), 1)
