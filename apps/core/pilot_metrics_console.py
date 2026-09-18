@@ -64,10 +64,33 @@ class ManualWorkLogAdmin(admin.ModelAdmin):
         return False
 
 
+# Event types that live outside OrderEvent.Type on purpose (no choices
+# migration during the pilot, DRF-2086); the filter still has to offer them.
+EXTRA_EVENT_TYPES = (
+    (OrderEvent.BUDGET_BLOCKED, "Бюджет: действие заблокировано"),
+    (OrderEvent.BUDGET_OVERRIDE, "Бюджет: лимит переопределён"),
+    (OrderEvent.BUDGET_ALERT, "Бюджет: алерт"),
+    (OrderEvent.PAYMENT_REFUNDED, "Платёж возвращён"),
+)
+
+
+class EventTypeFilter(admin.SimpleListFilter):
+    title = "тип события"
+    parameter_name = "event_type"
+
+    def lookups(self, request, model_admin):
+        return [*OrderEvent.Type.choices, *EXTRA_EVENT_TYPES]
+
+    def queryset(self, request, queryset):
+        if self.value():
+            return queryset.filter(event_type=self.value())
+        return queryset
+
+
 @admin.register(OrderEvent)
 class OrderEventAdmin(admin.ModelAdmin):
     list_display = ("id", "order", "event_type", "from_status", "to_status", "actor_kind", "actor_ref", "created_at")
-    list_filter = ("event_type", "actor_kind", "to_status")
+    list_filter = (EventTypeFilter, "actor_kind", "to_status")
     search_fields = ("order__id", "actor_ref")
     ordering = ("-created_at",)
     readonly_fields = ("order", "event_type", "from_status", "to_status", "actor_kind", "actor_ref", "payload", "created_at")

@@ -26,6 +26,7 @@ from .console_text import (
 )
 from .image_providers import get_image_provider
 from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
+from .services.budget import ACTION_TITLES, BudgetService
 from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
 from .services.order_state import InvalidOrderTransition, OrderStateService
@@ -130,9 +131,11 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         "style_title",
         "status_badge",
         "photo_count",
+        "calls_cost",
         "created_at",
     )
     list_filter = (RussianStatusFilter, RussianChannelFilter, "product", "style")
+    change_list_template = "admin/core/order/change_list.html"
     search_fields = (
         "=id",
         "channel_identity__external_user_id",
@@ -162,6 +165,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             "preview_assets",
             "production_plan",
             "generation_history",
+            "expenses",
             *[name for _title, name in self.panel_sections],
             "secondary_actions",
             "created_at",
@@ -186,6 +190,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             ),
             ("Превью", {"fields": ("preview_assets", "revision_request")}),
             ("Производство", {"fields": ("production_plan", "generation_history")}),
+            ("Расходы", {"fields": ("expenses",)}),
         ]
         for title, name in self.panel_sections:
             sections.append((title, {"fields": (name,)}))
@@ -634,6 +639,105 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             )
         return lines_html(rows)
 
+    # ------------------------------------------------------------ budget
+
+    @admin.display(description="Вызовы/₽")
+    def calls_cost(self, order):
+        costs = BudgetService().order_costs(order)
+        text = str(costs["calls"])
+        if costs["rub"] is not None:
+            text += f" / ≈{costs['rub']:g} ₽"
+        return text
+
+    @admin.display(description="Расходы")
+    def expenses(self, order):
+        if not order or not order.pk:
+            return "—"
+        costs = BudgetService().order_costs(order)
+        parts = [
+            f"вызовов: {costs['calls']} (превью {costs['preview']} / правки {costs['revision']} / "
+            f"производство {costs['full']})",
+            f"токенов: {costs['tokens']}",
+        ]
+        if costs["rub"] is not None:
+            parts.append(f"≈ {costs['rub']:g} ₽")
+        line = " · ".join(parts)
+        slot_limit = costs["slot_limit"]
+        order_limit = costs["order_limit"]
+        second = f"попыток на слот: max {costs['max_attempts_per_slot']}"
+        second += f" / лимит {slot_limit}" if slot_limit else " / без лимита"
+        second += f" · вызовов на заказ: {costs['calls']}"
+        second += f" / лимит {order_limit}" if order_limit else " / без лимита"
+        return lines_html([line, second])
+
+    def changelist_view(self, request, extra_context=None):
+        summary = BudgetService().summary()
+
+        def _line(title, item):
+            text = f"{title}: {item['used']} вызовов"
+            text += f" / лимит {item['max']}" if item["max"] else " / без лимита"
+            if item["rub"] is not None:
+                text += f", ≈ {item['rub']:g} ₽"
+            return text
+
+        extra_context = {
+            **(extra_context or {}),
+            "budget_lines": [_line("Сегодня", summary["today"]), _line("Месяц", summary["month"])],
+            "budget_warning": any(
+                item["max"] and item["used"] >= 0.8 * item["max"] for item in (summary["today"], summary["month"])
+            ),
+        }
+        return super().changelist_view(request, extra_context=extra_context)
+
+    def _budget_gate(self, request, order, action, *, slot_keys=None):
+        """Console-level budget gate (DRF-2086).
+
+        Returns True when the paid action may run. Blocked: records
+        ``budget.blocked``, shows the Russian error, returns False — the
+        service is never called. A superuser who confirmed ``force=1`` on the
+        confirmation page proceeds with a ``budget.override`` record.
+        """
+        decision = BudgetService().check(order, action, slot_keys=slot_keys)
+        if decision.blocked is None:
+            return True
+        actor = request.user.get_username()
+        if request.user.is_superuser and request.POST.get("force") == "1":
+            BudgetService.record_override(order, decision, actor_ref=actor)
+            self.message_user(
+                request,
+                f"Лимит переопределён суперпользователем: {decision.blocked.title} "
+                f"{decision.blocked.used}/{decision.blocked.max}. Записано в журнал.",
+                level=messages.WARNING,
+            )
+            return True
+        BudgetService.record_blocked(order, decision, actor_ref=actor)
+        self.message_user(request, decision.message, level=messages.ERROR)
+        return False
+
+    @staticmethod
+    def _retry_slots(order) -> list[str]:
+        """Slots «Повторить неудавшиеся слоты» may run: pending QC-retry slots
+        or slots whose latest FULL job failed."""
+        pending = QcService().pending_retry_slots(order) if order.status == Order.Status.PACK_GENERATING else []
+        if pending:
+            return list(pending)
+        latest = {}
+        for job in order.generation_jobs.filter(task_type=GenerationJob.TaskType.FULL).order_by("slot_key", "attempt"):
+            latest[job.slot_key] = job.status
+        return [key for key, status in latest.items() if status == GenerationJob.Status.FAILED]
+
+    def _budget_context(self, request, order, action, *, slot_keys=None) -> dict:
+        """Confirmation-page context: warning text and the override control."""
+        decision = BudgetService().check(order, action, slot_keys=slot_keys)
+        blocked = decision.blocked
+        if blocked is None:
+            return {}
+        return {
+            "budget_blocked": decision.message.replace(" Генерация не запущена.", ""),
+            "budget_can_override": request.user.is_superuser,
+            "budget_force_checked": request.GET.get("force") == "1",
+        }
+
     def get_queryset(self, request):
         return (
             super()
@@ -773,7 +877,10 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 action_url=action_url,
                 detail="Будет запущена новая попытка превью через настроенного провайдера изображений.",
                 warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                **self._budget_context(request, order, "preview"),
             )
+        if not self._budget_gate(request, order, "preview"):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             asset = self.get_generation_service().generate_preview(order=order)
         except GenerationError as exc:
@@ -808,6 +915,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     "Предыдущие превью сохранятся; после успеха заказ вернётся на внутреннюю проверку."
                 ),
                 warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                **self._budget_context(request, order, "revision"),
             )
         if order.status not in {Order.Status.REVISION_REQUESTED, Order.Status.REVISION_GENERATING}:
             self.message_user(
@@ -815,6 +923,8 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 "Правку можно сгенерировать только из статусов «Правка запрошена» / «Генерация правки».",
                 level=messages.ERROR,
             )
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
+        if not self._budget_gate(request, order, "revision"):
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             asset = self.get_generation_service().generate_revision(order=order)
@@ -842,6 +952,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 action_url=action_url,
                 detail="Предыдущие превью сохранятся. Будет создана новая попытка генерации.",
                 warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                **self._budget_context(request, order, "preview"),
             )
         if order.status != Order.Status.INTERNAL_PREVIEW_REVIEW:
             self.message_user(
@@ -849,6 +960,8 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                 "Перегенерация доступна только на внутренней проверке превью.",
                 level=messages.ERROR,
             )
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
+        if not self._budget_gate(request, order, "preview"):
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             OrderStateService.transition(order=order, to_status=Order.Status.PREVIEW_GENERATING)
@@ -942,9 +1055,12 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     "через «Повторить неудавшиеся слоты»."
                 ),
                 warning=f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+                **self._budget_context(request, order, "full_start", slot_keys=self.pending_retry_slots(order) or None),
             )
         service = self.get_full_production_service()
         pending = self.pending_retry_slots(order)
+        if not self._budget_gate(request, order, "full_start", slot_keys=pending or None):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             if pending:
                 plan = self._regenerate_pending_retry(
@@ -988,9 +1104,12 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     "Заблокированные слоты не затрагиваются."
                 ),
                 warning=f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+                **self._budget_context(request, order, "retry", slot_keys=self._retry_slots(order)),
             )
         service = self.get_full_production_service()
         pending = self.pending_retry_slots(order)
+        if not self._budget_gate(request, order, "retry", slot_keys=self._retry_slots(order)):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             if pending:
                 self._regenerate_pending_retry(
@@ -1031,9 +1150,15 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     (code, slot_title(order, code))
                     for code in (order.selection or {}).get("emotions") or []
                 ],
+                **self._budget_context(
+                    request, order, "regenerate",
+                    slot_keys=[key.strip() for key in slot_keys_value.split(",") if key.strip()],
+                ),
             )
         slot_keys = [key.strip() for key in slot_keys_value.split(",") if key.strip()]
         service = self.get_full_production_service()
+        if not self._budget_gate(request, order, "regenerate", slot_keys=slot_keys):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             plan = service.regenerate_slots(order=order, slot_keys=slot_keys)
         except (InvalidOrderTransition, FullProductionError) as exc:
@@ -1060,8 +1185,11 @@ class ProductionOrderAdmin(admin.ModelAdmin):
                     "платной генерации."
                 ),
                 warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                **self._budget_context(request, order, "force_retry", slot_keys=[slot_key]),
             )
         service = self.get_full_production_service()
+        if not self._budget_gate(request, order, "force_retry", slot_keys=[slot_key]):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
             plan = service.force_retry_slot(order=order, slot_key=slot_key)
         except (InvalidOrderTransition, FullProductionError) as exc:
