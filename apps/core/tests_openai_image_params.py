@@ -18,7 +18,12 @@ from apps.core.image_providers import (
     ReferenceImage,
 )
 
-ENV_NAMES = ("OPENAI_IMAGE_SIZE", "OPENAI_IMAGE_BACKGROUND", "OPENAI_IMAGE_OUTPUT_FORMAT")
+ENV_NAMES = (
+    "OPENAI_IMAGE_SIZE",
+    "OPENAI_IMAGE_BACKGROUND",
+    "OPENAI_IMAGE_OUTPUT_FORMAT",
+    "OPENAI_IMAGE_INPUT_FIDELITY",
+)
 
 
 class Images:
@@ -121,11 +126,58 @@ class OpenAIImageParamsConfiguredTests(SimpleTestCase):
             ("OPENAI_IMAGE_SIZE", ("1024x1024", "1024x1536", "1536x1024", "auto")),
             ("OPENAI_IMAGE_BACKGROUND", ("transparent", "opaque", "auto")),
             ("OPENAI_IMAGE_OUTPUT_FORMAT", ("png", "webp", "jpeg")),
+            ("OPENAI_IMAGE_INPUT_FIDELITY", ("high", "low")),
         ):
             for value in values:
                 with self.subTest(name=name, value=value):
                     with mock.patch.dict("os.environ", {name: value}, clear=True):
                         provider(Images())  # must not raise
+
+
+class OpenAIImageInputFidelityTests(SimpleTestCase):
+    """DRF-2080 likeness lever: input_fidelity is env-gated like the rest."""
+
+    def test_without_env_input_fidelity_is_not_sent(self):
+        images = Images()
+        with mock.patch.dict("os.environ", {}, clear=True):
+            p = provider(images)
+            result = p.generate_preview(request())
+        self.assertIsNone(p.input_fidelity)
+        self.assertEqual(sorted(images.calls[0]), ["image", "model", "prompt"])
+        self.assertNotIn("input_fidelity", result.metadata)
+
+    def test_env_high_is_passed_through_and_recorded(self):
+        images = Images()
+        with mock.patch.dict("os.environ", {"OPENAI_IMAGE_INPUT_FIDELITY": "High"}, clear=True):
+            result = provider(images).generate_preview(request())
+        self.assertEqual(sorted(images.calls[0]), ["image", "input_fidelity", "model", "prompt"])
+        self.assertEqual(images.calls[0]["input_fidelity"], "high")  # normalised
+        self.assertEqual(result.metadata, {"model": "test-model", "input_fidelity": "high"})
+        self.assertEqual(result.mime_type, "image/png")
+
+    def test_combines_with_other_parameters(self):
+        images = Images()
+        env = {"OPENAI_IMAGE_INPUT_FIDELITY": "low", "OPENAI_IMAGE_BACKGROUND": "transparent"}
+        with mock.patch.dict("os.environ", env, clear=True):
+            provider(images).generate_preview(request())
+        self.assertEqual(
+            sorted(images.calls[0]), ["background", "image", "input_fidelity", "model", "prompt"]
+        )
+        self.assertEqual(images.calls[0]["input_fidelity"], "low")
+
+    def test_explicit_constructor_value_overrides_env(self):
+        images = Images()
+        with mock.patch.dict("os.environ", {"OPENAI_IMAGE_INPUT_FIDELITY": "low"}, clear=True):
+            provider(images, input_fidelity="high").generate_preview(request())
+        self.assertEqual(images.calls[0]["input_fidelity"], "high")
+
+    def test_invalid_value_fails_closed_before_any_call(self):
+        images = Images()
+        with mock.patch.dict("os.environ", {"OPENAI_IMAGE_INPUT_FIDELITY": "max"}, clear=True):
+            with self.assertRaises(ProviderConfigurationError) as ctx:
+                provider(images)
+        self.assertIn("OPENAI_IMAGE_INPUT_FIDELITY", str(ctx.exception))
+        self.assertEqual(images.calls, [])
 
 
 class OpenAIImageParamsFailClosedTests(SimpleTestCase):
@@ -136,6 +188,8 @@ class OpenAIImageParamsFailClosedTests(SimpleTestCase):
             ("OPENAI_IMAGE_BACKGROUND", "alpha"),
             ("OPENAI_IMAGE_OUTPUT_FORMAT", "gif"),
             ("OPENAI_IMAGE_OUTPUT_FORMAT", "jpg"),
+            ("OPENAI_IMAGE_INPUT_FIDELITY", "medium"),
+            ("OPENAI_IMAGE_INPUT_FIDELITY", "true"),
         )
         for name, value in cases:
             with self.subTest(name=name, value=value):

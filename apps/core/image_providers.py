@@ -137,6 +137,10 @@ class ProviderConfigurationError(RuntimeError):
 OPENAI_IMAGE_SIZES = frozenset({"1024x1024", "1024x1536", "1536x1024", "auto"})
 OPENAI_IMAGE_BACKGROUNDS = frozenset({"transparent", "opaque", "auto"})
 OPENAI_IMAGE_OUTPUT_FORMATS = frozenset({"png", "webp", "jpeg"})
+# input_fidelity (gpt-image edits): "high" keeps the faces / distinctive
+# features of the input images closer to the reference (DRF-2080 likeness
+# lever); absent = API default.
+OPENAI_IMAGE_INPUT_FIDELITIES = frozenset({"high", "low"})
 OPENAI_OUTPUT_MIME_TYPES = {"png": "image/png", "webp": "image/webp", "jpeg": "image/jpeg"}
 
 
@@ -189,6 +193,7 @@ class OpenAIImageProvider:
         size: str | None = None,
         background: str | None = None,
         output_format: str | None = None,
+        input_fidelity: str | None = None,
     ):
         self._client = client
         self.model = model or os.getenv("OPENAI_IMAGE_MODEL", "gpt-image-2")
@@ -200,6 +205,9 @@ class OpenAIImageProvider:
         )
         self.output_format = _optional_choice(
             "OPENAI_IMAGE_OUTPUT_FORMAT", output_format, OPENAI_IMAGE_OUTPUT_FORMATS
+        )
+        self.input_fidelity = _optional_choice(
+            "OPENAI_IMAGE_INPUT_FIDELITY", input_fidelity, OPENAI_IMAGE_INPUT_FIDELITIES
         )
         # Outbound proxy pool: None = direct (current production behaviour).
         # When a pool is configured, each generation attempt goes through a
@@ -309,6 +317,8 @@ class OpenAIImageProvider:
             params["background"] = self.background
         if self.output_format is not None:
             params["output_format"] = self.output_format
+        if self.input_fidelity is not None:
+            params["input_fidelity"] = self.input_fidelity
         return params
 
     def _generate(self, client, images, prompt: str) -> ImageGenerationResult:
