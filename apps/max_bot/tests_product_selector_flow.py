@@ -12,6 +12,7 @@ from unittest import mock
 
 from django.test import TestCase, override_settings
 
+from apps.core.bot_menu import CONTACT_PROMPT
 from apps.core.customer_hints import EMOTION_CHOICE_HINT, NEED_PHOTO_HINT
 from apps.core.models import Order, Product, Style
 from apps.core.services.channel_order_flow import order_emotion_codes
@@ -46,6 +47,13 @@ SINGLE_CONFIG = {
 
 USER = {"user_id": 7101, "first_name": "Boris"}
 CHAT_ID = 9101
+
+
+def _text_message(text):
+    return {
+        "update_type": "message_created",
+        "message": {"sender": USER, "recipient": {"chat_id": CHAT_ID}, "body": {"mid": "mid-text", "text": text}},
+    }
 
 
 def _callback(payload, callback_id="cb-1"):
@@ -90,10 +98,16 @@ class MaxProductSelectorFlowTests(TestCase):
     def _start_flow(self, client, product_code):
         response = self._post({"update_type": "bot_started", "chat_id": CHAT_ID, "user": USER})
         self.assertEqual(response.status_code, 200)
+        # bot_started → main menu (6 items); «🎨 Заказать стикеры» → products
+        buttons = client.send_message.call_args.kwargs["buttons"]
+        self.assertEqual(buttons[0][0]["payload"], "menu:order")
+        self.assertEqual(len(buttons), 6)
+        response = self._post(_callback("menu:order"))
+        self.assertEqual(response.status_code, 200)
         buttons = client.send_message.call_args.kwargs["buttons"]
         self.assertEqual(
             [row[0]["payload"] for row in buttons],
-            ["product:sticker-pack-9", "product:single-sticker"],
+            ["product:sticker-pack-9", "product:single-sticker", "menu:main"],
         )
 
         client.reset_mock()
@@ -130,7 +144,8 @@ class MaxProductSelectorFlowTests(TestCase):
             kwargs = client.send_message.call_args.kwargs
             self.assertIn("3 эмоций", kwargs["text"])
             self.assertIn("Привет", kwargs["text"])
-            self.assertEqual(kwargs["buttons"], [[{"text": "Подтвердить набор", "payload": "emotions:confirm"}]])
+            self.assertEqual(kwargs["buttons"][0], [{"text": "Подтвердить набор", "payload": "emotions:confirm"}])
+            self.assertEqual([row[0]["payload"] for row in kwargs["buttons"][1:]], ["back:style", "menu:main"])
 
             # photos_done before the emotion step is rejected with a hint (200), no state mutation
             client.reset_mock()
@@ -151,12 +166,19 @@ class MaxProductSelectorFlowTests(TestCase):
             with tempfile.TemporaryDirectory() as media_root:
                 self._send_photo(client, media_root)
 
-            # photos_done → consent screen only; checkout waits for consent:accept
+            # photos_done → contact step → order card → confirm → consent screen;
+            # checkout waits for consent:accept
             client.reset_mock()
             response = self._post(_callback("photos_done", callback_id="cb-done"))
             self.assertEqual(response.status_code, 200)
             order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            self.assertEqual(client.send_message.call_args.kwargs["text"], CONTACT_PROMPT)
+            self._post(_text_message("Анна, @anna"))
+            card = client.send_message.call_args.kwargs
+            self.assertEqual(card["buttons"][0][0]["payload"], "order:confirm")
+            self.assertIn("Контакт: Анна, @anna", card["text"])
+            self._post(_callback("order:confirm", callback_id="cb-confirm"))
             self.assertEqual(
                 client.send_message.call_args.kwargs["buttons"],
                 [[{"text": "Принимаю", "payload": "consent:accept"}]],
@@ -189,7 +211,7 @@ class MaxProductSelectorFlowTests(TestCase):
             buttons = client.send_message.call_args.kwargs["buttons"]
             self.assertEqual(
                 [row[0]["payload"] for row in buttons],
-                ["emotion:hello", "emotion:bye", "emotion:thanks"],
+                ["emotion:hello", "emotion:bye", "emotion:thanks", "back:style", "menu:main"],
             )
 
             # unknown emotion is rejected with a hint (200), selection unchanged
@@ -209,12 +231,19 @@ class MaxProductSelectorFlowTests(TestCase):
             with tempfile.TemporaryDirectory() as media_root:
                 self._send_photo(client, media_root)
 
-            # photos_done → consent screen only; checkout waits for consent:accept
+            # photos_done → contact step → order card → confirm → consent screen;
+            # checkout waits for consent:accept
             client.reset_mock()
             response = self._post(_callback("photos_done", callback_id="cb-done"))
             self.assertEqual(response.status_code, 200)
             order.refresh_from_db()
             self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)
+            self.assertEqual(client.send_message.call_args.kwargs["text"], CONTACT_PROMPT)
+            self._post(_text_message("Анна, @anna"))
+            card = client.send_message.call_args.kwargs
+            self.assertEqual(card["buttons"][0][0]["payload"], "order:confirm")
+            self.assertIn("Контакт: Анна, @anna", card["text"])
+            self._post(_callback("order:confirm", callback_id="cb-confirm"))
             self.assertEqual(
                 client.send_message.call_args.kwargs["buttons"],
                 [[{"text": "Принимаю", "payload": "consent:accept"}]],

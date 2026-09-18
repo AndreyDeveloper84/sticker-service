@@ -11,7 +11,7 @@ from django.test import TestCase, override_settings
 
 from apps.core.customer_hints import PHOTO_GUIDANCE, SINGLE_PHOTO_REMINDER
 from apps.core.models import Order, Product, Style
-from apps.core.services.channel_order_flow import PILOT_CONSENT_TEXT
+from apps.core.bot_menu import CONTACT_PROMPT
 
 SINGLE_CONFIG = {
     "kind": "single", "quantity": 1, "emotion_count": 1,
@@ -91,8 +91,8 @@ class MaxPhotoGuidanceFlowTests(TestCase):
             response = self._post(self._callback("photos_done"))
 
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(self._texts(client), [SINGLE_PHOTO_REMINDER, PILOT_CONSENT_TEXT])
-            self.assertEqual(client.send_message.call_args.kwargs["buttons"][0][0]["payload"], "consent:accept")
+            self.assertEqual(self._texts(client), [SINGLE_PHOTO_REMINDER, CONTACT_PROMPT])
+            self.assertEqual(client.send_message.call_args.kwargs["buttons"][-1][0]["payload"], "menu:main")
             self.assertEqual(Order.objects.get().status, Order.Status.AWAITING_PHOTOS, "reminder never blocks")
 
     def test_two_photos_get_no_reminder(self):
@@ -107,7 +107,7 @@ class MaxPhotoGuidanceFlowTests(TestCase):
 
             self._post(self._callback("photos_done"))
 
-            self.assertEqual(self._texts(client), [PILOT_CONSENT_TEXT])
+            self.assertEqual(self._texts(client), [CONTACT_PROMPT])
 
 
 @override_settings(TELEGRAM_WEBHOOK_SECRET="", TELEGRAM_BOT_TOKEN="test-token")
@@ -156,10 +156,10 @@ class TelegramPhotoGuidanceFlowTests(TestCase):
             response = self._post(self._callback("photos_done"))
 
             self.assertEqual(response.status_code, 200)
-            self.assertEqual(self._texts(client), [SINGLE_PHOTO_REMINDER, PILOT_CONSENT_TEXT])
+            self.assertEqual(self._texts(client), [SINGLE_PHOTO_REMINDER, CONTACT_PROMPT])
             self.assertEqual(
-                client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"][0][0]["callback_data"],
-                "consent:accept",
+                client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"][-1][0]["callback_data"],
+                "menu:main",
             )
             self.assertEqual(Order.objects.get().status, Order.Status.AWAITING_PHOTOS)
 
@@ -173,4 +173,4 @@ class TelegramPhotoGuidanceFlowTests(TestCase):
 
             self._post(self._callback("photos_done"))
 
-            self.assertEqual(self._texts(client), [PILOT_CONSENT_TEXT])
+            self.assertEqual(self._texts(client), [CONTACT_PROMPT])
