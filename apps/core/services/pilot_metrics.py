@@ -159,10 +159,14 @@ class PilotMetricsService:
         by_provider = {}
         for row in confirmed.values("provider", "currency").annotate(count=Count("pk"), total=Sum("amount_minor")).order_by():
             by_provider[f"{row['provider']}/{row['currency']}"] = {"count": row["count"], "amount_minor": row["total"]}
+        # DRF-2086: refunds are recorded as payment.refunded events by the
+        # (future) refund flow; the KPI "refund rate" (DRF-2049) reads them here.
+        refunded = OrderEvent.objects.filter(order_id__in=order_ids, event_type=OrderEvent.PAYMENT_REFUNDED)
         return {
             "orders_paid": confirmed.values("order_id").distinct().count(),
             "confirmed_payments": confirmed.count(),
             "by_provider_currency": by_provider,
+            "refunded": refunded.values("order_id").distinct().count(),
         }
 
     # -- previews / approval ------------------------------------------------

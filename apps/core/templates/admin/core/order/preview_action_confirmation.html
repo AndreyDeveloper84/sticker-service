@@ -6,8 +6,16 @@
     {% if warning %}
       <p style="color:#8a5a00"><strong>Внимание:</strong> {{ warning }}</p>
     {% endif %}
+    {% if budget_blocked %}
+      <p style="color:#a30000"><strong>Бюджет:</strong> {{ budget_blocked }}.
+        {% if budget_can_override %}Действие заблокировано; суперпользователь может переопределить лимит один раз — это будет записано в журнал.{% else %}Действие заблокировано. Переопределить лимит может только суперпользователь.{% endif %}
+      </p>
+    {% endif %}
     <form method="post" action="{{ action_url }}">
       {% csrf_token %}
+      {% if budget_blocked and budget_can_override %}
+        <p><label><input type="checkbox" name="force" value="1"{% if budget_force_checked %} checked{% endif %}> Переопределить лимит (записывается в журнал)</label></p>
+      {% endif %}
       {% if slot_input %}
         <p>
           <label for="slot_keys">Слоты для перегенерации (коды эмоций через запятую):</label>

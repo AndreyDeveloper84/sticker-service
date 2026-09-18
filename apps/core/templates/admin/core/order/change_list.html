@@ -1,0 +1,10 @@
+{% extends "admin/change_list.html" %}
+{% block object-tools %}
+  {% if budget_lines %}
+    <div style="margin:0 0 12px;padding:8px 12px;border:1px solid {% if budget_warning %}#c0392b{% else %}#ccc{% endif %};border-radius:4px;background:{% if budget_warning %}#fdecea{% else %}#f8f8f8{% endif %}">
+      <strong>Бюджет:</strong>
+      {% for line in budget_lines %}{{ line }}{% if not forloop.last %} · {% endif %}{% endfor %}
+    </div>
+  {% endif %}
+  {{ block.super }}
+{% endblock %}

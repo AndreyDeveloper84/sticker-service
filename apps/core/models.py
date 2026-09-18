@@ -367,6 +367,15 @@ class OrderEvent(models.Model):
         PREVIEW_CUSTOMER_APPROVED = "preview.customer_approved", "Preview approved by customer"
         MANUAL_WORK_LOGGED = "manual.work_logged", "Manual work logged"
 
+    # DRF-2086 event types kept OUT of ``Type`` on purpose: extending the
+    # choices would be an AlterField migration during the live pilot. The
+    # column is a plain CharField, so these values are stored and listed as
+    # any other; fold them into ``Type`` with the next schema change.
+    BUDGET_BLOCKED = "budget.blocked"
+    BUDGET_OVERRIDE = "budget.override"
+    BUDGET_ALERT = "budget.alert"
+    PAYMENT_REFUNDED = "payment.refunded"
+
     class Actor(models.TextChoices):
         SYSTEM = "system", "System"
         CUSTOMER = "customer", "Customer"
