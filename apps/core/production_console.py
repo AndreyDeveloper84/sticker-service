@@ -31,6 +31,7 @@ from .console_text import (
 from .image_providers import get_image_provider
 from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Product, Revision
 from .services.budget import BudgetConfigError, BudgetError, BudgetExceeded, BudgetOverride, BudgetService
+from .services.generation_cost import format_known_cost
 from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
 from .services.order_state import InvalidOrderTransition, OrderStateService
@@ -700,8 +701,8 @@ class ProductionOrderAdmin(admin.ModelAdmin):
     def calls_cost(self, order):
         costs = BudgetService().order_costs(order)
         text = str(costs["calls"])
-        if costs["rub"] is not None:
-            text += f" / ≈{costs['rub']:g} ₽"
+        if costs["calls"]:
+            text += f" / {format_known_cost(costs['cost'])}"
         return text
 
     @admin.display(description="Расходы")
@@ -714,8 +715,10 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             f"производство {costs['full']})",
             f"токенов: {costs['tokens']}",
         ]
-        if costs["rub"] is not None:
-            parts.append(f"≈ {costs['rub']:g} ₽")
+        parts.append(f"стоимость: {format_known_cost(costs['cost'])}")
+        possibly = costs["cost"]["possibly_billable_count"]
+        if possibly:
+            parts.append(f"возможно платных: {possibly}")
         line = " · ".join(parts)
         slot_limit = costs["slot_limit"]
         order_limit = costs["order_limit"]
@@ -731,8 +734,10 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         def _line(title, item):
             text = f"{title}: {item['used']} вызовов"
             text += f" / лимит {item['max']}" if item["max"] else " / без лимита"
-            if item["rub"] is not None:
-                text += f", ≈ {item['rub']:g} ₽"
+            if item["used"]:
+                text += f", стоимость {format_known_cost(item['cost'])}"
+                if item["cost"]["possibly_billable_count"]:
+                    text += f" (возможно платных: {item['cost']['possibly_billable_count']})"
             return text
 
         extra_context = {

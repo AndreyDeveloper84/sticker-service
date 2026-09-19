@@ -15,10 +15,10 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime
 
-from django.conf import settings
 from django.db.models import Count, Sum
 
 from apps.core.models import ChannelIdentity, GenerationJob, Order, OrderEvent, Payment, Revision
+from apps.core.services import generation_cost
 
 # Happy path in order; later stages imply earlier ones for pre-log orders.
 FUNNEL_STAGES = [
@@ -211,8 +211,10 @@ class PilotMetricsService:
         by_task = dict(Counter(calls.values_list("task_type", flat=True)))
         tokens = Counter()
         jobs_with_usage = 0
-        for metadata in calls.values_list("output_metadata", flat=True):
-            usage = (metadata or {}).get("usage") or {}
+        input_metadatas = []
+        for input_metadata, output_metadata in calls.values_list("input_metadata", "output_metadata"):
+            input_metadatas.append(input_metadata)
+            usage = (output_metadata or {}).get("usage") or {}
             if not usage:
                 continue
             jobs_with_usage += 1
@@ -221,19 +223,23 @@ class PilotMetricsService:
                 if isinstance(value, int):
                     tokens[key] += value
 
-        unit_cost = getattr(settings, "PILOT_IMAGE_CALL_COST_USD", None)
-        total_calls = calls.count()
-        estimated = round(total_calls * float(unit_cost), 4) if unit_cost is not None else None
+        # DRF-2111: cost = the sum of per-job price snapshots (billable and
+        # priced at attempt time), never today's price × calls; the rest is
+        # reported as counts. PILOT_IMAGE_CALL_COST_USD is no longer read.
+        cost = generation_cost.aggregate(input_metadatas)
         paid = len(paid_orders)
+        total_calls = len(input_metadatas)
+        known = cost["known_cost_minor"]
         return {
             "provider_calls": total_calls,
             "provider_calls_by_task_type": by_task,
             "jobs_with_usage": jobs_with_usage,
             "tokens": dict(tokens),
-            "unit_cost_usd": float(unit_cost) if unit_cost is not None else None,
-            "estimated_usd": estimated,
+            "cost": cost,
+            "known_cost_minor": known,
+            "known_cost_currency": cost["currency"],
             "calls_per_paid_order": _ratio(total_calls, paid),
-            "estimated_usd_per_paid_order": round(estimated / paid, 4) if estimated is not None and paid else None,
+            "known_cost_minor_per_paid_order": round(known / paid, 2) if paid and cost["known_count"] else None,
         }
 
     # -- manual work ----------------------------------------------------------
