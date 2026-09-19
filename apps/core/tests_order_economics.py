@@ -23,8 +23,8 @@ from apps.core.models import (
 )
 from apps.core.services import generation_cost as gc
 from apps.core.services.order_economics import (
-    NOT_COMPUTABLE, PROVIDER_CONFIRMED, RATE_KEY, RATE_SOURCE_CONFIG_SNAPSHOT, RATE_SOURCE_NOT_CONFIGURED,
-    UNKNOWN, OrderEconomics, manual_work_snapshot, payment_fee,
+    NOT_COMPUTABLE, PROVIDER_CONFIRMED, RATE_KEY, RATE_SOURCE_CONFIG_SNAPSHOT, RATE_SOURCE_NO_LOGS,
+    RATE_SOURCE_NOT_CONFIGURED, UNKNOWN, OrderEconomics, manual_work_snapshot, payment_fee,
 )
 from apps.core.services.full_production import FullProductionError
 from apps.core.services.qc import HUMAN_CRITERIA, QcService
@@ -272,6 +272,49 @@ class SyntheticCasesTests(EconomicsFixture):
         self.assertIn("Известный contribution: 100,00 ₽", block)
         self.assertIn("+ не учтено: комиссия платежа неизвестна; AI-вызовов без цены: 1; "
                       "возможно платных AI-вызовов: 1; ставка оператора не настроена", block)
+        self.assertIsNone(re.search(r"(?<![\d,])0(,00)? ₽", block), block)
+
+    def test_case_f_live_order_16_shape_fee_confirmed_price_unknown(self):
+        """F) the first live order (Order 16, 2026-09-19): 1×100 ₽, fee 3,50 ₽
+        PROVIDER_CONFIRMED, one successful preview snapshotted WITHOUT a tariff
+        (cost_source UNKNOWN, billing_outcome success), no manual work.
+
+        Contribution is computable from the known fee alone; the unpriced AI
+        call is named next to it — never folded in as 0 and never "возможно
+        платный" (the provider accepted it, only the price is missing)."""
+        order = self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350)
+        with override_settings(PILOT_IMAGE_CALL_COST_RUB=None), \
+                patch.dict("os.environ", {"PILOT_IMAGE_CALL_COST_RUB": ""}):
+            asset = self._preview(order)
+        cost = gc.job_cost(asset.job.input_metadata)
+        self.assertEqual(cost["cost_source"], gc.CostSource.UNKNOWN)
+        self.assertEqual(cost["billing_outcome"], gc.BillingOutcome.SUCCESS)
+        self.assertIs(cost["billable"], True)
+
+        eco = OrderEconomics.compute(order)
+
+        self.assertEqual(eco["revenue"], {"amount_minor": 10000, "currency": "RUB"})
+        self.assertEqual(eco["payment_fee"],
+                         {"amount_minor": 350, "currency": "RUB", "source": PROVIDER_CONFIRMED})
+        self.assertEqual(eco["ai"]["preview"]["calls"], 1)
+        self.assertEqual(eco["ai"]["total"]["known_count"], 0)
+        self.assertEqual(eco["ai"]["total"]["unknown_price_count"], 1)
+        self.assertEqual(eco["ai"]["total"]["possibly_billable_count"], 0)
+        self.assertEqual(eco["manual"]["rate_source"], RATE_SOURCE_NO_LOGS)
+        self.assertEqual(eco["known_variable_cost_minor"], 350)
+        self.assertEqual(eco["known_contribution_minor"], 9650)
+        self.assertEqual(eco["unknown_components"], ["ai_unknown_price:1"])
+
+        block = self._block(self._card(order))
+        self.assertIn("Выручка: 100,00 ₽ (yookassa)", block)
+        self.assertIn("превью: 1 вызов(ов), неизвестна · правки: нет вызовов", block)
+        self.assertNotIn("возможно платных", block)
+        self.assertIn("AI всего: неизвестна", block)
+        self.assertIn("Ручная работа: не залогирована", block)
+        self.assertIn("Комиссия платежа: 3,50 ₽ (по данным провайдера)", block)
+        self.assertIn("Известные переменные расходы: 3,50 ₽", block)
+        self.assertIn("Известный contribution: 96,50 ₽", block)
+        self.assertIn("+ не учтено: AI-вызовов без цены: 1", block)
         self.assertIsNone(re.search(r"(?<![\d,])0(,00)? ₽", block), block)
 
 
