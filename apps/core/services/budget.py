@@ -31,8 +31,10 @@ transaction-scoped advisory lock (``BUDGET_LOCK_KEY``) before counting so
 two concurrent transactions cannot both see the last free unit; on other
 backends they are best-effort.
 
-``PILOT_IMAGE_CALL_COST_RUB`` (optional float) prices one call for the
-operator-facing «≈ ₽» figures.
+``PILOT_IMAGE_CALL_COST_RUB`` (optional float) is the tariff snapshotted
+into every new job at attempt time (DRF-2111, ``generation_cost``); the
+operator-facing cost figures are sums of those snapshots — never
+"today's price × calls".
 """
 
 from __future__ import annotations
@@ -153,11 +155,6 @@ def call_cost_rub() -> float | None:
     except (TypeError, ValueError):
         return None
     return value if value is not None and value >= 0 else None
-
-
-def rub(calls: int) -> float | None:
-    cost = call_cost_rub()
-    return round(calls * cost, 2) if cost is not None else None
 
 
 def percent(used: int, maximum: int | None) -> int | None:
@@ -325,7 +322,15 @@ class BudgetService:
     # costs
 
     def order_costs(self, order: Order) -> dict:
-        jobs = list(self._started().filter(order=order).values("task_type", "output_metadata"))
+        """Calls, tokens and the cost evidence of one order.
+
+        ``cost`` = generation_cost.aggregate() over the order's started jobs:
+        a sum only of snapshots that are both priced (CONFIG_SNAPSHOT) and
+        billable; unknown / possibly billable jobs are counted, never priced.
+        """
+        from apps.core.services import generation_cost
+
+        jobs = list(self._started().filter(order=order).values("task_type", "input_metadata", "output_metadata"))
         by_task = Counter(job["task_type"] for job in jobs)
         tokens = 0
         for job in jobs:
@@ -340,18 +345,33 @@ class BudgetService:
             "revision": by_task.get(GenerationJob.TaskType.REVISION, 0),
             "full": by_task.get(GenerationJob.TaskType.FULL, 0),
             "tokens": tokens,
-            "rub": rub(len(jobs)),
+            "cost": generation_cost.aggregate(job["input_metadata"] for job in jobs),
             "max_attempts_per_slot": max(attempts.values(), default=0),
             "slot_limit": safe_limit("PILOT_MAX_FULL_ATTEMPTS_PER_SLOT"),
             "order_limit": safe_limit("PILOT_MAX_IMAGE_CALLS_PER_ORDER"),
         }
 
+    def _window_cost(self, start, end, *, inclusive_end: bool) -> dict:
+        from apps.core.services import generation_cost
+
+        jobs = self._started().filter(started_at__gte=start)
+        jobs = jobs.filter(started_at__lte=end) if inclusive_end else jobs.filter(started_at__lt=end)
+        return generation_cost.aggregate(jobs.values_list("input_metadata", flat=True))
+
     def summary(self) -> dict:
-        today = self.calls_today()
-        month = self.calls_this_month()
+        day_start, day_end = self.day_window()
+        month_start, month_end = self.month_window()
         return {
-            "today": {"used": today, "max": safe_limit("PILOT_MAX_IMAGE_CALLS_PER_DAY"), "rub": rub(today)},
-            "month": {"used": month, "max": safe_limit("PILOT_MAX_IMAGE_CALLS_PER_MONTH"), "rub": rub(month)},
+            "today": {
+                "used": self.calls_today(),
+                "max": safe_limit("PILOT_MAX_IMAGE_CALLS_PER_DAY"),
+                "cost": self._window_cost(day_start, day_end, inclusive_end=True),
+            },
+            "month": {
+                "used": self.calls_this_month(),
+                "max": safe_limit("PILOT_MAX_IMAGE_CALLS_PER_MONTH"),
+                "cost": self._window_cost(month_start, month_end, inclusive_end=False),
+            },
             "cost_rub_per_call": call_cost_rub(),
         }
 

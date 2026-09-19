@@ -121,6 +121,11 @@ def describe_provider_failure(provider, exc: Exception) -> dict:
     moderation = moderation_details(exc)
     if moderation:
         details.update(moderation)
+    # DRF-2111: keep the provider request id for every definitive answer,
+    # not only moderation refusals (billing correlation).
+    request_id = getattr(exc, "request_id", None)
+    if request_id and not details.get("request_id"):
+        details["request_id"] = str(request_id)
     return details
 
 
@@ -337,6 +342,11 @@ class OpenAIImageProvider:
         usage = _usage_metadata(getattr(response, "usage", None))
         if usage:
             metadata["usage"] = usage
+        # DRF-2111: provider request id for billing correlation (SDK exposes
+        # the x-request-id header as _request_id); absent → not invented.
+        request_id = getattr(response, "_request_id", None)
+        if request_id:
+            metadata["request_id"] = str(request_id)
         return ImageGenerationResult(
             content=content,
             # Without output_format the API returns PNG (current behaviour).

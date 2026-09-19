@@ -17,6 +17,7 @@ from apps.core.image_providers import (
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
 from apps.core.services.generation_prompts import FRAMING_CLAUSE, SAFE_FOR_WORK_CLAUSE
 from apps.core.services.budget import BudgetGuard, BudgetOverride
+from apps.core.services import generation_cost
 from apps.core.services.order_state import InvalidOrderTransition, OrderStateService
 from apps.core.storage import LocalMediaStorage
 
@@ -150,6 +151,11 @@ class GenerationService:
         # attempt exists. Raises BudgetExceeded / BudgetConfigError → this
         # transaction rolls back → no RUNNING job, no provider call.
         BudgetGuard(override=budget_override).enforce(locked_order, task_type)
+        # DRF-2111: immutable price snapshot taken now, before the provider
+        # is called; the outcome is appended by _complete/_fail_job.
+        input_metadata[generation_cost.COST_KEY] = generation_cost.cost_snapshot(
+            provider=self.provider, task_type=task_type
+        )
 
         return GenerationJob.objects.create(
             order=locked_order,
@@ -175,8 +181,9 @@ class GenerationService:
                 job.status = GenerationJob.Status.FAILED
                 job.error = "stale RUNNING job (worker gone); failed closed"
                 job.output_metadata = {**(job.output_metadata or {}), "failure_class": "ambiguous"}
+                generation_cost.apply_failure(job, job.output_metadata)
                 job.finished_at = timezone.now()
-                job.save(update_fields=["status", "error", "output_metadata", "finished_at", "updated_at"])
+                job.save(update_fields=["status", "error", "output_metadata", "input_metadata", "finished_at", "updated_at"])
                 continue
             raise GenerationError(ALREADY_RUNNING_MESSAGE)
 
@@ -268,9 +275,10 @@ class GenerationService:
         )
         locked_job.status = GenerationJob.Status.SUCCEEDED
         locked_job.output_metadata = {"asset_id": asset.pk, **metadata}
+        generation_cost.apply_success(locked_job, metadata)
         locked_job.finished_at = timezone.now()
         locked_job.save(
-            update_fields=["status", "output_metadata", "finished_at", "updated_at"]
+            update_fields=["status", "output_metadata", "input_metadata", "finished_at", "updated_at"]
         )
         if locked_job.task_type == GenerationJob.TaskType.REVISION:
             revision = Revision.objects.select_for_update().get(order=locked_order)
@@ -294,8 +302,9 @@ class GenerationService:
         locked_job.status = GenerationJob.Status.FAILED
         locked_job.error = str(exc)[:4000]
         locked_job.output_metadata = {**(locked_job.output_metadata or {}), **failure}
+        generation_cost.apply_failure(locked_job, failure)
         locked_job.finished_at = timezone.now()
         locked_job.save(
-            update_fields=["status", "error", "output_metadata", "finished_at", "updated_at"]
+            update_fields=["status", "error", "output_metadata", "input_metadata", "finished_at", "updated_at"]
         )
         return failure

@@ -291,29 +291,41 @@ class ConsoleBudgetGateTests(BudgetFixture):
 
 @override_settings(**UNLIMITED, PILOT_IMAGE_CALL_COST_RUB=12.5)
 class ConsoleCostFiguresTests(BudgetFixture):
-    def test_order_card_shows_expenses_block(self):
+    """DRF-2111: the console never prices history with today's tariff.
+    Jobs created directly in these fixtures carry no cost snapshot → they
+    are UNKNOWN (and "possibly billable"), whatever PILOT_IMAGE_CALL_COST_RUB
+    says now. Priced jobs are covered by tests_generation_cost."""
+
+    def test_order_card_shows_expenses_block_with_unknown_cost(self):
         self._calls(2, slot_key="e0")
         self._calls(1, task=GenerationJob.TaskType.REVISION)
         response = self.client.get(reverse("admin:core_order_change", args=[self.order.pk]))
         self.assertContains(response, "Расходы")
         self.assertContains(response, "вызовов: 4 (превью 1 / правки 1 / производство 2)")
         self.assertContains(response, "токенов: 3000")
-        self.assertContains(response, "≈ 50 ₽")
+        self.assertContains(response, "стоимость: неизвестна")
+        self.assertContains(response, "возможно платных: 4")
+        self.assertNotContains(response, "50 ₽")
         self.assertContains(response, "попыток на слот: max 2 / без лимита")
 
     @override_settings(PILOT_MAX_IMAGE_CALLS_PER_DAY=10)
     def test_order_list_has_column_and_budget_header(self):
         response = self.client.get(reverse("admin:core_order_changelist"))
         self.assertContains(response, "Вызовы/₽")
-        self.assertContains(response, "1 / ≈12.5 ₽")
-        self.assertContains(response, "Сегодня: 1 вызовов / лимит 10, ≈ 12.5 ₽")
-        self.assertContains(response, "Месяц: 1 вызовов / без лимита, ≈ 12.5 ₽")
+        self.assertContains(response, "1 / неизвестна")
+        self.assertContains(response, "Сегодня: 1 вызовов / лимит 10, стоимость неизвестна (возможно платных: 1)")
+        self.assertContains(response, "Месяц: 1 вызовов / без лимита, стоимость неизвестна (возможно платных: 1)")
+        self.assertNotContains(response, "12.5 ₽")
 
-    def test_order_costs_service(self):
+    def test_order_costs_service_reports_unknown_not_zero(self):
         costs = BudgetService().order_costs(self.order)
         self.assertEqual(costs["calls"], 1)
         self.assertEqual(costs["tokens"], 3000)
-        self.assertEqual(costs["rub"], 12.5)
+        self.assertNotIn("rub", costs)
+        self.assertEqual(costs["cost"]["known_count"], 0)
+        self.assertEqual(costs["cost"]["known_cost_minor"], 0)
+        self.assertEqual(costs["cost"]["unknown_price_count"], 1)
+        self.assertEqual(costs["cost"]["possibly_billable_count"], 1)
 
 
 class RefundEventAndFilterTests(BudgetFixture):

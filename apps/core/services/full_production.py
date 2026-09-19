@@ -31,12 +31,20 @@ from apps.core.services.channel_order_flow import (
     product_emotion_options,
 )
 from apps.core.services.budget import BudgetGuard, BudgetOverride
+from apps.core.services import generation_cost
 from apps.core.services.order_state import OrderStateService
 from apps.core.storage import LocalMediaStorage
 
 
 # Budget action names per _prepare mode (event payload / decision).
 _BUDGET_ACTIONS = {"start": "full_start", "retry": "retry", "regenerate": "regenerate", "force": "force_retry"}
+# _prepare mode → cost snapshot mode (DRF-2111 D4: regeneration marker).
+_COST_MODES = {
+    "start": generation_cost.MODE_INITIAL,
+    "retry": generation_cost.MODE_RETRY_FAILED,
+    "regenerate": generation_cost.MODE_REGENERATE,
+    "force": generation_cost.MODE_FORCE_RETRY,
+}
 
 
 class FullProductionError(ValueError):
@@ -304,9 +312,10 @@ class FullProductionService:
         job.status = GenerationJob.Status.FAILED
         job.error = note
         job.output_metadata = {**(job.output_metadata or {}), "failure_class": "ambiguous"}
+        generation_cost.apply_failure(job, job.output_metadata)
         job.finished_at = timezone.now()
         job.save(
-            update_fields=["status", "error", "output_metadata", "finished_at", "updated_at"]
+            update_fields=["status", "error", "output_metadata", "input_metadata", "finished_at", "updated_at"]
         )
 
     @staticmethod
@@ -406,11 +415,30 @@ class FullProductionService:
                 BudgetGuard(override=budget_override).enforce(
                     locked, GenerationJob.TaskType.FULL, slot_key=slot, action=_BUDGET_ACTIONS[mode]
                 )
-                new_jobs.append(self._create_attempt(locked, slot, preview, photo_ids))
+                new_jobs.append(
+                    self._create_attempt(
+                        locked, slot, preview, photo_ids,
+                        cost_mode=_COST_MODES[mode],
+                        qc_attempt=self._qc_retry_attempt(locked, slot) if mode == "regenerate" else None,
+                    )
+                )
             return new_jobs, blocked
 
+    @staticmethod
+    def _qc_retry_attempt(locked: Order, slot: str):
+        """QC attempt number when this regeneration was requested by a FAILED
+        QC report (DRF-2052 retry_slots), else None."""
+        from apps.core.services.qc import QcService
+
+        report = QcService.latest_report(locked)
+        if report is None:
+            return None
+        queued = {str(item.get("slot_key") or "") for item in (report.retry_slots or [])}
+        return report.attempt if slot in queued else None
+
     def _create_attempt(
-        self, locked: Order, slot: str, preview: GeneratedAsset, photo_ids: list
+        self, locked: Order, slot: str, preview: GeneratedAsset, photo_ids: list,
+        *, cost_mode: str = generation_cost.MODE_INITIAL, qc_attempt=None,
     ) -> GenerationJob:
         # Attempt numbering stays scoped to (order, task_type) like
         # GenerationService: uniq_generation_attempt holds for FULL
@@ -437,6 +465,14 @@ class FullProductionService:
                 "source_preview_id": preview.pk,
                 "slot_key": slot,
                 "emotion": slot,
+                # DRF-2111: immutable price snapshot, same transaction as the
+                # Budget Guard check, before the provider is called.
+                generation_cost.COST_KEY: generation_cost.cost_snapshot(
+                    provider=self.provider,
+                    task_type=GenerationJob.TaskType.FULL,
+                    mode=cost_mode,
+                    qc_attempt=qc_attempt,
+                ),
             },
             started_at=timezone.now(),
         )
@@ -575,9 +611,10 @@ class FullProductionService:
         # Keep provider metadata (model, usage) next to the asset id, as
         # GenerationService._complete does — pilot metrics read FULL cost here.
         locked_job.output_metadata = {"asset_id": asset.pk, **(result.metadata or {})}
+        generation_cost.apply_success(locked_job, result.metadata)
         locked_job.finished_at = timezone.now()
         locked_job.save(
-            update_fields=["status", "output_metadata", "finished_at", "updated_at"]
+            update_fields=["status", "output_metadata", "input_metadata", "finished_at", "updated_at"]
         )
         return asset
 
@@ -588,10 +625,12 @@ class FullProductionService:
             return
         locked_job.status = GenerationJob.Status.FAILED
         locked_job.error = str(exc)[:4000]
-        locked_job.output_metadata = describe_provider_failure(self.provider, exc)
+        failure = describe_provider_failure(self.provider, exc)
+        locked_job.output_metadata = failure
+        generation_cost.apply_failure(locked_job, failure)
         locked_job.finished_at = timezone.now()
         locked_job.save(
-            update_fields=["status", "error", "output_metadata", "finished_at", "updated_at"]
+            update_fields=["status", "error", "output_metadata", "input_metadata", "finished_at", "updated_at"]
         )
 
     @transaction.atomic

@@ -226,7 +226,7 @@ class ManualWorkLogAdminTests(MetricsFixtureMixin, TestCase):
         self.assertEqual(self.client.get(reverse("admin:core_manualworklog_changelist")).status_code, 200)
 
 
-@override_settings(PILOT_IMAGE_CALL_COST_USD=0.04)
+@override_settings(PILOT_IMAGE_CALL_COST_RUB=12.5)
 class PilotMetricsSnapshotTests(MetricsFixtureMixin, TestCase):
     def setUp(self):
         super().setUp()
@@ -304,17 +304,20 @@ class PilotMetricsSnapshotTests(MetricsFixtureMixin, TestCase):
         self.assertEqual(cost["provider_calls_by_task_type"], {"preview": 3})
         self.assertEqual(cost["jobs_with_usage"], 1)
         self.assertEqual(cost["tokens"], {"input_tokens": 100, "output_tokens": 400, "total_tokens": 500})
-        self.assertEqual(cost["unit_cost_usd"], 0.04)
-        self.assertEqual(cost["estimated_usd"], 0.12)
         self.assertEqual(cost["calls_per_paid_order"], 1.5)
-        self.assertEqual(cost["estimated_usd_per_paid_order"], 0.06)
 
-    @override_settings(PILOT_IMAGE_CALL_COST_USD=None)
-    def test_cost_without_unit_price_reports_calls_only(self):
+    def test_generation_cost_never_prices_history_with_todays_tariff(self):
+        # DRF-2111: the fixture jobs were created without a cost snapshot →
+        # UNKNOWN, not 3 × 12.5 ₽; no USD estimate exists any more.
         cost = PilotMetricsService().snapshot()["generation_cost"]
-        self.assertEqual(cost["provider_calls"], 3)
-        self.assertIsNone(cost["estimated_usd"])
-        self.assertIsNone(cost["estimated_usd_per_paid_order"])
+        self.assertNotIn("estimated_usd", cost)
+        self.assertNotIn("unit_cost_usd", cost)
+        self.assertEqual(cost["known_cost_minor"], 0)
+        self.assertEqual(cost["known_cost_currency"], "RUB")
+        self.assertIsNone(cost["known_cost_minor_per_paid_order"])
+        self.assertEqual(cost["cost"]["unknown_price_count"], 3)
+        self.assertEqual(cost["cost"]["possibly_billable_count"], 3)
+        self.assertEqual(cost["cost"]["known_count"], 0)
 
     def test_manual_minutes_come_only_from_explicit_logs(self):
         # B has been sitting in revision_requested for "hours" but nobody logged work on it.
