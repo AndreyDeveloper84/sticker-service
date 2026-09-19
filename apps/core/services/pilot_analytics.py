@@ -56,6 +56,11 @@ BUDGET_LIMIT_PERCENT = 100
 # (no new statuses are invented here).
 FAILED_STATUSES = (Order.Status.FAILED,)
 
+# unknown_components that are COST gaps (revenue / payment ones are not).
+COST_UNKNOWN_COMPONENTS = {
+    "payment_fee_unknown", "ai_unknown_price", "ai_possibly_billable", "manual_rate_not_configured",
+}
+
 # §21 export columns, in order.
 EXPORT_COLUMNS = (
     "order_id", "created_at", "paid_at", "delivered_at", "channel", "product", "currency", "revenue",
@@ -316,16 +321,20 @@ class PilotAnalyticsService:
                             "unknown_price_count", "not_billable_count"):
                     agg[key] += item[key]
             stages[stage] = dict(agg)
+        # DRF-2111 C1: only paid orders with at least one provider call whose
+        # cost is fully known take part — an order without calls is not
+        # evidence of a 0 ₽ generation cost
         paid_known = [
             r["eco"]["ai"]["total"]["known_cost_minor"]
-            for r in rows if r["paid_at"] is not None and _ai_fully_known(r["eco"])
+            for r in rows
+            if r["paid_at"] is not None and r["eco"]["ai"]["total"]["jobs"] and _ai_fully_known(r["eco"])
         ]
         return {
             "currency": RUB,
             "total": total,
             "stages": stages,
             "paid_orders": sum(1 for r in rows if r["paid_at"] is not None),
-            "paid_orders_fully_known": len(paid_known),
+            "paid_orders_with_known_cost": len(paid_known),
             "known_cost_minor_per_paid_order_avg": _mean(paid_known),
             "known_cost_minor_per_paid_order_median": _median(paid_known),
         }
@@ -396,6 +405,9 @@ class PilotAnalyticsService:
             group = by_code.get(code, [])
             revenue = {}
             known_ai = known_manual = known_fee = 0
+            ai_jobs = []
+            manual_logged = manual_not_configured = 0
+            fee_known = fee_unknown = 0
             contribution_sum = 0
             contribution_orders = 0
             unknown = Counter()
@@ -406,12 +418,21 @@ class PilotAnalyticsService:
                     cell = revenue.setdefault(eco["revenue"]["currency"], {"orders": 0, "amount_minor": 0})
                     cell["orders"] += 1
                     cell["amount_minor"] += eco["revenue"]["amount_minor"]
+                    fee = eco["payment_fee"]
+                    if fee["source"] == PROVIDER_CONFIRMED and fee["currency"] == RUB:
+                        known_fee += fee["amount_minor"]
+                        fee_known += 1
+                    else:
+                        fee_unknown += 1
                 known_ai += eco["ai"]["total"]["known_cost_minor"]
-                if eco["manual"]["cost_minor"] is not None:
-                    known_manual += eco["manual"]["cost_minor"]
-                fee = eco["payment_fee"]
-                if fee["source"] == PROVIDER_CONFIRMED and fee["currency"] == RUB:
-                    known_fee += fee["amount_minor"]
+                ai_jobs.extend(job.input_metadata for job in r["order"].generation_jobs.all() if job.started_at)
+                manual = eco["manual"]
+                if manual["entries"]:
+                    manual_logged += 1
+                    if manual["cost_minor"] is None:
+                        manual_not_configured += 1
+                    else:
+                        known_manual += manual["cost_minor"]
                 if eco["known_contribution_minor"] != NOT_COMPUTABLE:
                     contribution_sum += eco["known_contribution_minor"]
                     contribution_orders += 1
@@ -428,9 +449,14 @@ class PilotAnalyticsService:
                 "orders": len(group),
                 "paid_orders": sum(1 for r in group if r["paid_at"] is not None),
                 "revenue": [{"currency": cur, **revenue[cur]} for cur in sorted(revenue)],
+                # DRF-2111 C1: every known_* sum carries its evidence so the UI
+                # can tell "0 because proven" from "0 because nothing is known"
                 "known_ai_cost_minor": known_ai,
+                "ai": generation_cost.aggregate(ai_jobs),
                 "known_manual_cost_minor": known_manual,
+                "manual": {"orders_with_logs": manual_logged, "orders_not_configured": manual_not_configured},
                 "known_payment_fee_minor": known_fee,
+                "payment_fee": {"orders_known": fee_known, "orders_unknown": fee_unknown},
                 "known_contribution_minor": contribution_sum if contribution_orders else None,
                 "contribution_orders": contribution_orders,
                 "orders_with_unknown": orders_with_unknown,
@@ -505,6 +531,10 @@ def export_row(r: dict) -> dict:
         currency, amount = revenue["currency"], revenue["amount_minor"]
     manual_cost = _rub(manual["cost_minor"]) if manual["rate_source"] != RATE_SOURCE_NOT_CONFIGURED else None
     contribution = eco["known_contribution_minor"]
+    # DRF-2111 C1: a known variable cost of 0 with cost components missing
+    # is "nothing known", not a free order → empty cell
+    cost_unknown = any(c.split(":", 1)[0] in COST_UNKNOWN_COMPONENTS for c in eco["unknown_components"])
+    known_variable = None if cost_unknown and not eco["known_variable_cost_minor"] else _rub(eco["known_variable_cost_minor"])
     return {
         "order_id": order.pk,
         "created_at": _iso(order.created_at),
@@ -523,7 +553,7 @@ def export_row(r: dict) -> dict:
         "manual_minutes": manual["minutes"],
         "manual_cost": manual_cost,
         "payment_fee": _rub(fee["amount_minor"]) if fee["source"] == PROVIDER_CONFIRMED and fee["currency"] == RUB else None,
-        "known_variable_cost": _rub(eco["known_variable_cost_minor"]),
+        "known_variable_cost": known_variable,
         "known_contribution": None if contribution == NOT_COMPUTABLE else _rub(contribution),
         "unknown_cost_components": ";".join(eco["unknown_components"]),
     }

@@ -76,8 +76,56 @@ def _stage_line(stage, item):
     return text
 
 
-def _known_minor(minor):
-    return "неизвестна" if minor is None else money(int(round(minor)))
+def _per_paid_order(ai, value):
+    """avg / median over paid orders with ≥ 1 call and a fully known cost;
+    none of them → говорим об этом, а не печатаем 0."""
+    known = ai["paid_orders_with_known_cost"]
+    if not known or value is None:
+        return "неизвестна (нет заказов с известной стоимостью)"
+    return f"{money(int(round(value)))} (по {known} из {ai['paid_orders']} оплаченных с полностью известной стоимостью)"
+
+
+def _unit_ai(item):
+    ai = item["ai"]
+    text = format_known_cost(ai)
+    unknown_jobs = ai["jobs"] - ai["known_count"] - ai["not_billable_count"]
+    if ai["known_count"] and unknown_jobs:
+        text += f" (+ неизвестно: {unknown_jobs})"
+    return text
+
+
+def _unit_manual(item):
+    manual = item["manual"]
+    if not manual["orders_with_logs"]:
+        return "нет логов"
+    priced = manual["orders_with_logs"] - manual["orders_not_configured"]
+    if not priced:
+        return "не настроено"
+    text = money(item["known_manual_cost_minor"])
+    if manual["orders_not_configured"]:
+        text += f" (не настроено для {manual['orders_not_configured']})"
+    return text
+
+
+def _unit_fee(item):
+    fee = item["payment_fee"]
+    if not fee["orders_known"] and not fee["orders_unknown"]:
+        return "нет платежей"
+    if not fee["orders_known"]:
+        return "неизвестна"
+    text = money(item["known_payment_fee_minor"])
+    if fee["orders_unknown"]:
+        text += f" (неизвестна для {fee['orders_unknown']})"
+    return text
+
+
+def _unit_contribution(item):
+    if item["known_contribution_minor"] is None:
+        return "не вычисляется"
+    text = f"{money(item['known_contribution_minor'])} (по {item['contribution_orders']} заказам"
+    if item["orders_with_unknown"]:
+        text += f", не учтено у {item['orders_with_unknown']}"
+    return text + ")"
 
 
 def build_context(snapshot: dict) -> dict:
@@ -102,10 +150,8 @@ def build_context(snapshot: dict) -> dict:
             + (f", возможно платных: {ai['total']['possibly_billable_count']}" if ai["total"]["possibly_billable_count"] else "")
             + (f", без цены: {ai['total']['unknown_price_count']}" if ai["total"]["unknown_price_count"] else "")),
         ("По стадиям", " · ".join(_stage_line(stage, ai["stages"][stage]) for stage in ai["stages"])),
-        ("Средняя на оплаченный заказ",
-         f"{_known_minor(ai['known_cost_minor_per_paid_order_avg'])}"
-         f" (по {ai['paid_orders_fully_known']} из {ai['paid_orders']} с полностью известной стоимостью)"),
-        ("Медиана на оплаченный заказ", _known_minor(ai["known_cost_minor_per_paid_order_median"])),
+        ("Средняя на оплаченный заказ", _per_paid_order(ai, ai["known_cost_minor_per_paid_order_avg"])),
+        ("Медиана на оплаченный заказ", _per_paid_order(ai, ai["known_cost_minor_per_paid_order_median"])),
     ]
     quality_rows = [
         ("Превью принято с первой попытки",
@@ -134,13 +180,10 @@ def build_context(snapshot: dict) -> dict:
             "orders": item["orders"],
             "paid": item["paid_orders"],
             "revenue": _per_currency(item["revenue"]),
-            "ai": money(item["known_ai_cost_minor"]),
-            "manual": money(item["known_manual_cost_minor"]),
-            "fee": money(item["known_payment_fee_minor"]),
-            "contribution": (
-                f"{money(item['known_contribution_minor'])} (по {item['contribution_orders']} заказам)"
-                if item["known_contribution_minor"] is not None else "не вычисляется"
-            ),
+            "ai": _unit_ai(item),
+            "manual": _unit_manual(item),
+            "fee": _unit_fee(item),
+            "contribution": _unit_contribution(item),
             "unknown": f"{item['orders_with_unknown']} заказ(ов): {unknown}" if item["orders_with_unknown"] else "—",
         })
 
