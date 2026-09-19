@@ -37,12 +37,21 @@ jobs:
           # Bootstrap: the deploy scripts on the server are the ones from the
           # previous checkout — sync them from origin/dev first so changes to
           # deploy.sh itself take effect on this run.
+          # The bootstrap fetch is retried 3x with a 15 s pause: one of
+          # github.com's anycast IPs is unreachable from the VPS and each new
+          # git process re-resolves DNS. If every attempt fails the remote
+          # shell exits 1 and nothing is deployed. Single quotes: $i must be
+          # expanded on the server, not by the runner.
           ssh -p "${STAGING_SSH_PORT:-22}" -i ~/.ssh/staging_deploy_key \
             "${STAGING_USER}@${STAGING_HOST}" \
-            "cd /opt/sticker-service \
-             && git fetch origin dev \
+            'cd /opt/sticker-service \
+             && for i in 1 2 3; do \
+                  git fetch origin dev && break; \
+                  [ "$i" -lt 3 ] || { echo "[deploy] git fetch origin dev failed after 3 attempts" >&2; exit 1; }; \
+                  echo "[deploy] git fetch origin dev failed (attempt $i/3), retrying in 15s" >&2; sleep 15; \
+                done \
              && git checkout origin/dev -- deploy/scripts/ \
-             && DEPLOY_REF=dev ./deploy/scripts/deploy.sh"
+             && DEPLOY_REF=dev ./deploy/scripts/deploy.sh'
 
       - name: External health check
         run: |
