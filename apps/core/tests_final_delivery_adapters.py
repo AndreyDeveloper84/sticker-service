@@ -29,7 +29,7 @@ class TelegramFinalDeliveryAdapterTests(SimpleTestCase):
             recipient_id="100",
             content=b"png-bytes",
             mime_type="image/png",
-            filename="sticker-2-bye.png",
+            filename="sticker-bye.png",
             caption="Стикер 2/9 · Пока",
             index=2,
             total=9,
@@ -44,7 +44,7 @@ class TelegramFinalDeliveryAdapterTests(SimpleTestCase):
         document = client.calls[0][1]
         self.assertEqual(document["chat_id"], "100")
         self.assertEqual(document["content"], b"png-bytes")
-        self.assertEqual(document["filename"], "sticker-2-bye.png")
+        self.assertEqual(document["filename"], "sticker-bye.png")
         self.assertEqual(document["mime_type"], "image/png")
         self.assertEqual(document["caption"], "Стикер 2/9 · Пока")
         message = client.calls[1][1]
@@ -59,7 +59,7 @@ class TelegramFinalDeliveryAdapterTests(SimpleTestCase):
             recipient_id="100",
             content=b"x",
             mime_type="image/png",
-            filename="sticker-1-hello.png",
+            filename="sticker-hello.png",
             caption="",
             index=1,
             total=1,
@@ -68,13 +68,15 @@ class TelegramFinalDeliveryAdapterTests(SimpleTestCase):
 
 
 class MaxFinalDeliveryAdapterTests(SimpleTestCase):
-    def test_sends_image_then_summary_message(self):
+    def test_sends_file_then_summary_message(self):
+        """Final stickers go out as FILE attachments (original PNG with alpha);
+        an image attachment is re-encoded on a white background by MAX."""
         class Client:
             def __init__(self):
                 self.calls = []
 
-            def send_image(self, **kwargs):
-                self.calls.append(("send_image", kwargs))
+            def send_file(self, **kwargs):
+                self.calls.append(("send_file", kwargs))
                 return {"body": {"mid": "max-501"}}
 
             def send_message(self, **kwargs):
@@ -89,7 +91,7 @@ class MaxFinalDeliveryAdapterTests(SimpleTestCase):
             recipient_id="200",
             content=b"png-bytes",
             mime_type="image/png",
-            filename="sticker-1-hello.png",
+            filename="sticker-hello.png",
             caption="Стикер 1/1 · Привет",
             index=1,
             total=1,
@@ -100,18 +102,18 @@ class MaxFinalDeliveryAdapterTests(SimpleTestCase):
         summary = adapter.send_final_summary(recipient_id="200", text="Набор готов", total=1)
         self.assertEqual(summary.message_id, "max-502")
 
-        self.assertEqual([name for name, _ in client.calls], ["send_image", "send_message"])
-        image = client.calls[0][1]
-        self.assertEqual(image["user_id"], "200")
-        self.assertEqual(image["content"], b"png-bytes")
-        self.assertEqual(image["filename"], "sticker-1-hello.png")
-        self.assertEqual(image["mime_type"], "image/png")
-        self.assertEqual(image["caption"], "Стикер 1/1 · Привет")
+        self.assertEqual([name for name, _ in client.calls], ["send_file", "send_message"])
+        sent = client.calls[0][1]
+        self.assertEqual(sent["user_id"], "200")
+        self.assertEqual(sent["content"], b"png-bytes")
+        self.assertEqual(sent["filename"], "sticker-hello.png")
+        self.assertEqual(sent["mime_type"], "image/png")
+        self.assertEqual(sent["caption"], "Стикер 1/1 · Привет")
         self.assertEqual(client.calls[1][1], {"user_id": "200", "text": "Набор готов"})
 
     def test_real_max_envelope_message_body_mid(self):
         class Client:
-            def send_image(self, **kwargs):
+            def send_file(self, **kwargs):
                 return {"message": {"sender": {}, "recipient": {}, "body": {"mid": "mid.real-1", "seq": 9}}}
 
             def send_message(self, **kwargs):
@@ -127,14 +129,14 @@ class MaxFinalDeliveryAdapterTests(SimpleTestCase):
 
     def test_top_level_mid_is_accepted(self):
         class Client:
-            def send_image(self, **kwargs):
+            def send_file(self, **kwargs):
                 return {"mid": "max-1"}
 
         item = MaxFinalDeliveryAdapter(client=Client()).send_final_item(
             recipient_id="200",
             content=b"x",
             mime_type="image/png",
-            filename="sticker-1-hello.png",
+            filename="sticker-hello.png",
             caption="",
             index=1,
             total=1,

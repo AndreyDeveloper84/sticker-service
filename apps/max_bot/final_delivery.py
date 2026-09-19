@@ -8,9 +8,12 @@ def _message_id(response) -> str:
 
 
 class MaxFinalDeliveryAdapter:
-    """Final set delivery over MAX (DRF-2053): one image message per
-    sticker (upload + send, like the preview adapter), then one "set is
-    ready" text message."""
+    """Final set delivery over MAX (DRF-2053): one FILE message per sticker
+    (the original PNG with its alpha channel — an ``image`` attachment is
+    re-encoded by MAX onto a white background and cannot be used as a
+    sticker; previews stay images), then one "set is ready" text message.
+    At-most-once per slot and resume live in FinalDeliveryService and are
+    untouched."""
 
     channel = ChannelIdentity.Channel.MAX
 
@@ -20,7 +23,7 @@ class MaxFinalDeliveryAdapter:
     def send_final_item(
         self, *, recipient_id, content, mime_type, filename, caption, index, total
     ):
-        message = self.client.send_image(
+        message = self.client.send_file(
             user_id=recipient_id,
             content=content,
             filename=filename,

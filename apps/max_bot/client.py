@@ -18,9 +18,19 @@ bot-initiated sends. Exactly one of them must be passed.
 Error contract: network failures, timeouts, HTTP >= 400 all raise
 :class:`MaxAPIError`; a 2xx with a non-JSON body returns ``{}``. No silent
 failures.
+
+Uploads (``POST /uploads?type=...`` → upload URL → multipart ``data`` →
+token → ``attachments[{type, payload: {token}}]``): ``image`` answers
+``{"photos": {<key>: {"token"}}}``, ``file`` answers a flat ``{"token"}``.
+A file is processed asynchronously — ``POST /messages`` right after the
+upload may answer 400 ``attachment.not.ready``; the message is NOT created
+then, so :meth:`MaxBotClient.send_file` retries with the same token and
+finally raises :class:`MaxAttachmentNotReady` (retryable, no duplicate).
 """
 
+import json
 import os
+import time
 from uuid import uuid4
 
 import httpx
@@ -48,6 +58,43 @@ def uploaded_image_token(uploaded) -> str:
         if isinstance(entry, dict) and entry.get("token"):
             return str(entry["token"])
     return ""
+
+
+def uploaded_file_token(uploaded) -> str:
+    """Attachment token from the multipart upload answer of a FILE upload URL
+    (``POST /uploads?type=file`` → upload URL → multipart POST).
+
+    Wire shape (dev.max.ru, official TS/Java clients): a flat
+    ``{"token": "<str>"}`` — unlike images, no ``photos`` map. Returns ""
+    when the answer carries no token.
+    """
+    if not isinstance(uploaded, dict):
+        return ""
+    token = uploaded.get("token")
+    return str(token) if token else ""
+
+
+ATTACHMENT_NOT_READY = "attachment.not.ready"
+# seconds between retries of POST /messages while the uploaded file is still
+# being processed (MAX answers 400 attachment.not.ready; the message is not
+# created, the token stays valid): 0.5 → 1 → 2 s, then every 3 s, ≈30 s in
+# total — the schedule of the official Java client.
+FILE_ATTACHMENT_RETRY_DELAYS = (0.5, 1, 2) + (3,) * 9
+
+
+def _sleep(seconds: float) -> None:  # patched in tests
+    time.sleep(seconds)
+
+
+def is_attachment_not_ready(exc: Exception) -> bool:
+    """400 with ``{"code": "attachment.not.ready", ...}`` in the body."""
+    if not isinstance(exc, MaxAPIError) or exc.status_code != 400:
+        return False
+    try:
+        body = json.loads(exc.body or "")
+    except ValueError:
+        return ATTACHMENT_NOT_READY in (exc.body or "")
+    return isinstance(body, dict) and body.get("code") == ATTACHMENT_NOT_READY
 
 
 def created_message_id(response) -> str:
@@ -84,6 +131,14 @@ class MaxAPIError(Exception):
         self.status_code = status_code
         self.body = body
         super().__init__(f"MAX API status={status_code}: {body[:200]}")
+
+
+class MaxAttachmentNotReady(MaxAPIError):
+    """``attachment.not.ready`` survived every retry: the file is uploaded,
+    no message was created. Retryable for the delivery service — a later
+    resend cannot duplicate anything."""
+
+    retryable = True
 
 
 def _api_base() -> str:
@@ -203,8 +258,11 @@ class MaxBotClient:
 
     # -------------------------------------------------------------- uploads
 
-    def _upload_image(self, *, content: bytes, filename: str, mime_type: str) -> str:
-        init = self._request("POST", "/uploads", query={"type": "image"}, body={})
+    def _upload(self, *, upload_type: str, content: bytes, filename: str, mime_type: str) -> tuple[dict, dict]:
+        """``POST /uploads?type=<upload_type>`` then the multipart POST of
+        ``content`` to the returned URL. Returns (init answer, upload answer);
+        token extraction depends on the type (see the callers)."""
+        init = self._request("POST", "/uploads", query={"type": upload_type}, body={})
         upload_url = str(init.get("url") or "")
         if not upload_url.startswith("https://"):
             raise MaxAPIError(0, "MAX upload URL is missing or not HTTPS")
@@ -235,7 +293,10 @@ class MaxBotClient:
             uploaded = response.json()
         except ValueError:
             uploaded = {}
+        return init, uploaded
 
+    def _upload_image(self, *, content: bytes, filename: str, mime_type: str) -> str:
+        init, uploaded = self._upload(upload_type="image", content=content, filename=filename, mime_type=mime_type)
         token = uploaded_image_token(uploaded)
         if not token:
             # legacy / defensive fallbacks, never observed on the live API
@@ -248,10 +309,17 @@ class MaxBotClient:
         if not token:
             from urllib.parse import parse_qs, urlparse
 
-            query = parse_qs(urlparse(upload_url).query)
+            query = parse_qs(urlparse(str(init.get("url") or "")).query)
             token = str((query.get("token") or [""])[0])
         if not token:
             raise MaxAPIError(0, "MAX image upload returned no token")
+        return token
+
+    def _upload_file(self, *, content: bytes, filename: str, mime_type: str) -> str:
+        _init, uploaded = self._upload(upload_type="file", content=content, filename=filename, mime_type=mime_type)
+        token = uploaded_file_token(uploaded)
+        if not token:
+            raise MaxAPIError(0, "MAX file upload returned no token")
         return token
 
     def send_image(self, *, user_id: str, content: bytes, filename: str, mime_type: str, caption: str = ""):
@@ -265,3 +333,25 @@ class MaxBotClient:
             text=caption,
             attachments=[{"type": "image", "payload": {"token": token}}],
         )
+
+    def send_file(self, *, user_id: str, content: bytes, filename: str, mime_type: str, caption: str = ""):
+        """Send ``content`` as a FILE attachment — byte-for-byte, the client
+        can save it (an ``image`` attachment is re-encoded by MAX and loses
+        the PNG alpha channel, which makes a sticker unusable).
+
+        ``POST /messages`` is retried while MAX answers 400
+        ``attachment.not.ready`` (the file is still being processed; no
+        message was created, the token stays valid). After the last delay
+        the error propagates — the caller must not count it as sent.
+        """
+        token = self._upload_file(content=content, filename=filename, mime_type=mime_type)
+        attachments = [{"type": "file", "payload": {"token": token}}]
+        for delay in (*FILE_ATTACHMENT_RETRY_DELAYS, None):
+            try:
+                return self.send_message(user_id=user_id, text=caption, attachments=attachments)
+            except MaxAPIError as exc:
+                if not is_attachment_not_ready(exc):
+                    raise
+                if delay is None:
+                    raise MaxAttachmentNotReady(exc.status_code, exc.body) from exc
+            _sleep(delay)
