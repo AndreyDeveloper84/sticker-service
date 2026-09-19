@@ -327,7 +327,9 @@ class PilotMetricsSnapshotTests(MetricsFixtureMixin, TestCase):
         self.assertEqual(manual["orders_with_logs"], 1)
         self.assertEqual(manual["total_minutes"], 12)
         self.assertEqual(manual["minutes_per_logged_order"], 12.0)
-        self.assertEqual(manual["minutes_per_paid_order"], 6.0)
+        # the unlogged paid order has UNKNOWN minutes: it is counted, not averaged in as 0
+        self.assertEqual(manual["paid_orders_with_logs"], 1)
+        self.assertEqual(manual["minutes_per_paid_order"], 12.0)
         self.assertEqual(manual["paid_orders_without_logs"], 1)
         self.assertEqual(manual["minutes_by_activity"], {"preview_review": 12})
 

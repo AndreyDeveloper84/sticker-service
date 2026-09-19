@@ -194,7 +194,16 @@ class SnapshotTests(ThreeProductsFixture):
         ops = self.snapshot["operations"]
         self.assertEqual(ops["manual_minutes_total"], 25)
         self.assertEqual(ops["orders_with_manual_logs"], 2)
+        self.assertEqual(ops["manual_minutes_per_logged_order"], 12.5)
+        self.assertEqual(ops["paid_orders"], 4)
+        self.assertEqual(ops["paid_orders_with_logs"], 2)
+        self.assertEqual(ops["manual_minutes_per_paid_order"], 12.5)  # over the 2 logged, not 25/4
         self.assertEqual(ops["paid_orders_without_logs"], 2)
+        response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=today")
+        rows = dict(response.context["ops_rows"])
+        self.assertEqual(rows["Ручная работа на заказ с логами"], "12.5 мин (2 заказов, всего 25 мин)")
+        self.assertEqual(rows["Ручная работа на оплаченный заказ"],
+                         "12.5 мин (по 2 из 4 оплаченных с логами); без логов: 2")
         self.assertEqual(ops["lead_time_orders"], 1)
         self.assertIsNotNone(ops["payment_to_delivery_hours_median"])
 
@@ -328,6 +337,8 @@ class PageAndExportTests(ThreeProductsFixture):
         self.assertEqual(xtr["revenue"], "460")
         self.assertEqual(xtr["known_contribution"], "")
         self.assertEqual(xtr["ai_total"], "")  # historical job without price
+        self.assertEqual(xtr["manual_minutes"], "")  # no logs → unknown, not 0
+        self.assertEqual(xtr["manual_cost"], "")
         self.assertEqual(xtr["preview_cost"], "")
         body = response.content.decode("utf-8")
         for pii in ("Анна", "+7 900", "contact", "display_name", "username", "photo"):
@@ -470,6 +481,43 @@ class UnknownRenderingTests(EconomicsFixture):
         self.assertEqual(ai["known_cost_minor_per_paid_order_avg"], TARIFF)
         response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=today")
         self.assertIn("7,42 ₽ (по 1 из", dict(response.context["ai_rows"])["Средняя на оплаченный заказ"])
+
+    def test_manual_minutes_per_paid_order_never_averages_unlogged_orders_as_zero(self):
+        """Staging finding (C2): «Ручная работа на оплаченный заказ: 0 мин; без
+        логов: 1» — a paid order nobody logged has unknown minutes, not 0."""
+        # the fixture's XTR order (paid, no logs) + two RUB orders nobody logged
+        first = self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-unlogged-1")
+        self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-unlogged-2")
+        ops = PilotAnalyticsService(period_for("today")).snapshot()["operations"]
+        self.assertEqual(ops["paid_orders"], 3)
+        self.assertEqual(ops["paid_orders_with_logs"], 0)
+        self.assertIsNone(ops["manual_minutes_per_paid_order"])
+        self.assertIsNone(ops["manual_minutes_per_logged_order"])
+        self.assertEqual(ops["paid_orders_without_logs"], 3)
+        response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=today")
+        rows = dict(response.context["ops_rows"])
+        self.assertEqual(rows["Ручная работа на заказ с логами"], "нет логов")
+        self.assertEqual(rows["Ручная работа на оплаченный заказ"], "нет логов (оплаченных без логов: 3)")
+        self.assertNotIn("0 мин", response.content.decode())
+
+        self._log_minutes(first, 10)  # one of the three gets a log → mean over that one, the others are named
+        ops = PilotAnalyticsService(period_for("today")).snapshot()["operations"]
+        self.assertEqual(ops["paid_orders_with_logs"], 1)
+        self.assertEqual(ops["manual_minutes_per_paid_order"], 10)
+        response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=today")
+        rows = dict(response.context["ops_rows"])
+        self.assertEqual(rows["Ручная работа на оплаченный заказ"],
+                         "10 мин (по 1 из 3 оплаченных с логами); без логов: 2")
+
+    def test_export_manual_minutes_empty_without_logs(self):
+        unlogged = self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-unlogged")
+        unpriced = self._unknown_order()  # 10 min logged without a rate
+        response = self.client.get(reverse("admin:core_order_pilot_metrics_export_csv") + "?preset=today")
+        rows = {int(r["order_id"]): r for r in csv.DictReader(io.StringIO(response.content.decode("utf-8")))}
+        self.assertEqual(rows[unlogged.pk]["manual_minutes"], "")
+        self.assertEqual(rows[unlogged.pk]["manual_cost"], "")
+        self.assertEqual(rows[unpriced.pk]["manual_minutes"], "10")  # minutes known, cost not
+        self.assertEqual(rows[unpriced.pk]["manual_cost"], "")
 
     def test_export_known_variable_cost_empty_when_nothing_known(self):
         unknown = self._unknown_order()

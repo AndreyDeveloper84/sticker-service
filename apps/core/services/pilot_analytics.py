@@ -40,6 +40,7 @@ from apps.core.services.budget import BudgetService, safe_limit
 from apps.core.services.order_economics import (
     NOT_COMPUTABLE,
     PROVIDER_CONFIRMED,
+    RATE_SOURCE_NO_LOGS,
     RATE_SOURCE_NOT_CONFIGURED,
     RUB,
     STAGES,
@@ -372,6 +373,7 @@ class PilotAnalyticsService:
     def _operations(rows) -> dict:
         paid = [r for r in rows if r["paid_at"] is not None]
         logged = [r for r in rows if r["eco"]["manual"]["entries"]]
+        paid_logged = [r for r in paid if r["eco"]["manual"]["entries"]]
         minutes_total = sum(r["eco"]["manual"]["minutes"] for r in logged)
         lead_hours = [
             round((r["delivered_at"] - r["paid_at"]).total_seconds() / 3600, 2)
@@ -381,8 +383,13 @@ class PilotAnalyticsService:
             "manual_minutes_total": minutes_total,
             "orders_with_manual_logs": len(logged),
             "manual_minutes_per_logged_order": _mean([r["eco"]["manual"]["minutes"] for r in logged]),
-            "manual_minutes_per_paid_order": _mean([r["eco"]["manual"]["minutes"] for r in paid]),
-            "paid_orders_without_logs": sum(1 for r in paid if not r["eco"]["manual"]["entries"]),
+            # DRF-2111 C1: an order without logs has UNKNOWN minutes, not 0 —
+            # the per-paid-order mean runs over paid orders WITH logs only and
+            # names how many of the paid orders it is based on
+            "paid_orders": len(paid),
+            "paid_orders_with_logs": len(paid_logged),
+            "manual_minutes_per_paid_order": _mean([r["eco"]["manual"]["minutes"] for r in paid_logged]),
+            "paid_orders_without_logs": len(paid) - len(paid_logged),
             "lead_time_orders": len(lead_hours),
             "payment_to_delivery_hours_median": _median(lead_hours),
             "payment_to_delivery_hours_avg": _mean(lead_hours),
@@ -529,7 +536,13 @@ def export_row(r: dict) -> dict:
         currency, amount = RUB, _rub(revenue["amount_minor"])
     else:
         currency, amount = revenue["currency"], revenue["amount_minor"]
-    manual_cost = _rub(manual["cost_minor"]) if manual["rate_source"] != RATE_SOURCE_NOT_CONFIGURED else None
+    # no logs → minutes and cost are unknown (empty), not 0 (DRF-2111 C1);
+    # logs without a rate → cost unknown, minutes known
+    manual_minutes = manual["minutes"] if manual["rate_source"] != RATE_SOURCE_NO_LOGS else None
+    manual_cost = (
+        _rub(manual["cost_minor"])
+        if manual["rate_source"] not in (RATE_SOURCE_NOT_CONFIGURED, RATE_SOURCE_NO_LOGS) else None
+    )
     contribution = eco["known_contribution_minor"]
     # DRF-2111 C1: a known variable cost of 0 with cost components missing
     # is "nothing known", not a free order → empty cell
@@ -550,7 +563,7 @@ def export_row(r: dict) -> dict:
         "full_cost": _stage_cost(ai["full"]),
         "regeneration_cost": _stage_cost(ai["regeneration"]),
         "ai_total": _stage_cost(ai["total"]) if _ai_fully_known(eco) else None,
-        "manual_minutes": manual["minutes"],
+        "manual_minutes": manual_minutes,
         "manual_cost": manual_cost,
         "payment_fee": _rub(fee["amount_minor"]) if fee["source"] == PROVIDER_CONFIRMED and fee["currency"] == RUB else None,
         "known_variable_cost": known_variable,
