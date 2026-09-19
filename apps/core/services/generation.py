@@ -15,7 +15,7 @@ from apps.core.image_providers import (
     describe_provider_failure,
 )
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
-from apps.core.services.generation_prompts import FRAMING_CLAUSE, SAFE_FOR_WORK_CLAUSE
+from apps.core.services.generation_prompts import FRAMING_CLAUSE, SAFE_FOR_WORK_CLAUSE, render_revision_request
 from apps.core.services.budget import BudgetGuard, BudgetOverride
 from apps.core.services import generation_cost
 from apps.core.services.order_state import InvalidOrderTransition, OrderStateService
@@ -207,9 +207,7 @@ class GenerationService:
             prompt_parts.append(f"Operator notes: {order.operator_notes.strip()}")
         if job.task_type == GenerationJob.TaskType.REVISION:
             revision = Revision.objects.get(order=order)
-            prompt_parts.append(f"Revision category: {revision.category}")
-            if revision.customer_text.strip():
-                prompt_parts.append(f"Customer revision request: {revision.customer_text.strip()}")
+            prompt_parts.append(render_revision_request(revision.category, revision.customer_text))
 
         references = []
         photos = order.photos.exclude(status=OrderPhoto.Status.REJECTED).order_by("created_at", "pk")

@@ -117,6 +117,43 @@ def render_expression(product: Product, code: str) -> str:
     return f"Expression: «{label}»."
 
 
+# Revision instructions per Revision.Category (bot channels send the category
+# only; the customer text is optional and usually empty). The bare category
+# code is deliberately NOT part of the prompt — "Revision category: other"
+# gave the model nothing to act on (Order 16, 2026-09-19).
+REVISION_INSTRUCTIONS = {
+    "face": (
+        "make the face match the reference photos much more closely: facial "
+        "proportions, eyes, nose, mouth and skin tone."
+    ),
+    "hair": "match the hairstyle, hair length and hair color of the reference photos exactly.",
+    "body": "correct the body shape, proportions and pose so they match the person in the photos.",
+    "detail": (
+        "reproduce the person's distinctive details from the photos exactly: glasses, "
+        "facial hair, accessories and clothing."
+    ),
+    "colors": "correct the colors: skin, hair, eyes and clothing must match the reference photos.",
+    "style_expectation": "follow the chosen art style more faithfully and consistently.",
+    "other": (
+        "produce a clearly different variation with stronger likeness to the "
+        "reference photos and cleaner overall quality."
+    ),
+}
+
+REVISION_LEAD = "The customer rejected the previous preview and asked for a revision:"
+
+
+def render_revision_request(category: str, customer_text: str = "") -> str:
+    """Natural-language revision instruction; appends the customer's own words
+    when present. Unknown categories fall back to the "other" wording."""
+    instruction = REVISION_INSTRUCTIONS.get(category) or REVISION_INSTRUCTIONS["other"]
+    text = f"{REVISION_LEAD} {instruction}"
+    words = (customer_text or "").strip()
+    if words:
+        text += f" Customer's own words: «{words}»."
+    return text
+
+
 def render_reference_roles(*, photo_count: int, has_preview: bool) -> str:
     """Tell the model which reference is the identity source and which is style only."""
     if photo_count == 1:
