@@ -85,6 +85,25 @@ def _per_paid_order(ai, value):
     return f"{money(int(round(value)))} (по {known} из {ai['paid_orders']} оплаченных с полностью известной стоимостью)"
 
 
+def _manual_per_logged_order(ops):
+    if not ops["orders_with_manual_logs"]:
+        return "нет логов"
+    return (f"{_num(ops['manual_minutes_per_logged_order'], ' мин')} "
+            f"({ops['orders_with_manual_logs']} заказов, всего {ops['manual_minutes_total']} мин)")
+
+
+def _manual_per_paid_order(ops):
+    """Mean minutes over paid orders WITH logs; an unlogged order has unknown
+    minutes, so it is named, never averaged in as 0 (DRF-2111 C1)."""
+    logged, paid = ops["paid_orders_with_logs"], ops["paid_orders"]
+    if not logged:
+        return "нет логов" if not paid else f"нет логов (оплаченных без логов: {paid})"
+    text = f"{_num(ops['manual_minutes_per_paid_order'], ' мин')} (по {logged} из {paid} оплаченных с логами)"
+    if ops["paid_orders_without_logs"]:
+        text += f"; без логов: {ops['paid_orders_without_logs']}"
+    return text
+
+
 def _unit_ai(item):
     ai = item["ai"]
     text = format_known_cost(ai)
@@ -162,8 +181,8 @@ def build_context(snapshot: dict) -> dict:
         ("QC: отправлено на перегенерацию", quality["qc_retries"]),
     ]
     ops_rows = [
-        ("Ручная работа на заказ с логами", f"{_num(ops['manual_minutes_per_logged_order'], ' мин')} ({ops['orders_with_manual_logs']} заказов, всего {ops['manual_minutes_total']} мин)"),
-        ("Ручная работа на оплаченный заказ", f"{_num(ops['manual_minutes_per_paid_order'], ' мин')}; без логов: {ops['paid_orders_without_logs']}"),
+        ("Ручная работа на заказ с логами", _manual_per_logged_order(ops)),
+        ("Ручная работа на оплаченный заказ", _manual_per_paid_order(ops)),
         ("Оплата → доставка, медиана", f"{_num(ops['payment_to_delivery_hours_median'], ' ч')} (по {ops['lead_time_orders']} заказам; среднее {_num(ops['payment_to_delivery_hours_avg'], ' ч')})"),
     ]
     unit_rows = []

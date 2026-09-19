@@ -255,13 +255,17 @@ class PilotMetricsService:
             minutes_by_activity[(payload or {}).get("activity") or "other"] += minutes
         total = sum(minutes_by_order.values())
         logged_orders = len(minutes_by_order)
-        paid = len(paid_orders)
+        # DRF-2111 C1: a paid order without logs has unknown minutes, not 0 —
+        # the per-paid-order figure is a mean over paid orders WITH logs
+        paid_logged = set(paid_orders) & set(minutes_by_order)
+        paid_logged_minutes = sum(minutes_by_order[order_id] for order_id in paid_logged)
         return {
             "entries": logs.count(),
             "orders_with_logs": logged_orders,
             "total_minutes": total,
             "minutes_per_logged_order": _ratio(total, logged_orders),
-            "minutes_per_paid_order": _ratio(total, paid),
+            "paid_orders_with_logs": len(paid_logged),
+            "minutes_per_paid_order": _ratio(paid_logged_minutes, len(paid_logged)),
             "paid_orders_without_logs": len(set(paid_orders) - set(minutes_by_order)),
             "minutes_by_activity": dict(minutes_by_activity),
         }
