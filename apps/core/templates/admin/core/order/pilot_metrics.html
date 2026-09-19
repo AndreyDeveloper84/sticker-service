@@ -1,0 +1,101 @@
+{% extends "admin/base_site.html" %}
+{% block title %}{{ title }} | {{ site_title|default:"Django site admin" }}{% endblock %}
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Главная</a> › <a href="{% url 'admin:core_order_changelist' %}">Заказы</a> › {{ title }}
+  </div>
+{% endblock %}
+{% block content %}
+<div id="content-main" class="pilot-metrics">
+  <style>
+    .pilot-metrics .module { margin-bottom: 16px; }
+    .pilot-metrics table { width: 100%; }
+    .pilot-metrics th, .pilot-metrics td { padding: 4px 8px; vertical-align: top; }
+    .pilot-metrics .budget-warning { background: #fff4e5; border-left: 4px solid #e67e22; }
+    .pilot-metrics .budget-limit { background: #fdecea; border-left: 4px solid #c0392b; }
+    .pilot-metrics form.period { margin: 0 0 16px; display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  </style>
+
+  <form method="get" class="period">
+    <span>Период ({{ period.start_date|date:"d.m.Y" }} — {{ period.end_date|date:"d.m.Y" }}, Europe/Moscow):</span>
+    {% for code, label in presets %}
+      <label><input type="radio" name="preset" value="{{ code }}"{% if period.preset == code %} checked{% endif %}> {{ label }}</label>
+    {% endfor %}
+    <label>с <input type="date" name="start" value="{% if period.preset == 'custom' %}{{ period.start_date|date:'Y-m-d' }}{% endif %}"></label>
+    <label>по <input type="date" name="end" value="{% if period.preset == 'custom' %}{{ period.end_date|date:'Y-m-d' }}{% endif %}"></label>
+    <input type="submit" value="Показать">
+    <a class="button" href="{% url 'admin:core_order_pilot_metrics_export_csv' %}?{{ query }}">Экспорт CSV</a>
+    <a class="button" href="{% url 'admin:core_order_pilot_metrics_export_json' %}?{{ query }}">Экспорт JSON</a>
+  </form>
+
+  <div class="module{% if budget_limit_reached %} budget-limit{% elif budget_warning %} budget-warning{% endif %}">
+    <h2>Бюджет{% if budget_limit_reached %} — лимит достигнут{% elif budget_warning %} — предупреждение (≥ 80 %){% endif %}</h2>
+    <table>
+      {% for row in budget_rows %}
+        <tr class="{% if row.limit_reached %}budget-limit{% elif row.warning %}budget-warning{% endif %}">
+          <th>{{ row.title }}</th><td>{{ row.text }}</td>
+        </tr>
+      {% endfor %}
+      <tr><th>Лимиты</th><td>{{ budget_limits }}</td></tr>
+    </table>
+  </div>
+
+  <div class="module">
+    <h2>Заказы (события за период)</h2>
+    <table>{% for title, value in orders_rows %}<tr><th>{{ title }}</th><td>{{ value }}</td></tr>{% endfor %}</table>
+  </div>
+
+  <div class="module">
+    <h2>Воронка (заказы, созданные в периоде)</h2>
+    <table>
+      <tr><th>Шаг</th><th>Заказов</th><th>Конверсия от предыдущего шага</th></tr>
+      {% for title, count, conversion in funnel_rows %}
+        <tr><td>{{ title }}</td><td>{{ count }}</td><td>{{ conversion }}</td></tr>
+      {% endfor %}
+      <tr><th>Создан → доставлен</th><td colspan="2">{{ funnel_overall }}</td></tr>
+    </table>
+  </div>
+
+  <div class="module">
+    <h2>Выручка (по валютам раздельно, без конверсии)</h2>
+    <table>
+      <tr><th>Продукт</th><th>Канал</th><th>Валюта</th><th>Сумма</th><th>Заказов</th></tr>
+      {% for product, channel, currency, amount, orders in revenue_rows %}
+        <tr><td>{{ product }}</td><td>{{ channel }}</td><td>{{ currency }}</td><td>{{ amount }}</td><td>{{ orders }}</td></tr>
+      {% empty %}
+        <tr><td colspan="5">Подтверждённых платежей нет</td></tr>
+      {% endfor %}
+      <tr><th colspan="3">Итого</th><td colspan="2">{{ revenue_totals }}</td></tr>
+    </table>
+  </div>
+
+  <div class="module">
+    <h2>Стоимость AI</h2>
+    <table>{% for title, value in ai_rows %}<tr><th>{{ title }}</th><td>{{ value }}</td></tr>{% endfor %}</table>
+  </div>
+
+  <div class="module">
+    <h2>Качество</h2>
+    <table>{% for title, value in quality_rows %}<tr><th>{{ title }}</th><td>{{ value }}</td></tr>{% endfor %}</table>
+  </div>
+
+  <div class="module">
+    <h2>Операции</h2>
+    <table>{% for title, value in ops_rows %}<tr><th>{{ title }}</th><td>{{ value }}</td></tr>{% endfor %}</table>
+  </div>
+
+  <div class="module">
+    <h2>Юнит-экономика по продуктам</h2>
+    <table>
+      <tr><th>Продукт</th><th>Цена</th><th>Заказов</th><th>Оплачено</th><th>Выручка</th><th>AI (известно)</th><th>Ручная работа (известно)</th><th>Комиссия (известно)</th><th>Contribution (известный, RUB)</th><th>Не учтено</th></tr>
+      {% for row in unit_rows %}
+        <tr>
+          <td>{{ row.product }}{% if not row.active %} (неактивен){% endif %}<br><small>{{ row.name }}</small></td>
+          <td>{{ row.price }}</td><td>{{ row.orders }}</td><td>{{ row.paid }}</td><td>{{ row.revenue }}</td>
+          <td>{{ row.ai }}</td><td>{{ row.manual }}</td><td>{{ row.fee }}</td><td>{{ row.contribution }}</td><td>{{ row.unknown }}</td>
+        </tr>
+      {% endfor %}
+    </table>
+  </div>
+</div>
+{% endblock %}

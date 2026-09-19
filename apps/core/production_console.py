@@ -12,6 +12,7 @@ from django.utils.html import format_html, format_html_join
 from PIL import Image
 
 from .console_html import LINE_BREAK, lines_html
+from .pilot_analytics_console import PilotAnalyticsViews
 from .console_text import (
     GENERATION_WAIT,
     JOB_STATUSES,
@@ -147,7 +148,7 @@ class ProductionOrderPhotoInline(admin.TabularInline):
         return False
 
 
-class ProductionOrderAdmin(admin.ModelAdmin):
+class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
     """Production Console (DRF-2084: Russian, «Следующий шаг», secondary actions).
 
     Subclasses (preview delivery → QC → final delivery) add their panels
@@ -904,6 +905,22 @@ class ProductionOrderAdmin(admin.ModelAdmin):
     def get_urls(self):
         urls = super().get_urls()
         custom = [
+            # DRF-2111 PR-C: «Метрики Pilot» page + §21 export (read-only)
+            path(
+                "pilot-metrics/",
+                self.admin_site.admin_view(self.pilot_metrics_view),
+                name="core_order_pilot_metrics",
+            ),
+            path(
+                "pilot-metrics/export.csv",
+                self.admin_site.admin_view(self.pilot_metrics_export_csv_view),
+                name="core_order_pilot_metrics_export_csv",
+            ),
+            path(
+                "pilot-metrics/export.json",
+                self.admin_site.admin_view(self.pilot_metrics_export_json_view),
+                name="core_order_pilot_metrics_export_json",
+            ),
             path(
                 "<int:order_id>/generate-preview/",
                 self.admin_site.admin_view(self.generate_preview_view),
