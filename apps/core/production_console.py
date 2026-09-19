@@ -328,6 +328,24 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 return asset
         return None
 
+    @staticmethod
+    def _preview_sent(asset) -> bool:
+        return any(
+            item.get("status") == "sent" for item in ((asset.metadata or {}).get("deliveries") or [])
+        )
+
+    def _approved_preview_to_send(self, order):
+        """The internally approved preview that can still go to the customer.
+
+        A preview that was already sent is never a candidate: the delivery
+        service refuses a second send, so offering it as «Отправить превью
+        клиенту» is a dead end (seen live on the first revision: the old
+        preview kept its approval flag before request_revision cleared it)."""
+        for asset in order.generated_assets.filter(kind=GeneratedAsset.Kind.PREVIEW):
+            if (asset.metadata or {}).get("internal_approved") and not self._preview_sent(asset):
+                return asset
+        return None
+
     def _production_plan_safe(self, order):
         try:
             return self.get_full_production_service().production_plan(order)
@@ -349,14 +367,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 f"{GENERATION_WAIT} {PAID_CALL_ONE}",
             )
         if status == Order.Status.INTERNAL_PREVIEW_REVIEW:
-            approved = next(
-                (
-                    a
-                    for a in order.generated_assets.filter(kind=GeneratedAsset.Kind.PREVIEW)
-                    if (a.metadata or {}).get("internal_approved")
-                ),
-                None,
-            )
+            approved = self._approved_preview_to_send(order)
             if approved is not None:
                 return (
                     "Отправить превью клиенту",
@@ -695,7 +706,11 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             open_url = reverse("admin:core_preview_asset_file", args=[asset.pk])
             approved = bool((asset.metadata or {}).get("internal_approved"))
             approve_link = ""
-            if order.status == Order.Status.INTERNAL_PREVIEW_REVIEW and not approved:
+            if (
+                order.status == Order.Status.INTERNAL_PREVIEW_REVIEW
+                and not approved
+                and not self._preview_sent(asset)
+            ):
                 approve_url = reverse("admin:core_order_approve_preview", args=[order.pk, asset.pk])
                 approve_link = format_html(
                     ' · <a class="button" href="{}">Одобрить это превью</a>', approve_url
