@@ -43,6 +43,49 @@ FULL_DEFAULT_PROMPT = (
     + FULL_OUTPUT_REQUIREMENTS
 )
 
+# Style prompts (single source; seed_live_test pins them into Style.config).
+# Owner GO 2026-09-20 (Order 16, asset 20): the one-phrase "3D" prompt produced
+# an almost photorealistic retouch with the clothes copied 1:1 from the photo.
+# Every style now states the medium explicitly, says what it is NOT (a
+# photograph) and names the stylization cues, while keeping likeness. These
+# clauses must not contradict SAFE_FOR_WORK_CLAUSE, FRAMING_CLAUSE or
+# FULL_OUTPUT_REQUIREMENTS (no framing, background or outline instructions here).
+NOT_A_PHOTOGRAPH = "The result must read as artwork, not a retouched photograph."
+
+STYLE_PROMPTS = {
+    "3d": (
+        "Render the person as a clearly stylized 3D animated character, like a "
+        "feature-animation CGI character: simplified smooth skin without pores or "
+        "blemishes, slightly enlarged expressive eyes, softly rounded stylized "
+        "facial shapes, soft studio key light with a gentle rim light, clean "
+        "material shading, simplified clothing with a few broad folds. Keep the "
+        "person's strong likeness and recognizable features. " + NOT_A_PHOTOGRAPH
+    ),
+    "drawn": (
+        "Render the person as a warm hand-drawn illustration: confident clean "
+        "ink-like linework, flat or lightly shaded colors, simplified shapes, "
+        "visible drawn strokes. Keep the person's strong likeness and recognizable "
+        "features. " + NOT_A_PHOTOGRAPH
+    ),
+    "meme": (
+        "Render the person as a bold cartoon meme sticker: thick clean outlines, "
+        "flat vivid colors, simplified shapes, exaggerated but readable expression. "
+        "Keep the person recognizable with strong likeness. " + NOT_A_PHOTOGRAPH
+    ),
+    "embroidery": (
+        "Render the person as a tactile embroidered fabric patch: visible thread "
+        "stitches and satin-stitch texture, simplified shapes, a limited palette of "
+        "thread colors. Keep the person's strong likeness and recognizable "
+        "features. " + NOT_A_PHOTOGRAPH
+    ),
+    "help-choose": (
+        "Choose the most suitable friendly modern illustration style for the "
+        "supplied photos: clear contours, simplified shapes, clean stylized "
+        "shading. Keep the person's strong likeness and recognizable features. "
+        + NOT_A_PHOTOGRAPH
+    ),
+}
+
 # Custom-caption products (kind "custom_pack"): slot_key "custom-N" carries the
 # customer's N-th phrase (Order.selection["custom_phrases"]) instead of an emotion.
 CUSTOM_SLOT_PREFIX = "custom-"
