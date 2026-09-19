@@ -1,7 +1,7 @@
 from django.core.management.base import BaseCommand
 
 from apps.core.models import Product, Style
-from apps.core.services.generation_prompts import FULL_DEFAULT_PROMPT
+from apps.core.services.generation_prompts import FULL_DEFAULT_PROMPT, STYLE_PROMPTS
 
 
 # Deterministic pilot emotion set (00-product/product-catalog.md, Standard Pack).
@@ -114,12 +114,14 @@ class Command(BaseCommand):
         # the selectors but kept for historical orders (FK is PROTECT).
         Product.objects.exclude(code__in=pilot_codes).update(is_active=False)
 
+        # Prompt wording lives in generation_prompts.STYLE_PROMPTS (single
+        # source, covered by tests); the seed only pins name + prompt per code.
         styles = [
-            ("3d", "3D", "Use a polished 3D animated-character style with soft studio lighting and strong likeness."),
-            ("drawn", "Рисованные", "Use a warm hand-drawn illustration style with clean expressive lines and strong likeness."),
-            ("meme", "Мемные", "Use a clear, funny meme-sticker style; keep the expression readable and the person recognizable."),
-            ("embroidery", "Вышивка", "Use a tactile embroidered-patch style with visible thread texture and strong likeness."),
-            ("help-choose", "Помогите выбрать", "Choose the most suitable friendly modern illustration style for the supplied photos, with clear contours and strong likeness."),
+            ("3d", "3D", STYLE_PROMPTS["3d"]),
+            ("drawn", "Рисованные", STYLE_PROMPTS["drawn"]),
+            ("meme", "Мемные", STYLE_PROMPTS["meme"]),
+            ("embroidery", "Вышивка", STYLE_PROMPTS["embroidery"]),
+            ("help-choose", "Помогите выбрать", STYLE_PROMPTS["help-choose"]),
         ]
         style_codes = []
         for code, name, prompt in styles:
