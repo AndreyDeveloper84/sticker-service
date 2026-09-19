@@ -141,11 +141,17 @@ class MaxExternalPaymentAdapter:
         if confirmation.currency and confirmation.currency != payment.currency:
             raise MaxPaymentError("Provider payment currency mismatch")
 
+        metadata = {"provider_webhook": confirmation.metadata}
+        # DRF-2111: fee evidence is additive metadata — amounts, statuses and
+        # transitions of the payment are untouched.
+        fee = confirmation.metadata.get("fee") if isinstance(confirmation.metadata, dict) else None
+        if fee:
+            metadata["fee"] = fee
         try:
             return PaymentService.confirm(
                 payment=payment,
                 external_payment_id=confirmation.external_payment_id,
-                metadata={"provider_webhook": confirmation.metadata},
+                metadata=metadata,
             )
         except PaymentError as exc:
             raise MaxPaymentError(str(exc)) from exc

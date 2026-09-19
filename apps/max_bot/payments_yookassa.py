@@ -4,6 +4,7 @@ import json
 import os
 
 import httpx
+from django.utils import timezone
 
 from apps.core.models import Payment
 from apps.max_bot.payments import CheckoutSession, MaxPaymentError, PaymentConfirmation
@@ -125,11 +126,37 @@ class YooKassaPaymentProvider:
         except (KeyError, TypeError, ValueError) as exc:
             raise MaxPaymentError("YooKassa payment has no valid amount") from exc
 
+        confirmation_metadata = {"event": str(event.get("event") or ""), "payment": metadata}
+        fee = fee_evidence(data, amount_minor=amount_minor, currency=currency)
+        if fee is not None:
+            confirmation_metadata["fee"] = fee
         return PaymentConfirmation(
             payment_id=payment_id,
             external_payment_id=str(data.get("id") or "").strip(),
             status=str(data.get("status") or "").strip().lower(),
-            metadata={"event": str(event.get("event") or ""), "payment": metadata},
+            metadata=confirmation_metadata,
             amount_minor=amount_minor,
             currency=currency,
         )
+
+
+def fee_evidence(data: dict, *, amount_minor: int, currency: str) -> dict | None:
+    """DRF-2111: provider-confirmed fee from YooKassa's ``income_amount`` (the
+    amount credited to the shop after the commission). Only the object
+    returned by the provider is trusted; absent or inconsistent → None (the
+    fee stays UNKNOWN — never a default percentage)."""
+    income = data.get("income_amount") or {}
+    try:
+        income_minor = round(float(income["value"]) * 100)
+        income_currency = str(income["currency"]).strip().upper()
+    except (KeyError, TypeError, ValueError):
+        return None
+    if income_currency != currency or income_minor < 0 or income_minor > amount_minor:
+        return None
+    return {
+        "amount_minor": amount_minor - income_minor,
+        "income_amount_minor": income_minor,
+        "currency": currency,
+        "source": "PROVIDER_CONFIRMED",
+        "captured_at": timezone.now().isoformat(),
+    }

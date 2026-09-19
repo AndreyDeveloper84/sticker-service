@@ -32,6 +32,20 @@ from .image_providers import get_image_provider
 from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Product, Revision
 from .services.budget import BudgetConfigError, BudgetError, BudgetExceeded, BudgetOverride, BudgetService
 from .services.generation_cost import format_known_cost
+from .services.order_economics import (
+    NOT_COMPUTABLE,
+    PROVIDER_CONFIRMED,
+    RATE_SOURCE_CONFIG_SNAPSHOT,
+    RATE_SOURCE_NOT_CONFIGURED,
+    STAGE_FULL,
+    STAGE_PREVIEW,
+    STAGE_REGENERATION,
+    STAGE_REVISION,
+    STAGE_TITLES,
+    OrderEconomics,
+    money,
+    unknown_component_text,
+)
 from .services.full_production import FullProductionError, FullProductionService
 from .services.generation import GenerationError, GenerationService
 from .services.order_state import InvalidOrderTransition, OrderStateService
@@ -186,6 +200,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             "production_plan",
             "generation_history",
             "expenses",
+            "economics",
             *[name for _title, name in self.panel_sections],
             "secondary_actions",
             "created_at",
@@ -212,6 +227,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             ("Превью", {"fields": ("preview_assets", "revision_request")}),
             ("Производство", {"fields": ("production_plan", "generation_history")}),
             ("Расходы", {"fields": ("expenses",)}),
+            ("Экономика заказа", {"fields": ("economics",)}),
         ]
         for title, name in self.panel_sections:
             sections.append((title, {"fields": (name,)}))
@@ -728,6 +744,84 @@ class ProductionOrderAdmin(admin.ModelAdmin):
         second += f" / лимит {order_limit}" if order_limit else " / без лимита"
         return lines_html([line, second])
 
+    @admin.display(description="Экономика заказа")
+    def economics(self, order):
+        """DRF-2111 PR-B: facts only — every figure comes from
+        OrderEconomics.compute(); unknown parts are named, never shown as 0."""
+        if not order or not order.pk:
+            return "—"
+        eco = OrderEconomics.compute(order)
+        lines = []
+
+        revenue = eco["revenue"]
+        if revenue is None:
+            lines.append("Выручка: нет подтверждённого платежа")
+        else:
+            provider = eco["payment"]["provider"]
+            lines.append(f"Выручка: {money(revenue['amount_minor'], revenue['currency'])} ({provider})")
+
+        ai = eco["ai"]
+
+        def _stage_text(stage):
+            item = ai[stage]
+            if not item["calls"]:
+                return f"{STAGE_TITLES[stage]}: нет вызовов"
+            text = f"{STAGE_TITLES[stage]}: {item['calls']} вызов(ов), {format_known_cost(item)}"
+            if item["possibly_billable_count"]:
+                text += f", возможно платных: {item['possibly_billable_count']}"
+            return text
+
+        lines.append("AI по стадиям: " + " · ".join(
+            _stage_text(stage) for stage in (STAGE_PREVIEW, STAGE_REVISION, STAGE_FULL, STAGE_REGENERATION)
+        ))
+        for stage in (STAGE_FULL, STAGE_REGENERATION):
+            slots = ai[stage].get("slots") or []
+            if not slots:
+                continue
+            title = "Слоты" if stage == STAGE_FULL else "Перегенерации"
+            parts = []
+            for row in slots:
+                cost = money(row["cost_minor"]) if row["cost_minor"] is not None else (
+                    "0 ₽ (не принят)" if row["billable"] is False else "неизвестна"
+                )
+                parts.append(f"{row['title'] or row['slot_key']} #{row['attempt']} — {cost}")
+            lines.append(f"{title}: " + "; ".join(parts))
+        lines.append(f"AI всего: {format_known_cost(ai['total'])}")
+
+        manual = eco["manual"]
+        if manual["rate_source"] == RATE_SOURCE_CONFIG_SNAPSHOT:
+            lines.append(f"Ручная работа: {manual['minutes']} мин — {money(manual['cost_minor'])}")
+        elif manual["rate_source"] == RATE_SOURCE_NOT_CONFIGURED:
+            lines.append(f"Ручная работа: {manual['minutes']} мин — не настроено (ставка оператора)")
+        else:
+            lines.append("Ручная работа: не залогирована")
+
+        fee = eco["payment_fee"]
+        if fee["source"] == PROVIDER_CONFIRMED:
+            lines.append(f"Комиссия платежа: {money(fee['amount_minor'], fee['currency'])} (по данным провайдера)")
+        else:
+            lines.append("Комиссия платежа: неизвестна")
+
+        if eco["known_variable_cost_minor"] == 0 and eco["unknown_components"]:
+            # nothing is known yet: naming the gaps beats printing a zero
+            lines.append("Известные переменные расходы: нет известных")
+        else:
+            lines.append(f"Известные переменные расходы: {money(eco['known_variable_cost_minor'])}")
+        contribution = eco["known_contribution_minor"]
+        if contribution == NOT_COMPUTABLE:
+            reason = (
+                f"валюта {revenue['currency']}" if revenue is not None and revenue["currency"] != "RUB"
+                else "нет выручки"
+            )
+            lines.append(f"Contribution: не вычисляется ({reason})")
+        else:
+            lines.append(f"Известный contribution: {money(contribution)}")
+        if eco["unknown_components"]:
+            lines.append("+ не учтено: " + "; ".join(
+                unknown_component_text(code) for code in eco["unknown_components"]
+            ))
+        return lines_html(lines)
+
     def changelist_view(self, request, extra_context=None):
         summary = BudgetService().summary()
 
@@ -802,7 +896,7 @@ class ProductionOrderAdmin(admin.ModelAdmin):
             super()
             .get_queryset(request)
             .select_related("user", "channel_identity", "product", "style")
-            .prefetch_related("photos", "generation_jobs", "generated_assets__job")
+            .prefetch_related("photos", "generation_jobs", "generated_assets__job", "payments", "events")
         )
 
     # -------------------------------------------------------------- urls

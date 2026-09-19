@@ -65,13 +65,17 @@ def webhook_body(event="payment.succeeded", object_id="yk-tx-1"):
     return json.dumps({"event": event, "object": {"id": object_id}}).encode("utf-8")
 
 
-def yk_payment_object(payment_id, *, status="succeeded", value="199.00", currency="RUB", object_id="yk-tx-1"):
-    return {
+def yk_payment_object(payment_id, *, status="succeeded", value="199.00", currency="RUB", object_id="yk-tx-1",
+                      income_value=None, income_currency=None):
+    data = {
         "id": object_id,
         "status": status,
         "amount": {"value": value, "currency": currency},
         "metadata": {"payment_id": str(payment_id), "order_id": "1"},
     }
+    if income_value is not None:
+        data["income_amount"] = {"value": income_value, "currency": income_currency or currency}
+    return data
 
 
 class YooKassaCreateCheckoutTests(TestCase):
@@ -187,6 +191,31 @@ class YooKassaWebhookParsingTests(TestCase):
         self.assertEqual(http.gets[0]["url"], "https://api.yookassa.ru/v3/payments/yk-tx-1")
         self.assertEqual(http.gets[0]["auth"], ("shop-1", "secret-1"))
 
+    # DRF-2111 PR-B: fee evidence from the provider's own income_amount.
+
+    def test_income_amount_yields_provider_confirmed_fee(self):
+        http = FakeHttpClient(payment_object=yk_payment_object(7, value="100.00", income_value="96.50"))
+        confirmation = make_provider(http).parse_webhook(body=webhook_body(), signature="")
+        fee = confirmation.metadata["fee"]
+        self.assertEqual(fee["amount_minor"], 350)
+        self.assertEqual(fee["income_amount_minor"], 9650)
+        self.assertEqual(fee["currency"], "RUB")
+        self.assertEqual(fee["source"], "PROVIDER_CONFIRMED")
+        self.assertTrue(fee["captured_at"])
+        self.assertEqual(confirmation.amount_minor, 10000)  # the charged amount is untouched
+
+    def test_missing_income_amount_leaves_fee_unknown(self):
+        http = FakeHttpClient(payment_object=yk_payment_object(7, value="100.00"))
+        confirmation = make_provider(http).parse_webhook(body=webhook_body(), signature="")
+        self.assertNotIn("fee", confirmation.metadata)
+
+    def test_inconsistent_income_amount_is_not_trusted(self):
+        for kwargs in ({"income_value": "120.00"}, {"income_value": "96.50", "income_currency": "USD"},
+                       {"income_value": "abc"}):
+            http = FakeHttpClient(payment_object=yk_payment_object(7, value="100.00", **kwargs))
+            confirmation = make_provider(http).parse_webhook(body=webhook_body(), signature="")
+            self.assertNotIn("fee", confirmation.metadata, kwargs)
+
     def test_canceled_status_is_propagated(self):
         http = FakeHttpClient(payment_object=yk_payment_object(7, status="canceled"))
         provider = make_provider(http)
@@ -270,6 +299,28 @@ class YooKassaAdapterTests(TestCase):
         self.assertEqual(confirmed.status, Payment.Status.CONFIRMED)
         self.assertEqual(confirmed.external_payment_id, "yk-tx-1")
         self.assertEqual(self.order.status, Order.Status.PAID)
+
+    def test_confirmation_stores_fee_evidence_additively(self):
+        payment = self.start_payment()
+
+        confirmed = self.confirm(payment, income_value="192.03")
+
+        confirmed.refresh_from_db()
+        self.assertEqual(confirmed.status, Payment.Status.CONFIRMED)
+        self.assertEqual(confirmed.amount_minor, 19900)
+        self.assertEqual(confirmed.metadata["fee"]["amount_minor"], 697)
+        self.assertEqual(confirmed.metadata["fee"]["source"], "PROVIDER_CONFIRMED")
+        self.assertEqual(confirmed.metadata["channel"], "max")  # earlier metadata kept
+        self.assertIn("provider_webhook", confirmed.metadata)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.PAID)
+
+    def test_confirmation_without_income_amount_has_no_fee(self):
+        payment = self.start_payment()
+        confirmed = self.confirm(payment)
+        confirmed.refresh_from_db()
+        self.assertNotIn("fee", confirmed.metadata)
+        self.assertEqual(confirmed.status, Payment.Status.CONFIRMED)
 
     def test_duplicate_webhook_is_idempotent(self):
         payment = self.start_payment()
