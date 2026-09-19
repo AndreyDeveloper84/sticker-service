@@ -134,6 +134,11 @@ REVISION_INSTRUCTIONS = {
     ),
     "colors": "correct the colors: skin, hair, eyes and clothing must match the reference photos.",
     "style_expectation": "follow the chosen art style more faithfully and consistently.",
+    "clothes": (
+        "replace the clothing with a different, stylish and neutral outfit that "
+        "suits the chosen art style; keep the face, hairstyle, likeness and "
+        "expression unchanged."
+    ),
     "other": (
         "produce a clearly different variation with stronger likeness to the "
         "reference photos and cleaner overall quality."
@@ -142,13 +147,22 @@ REVISION_INSTRUCTIONS = {
 
 REVISION_LEAD = "The customer rejected the previous preview and asked for a revision:"
 
+# «Сменить одежду» with the customer's optional "what to wear" text: the
+# text names the outfit itself, so it replaces the neutral-outfit default.
+CLOTHES_WITH_TEXT = (
+    "dress the person in the outfit the customer describes: «{words}»; keep the "
+    "face, hairstyle, likeness and expression unchanged."
+)
+
 
 def render_revision_request(category: str, customer_text: str = "") -> str:
     """Natural-language revision instruction; appends the customer's own words
     when present. Unknown categories fall back to the "other" wording."""
+    words = (customer_text or "").strip()
+    if category == "clothes" and words:
+        return f"{REVISION_LEAD} {CLOTHES_WITH_TEXT.format(words=words)}"
     instruction = REVISION_INSTRUCTIONS.get(category) or REVISION_INSTRUCTIONS["other"]
     text = f"{REVISION_LEAD} {instruction}"
-    words = (customer_text or "").strip()
     if words:
         text += f" Customer's own words: «{words}»."
     return text

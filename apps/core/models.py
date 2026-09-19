@@ -331,6 +331,7 @@ class Revision(TimestampedModel):
         DETAIL = "detail", "Detail"
         COLORS = "colors", "Colors"
         STYLE_EXPECTATION = "style_expectation", "Style expectation"
+        CLOTHES = "clothes", "Clothes"
         OTHER = "other", "Other"
 
     class Status(models.TextChoices):

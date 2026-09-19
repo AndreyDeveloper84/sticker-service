@@ -10,7 +10,13 @@ from django.views.decorators.csrf import csrf_exempt
 
 logger = logging.getLogger(__name__)
 
-from apps.core.customer_hints import PHOTO_GUIDANCE, customer_hint
+from apps.core.customer_hints import (
+    PHOTO_GUIDANCE,
+    REVISION_ACCEPTED_TEXT,
+    REVISION_CLOTHES_ACCEPTED_TEXT,
+    REVISION_TEXT_SAVED_TEXT,
+    customer_hint,
+)
 from apps.core.bot_menu import PAYLOAD_CONFIRM_ORDER, OrderStepper
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
@@ -161,6 +167,11 @@ def _handle_message(event: MaxEvent, *, adapter, client):
             return _reply(client, event, text=PHOTO_REJECTED)
         return stepper.photo_saved(identity)
 
+    # optional «во что переодеть» after the «Сменить одежду» revision button
+    revision = PreviewFeedbackService.attach_revision_text(identity=identity, text=event.text)
+    if revision is not None:
+        return _reply(client, event, text=REVISION_TEXT_SAVED_TEXT.format(text=revision.customer_text))
+
     # free text: the 9 phrases or the name/contact, when the bot asked for them
     stepper.handle_text(identity, event.text)
     return None
@@ -201,6 +212,12 @@ def _summary_text(summary):
     return "\n".join(lines)
 
 
+def _revision_accepted_text(revision):
+    if revision.category == Revision.Category.CLOTHES and not revision.customer_text:
+        return REVISION_CLOTHES_ACCEPTED_TEXT
+    return REVISION_ACCEPTED_TEXT
+
+
 def _revision_buttons():
     labels = {
         Revision.Category.FACE: "Лицо",
@@ -209,6 +226,7 @@ def _revision_buttons():
         Revision.Category.DETAIL: "Детали",
         Revision.Category.COLORS: "Цвета",
         Revision.Category.STYLE_EXPECTATION: "Стиль",
+        Revision.Category.CLOTHES: "Сменить одежду",
         Revision.Category.OTHER: "Другое",
     }
     return [[{"text": label, "payload": f"preview_revision:{value}"}] for value, label in labels.items()]
@@ -245,15 +263,11 @@ def _handle_callback(event: MaxEvent, *, adapter, client):
         )
     elif payload.startswith("preview_revision:"):
         category = payload.split(":", 1)[1]
-        PreviewFeedbackService.request_revision(
+        revision = PreviewFeedbackService.request_revision(
             order=_feedback_order(identity),
             category=category,
         )
-        _reply(
-            client,
-            event,
-            text="Правка принята. Мы подготовим обновлённое превью.",
-        )
+        _reply(client, event, text=_revision_accepted_text(revision))
 
     # ACK the callback after successful handling (POST /answers?callback_id=).
     # Best-effort: the reply above is already the user-visible answer; an ACK
