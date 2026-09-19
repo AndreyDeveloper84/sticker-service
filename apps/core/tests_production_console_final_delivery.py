@@ -129,7 +129,7 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
             response = self.client.post(resume_url, follow=True)
         self.assertEqual(response.status_code, 200)
         self.assertEqual(len(self.adapter.items), 9)
-        sent = [item["filename"].split("-", 2)[2].rsplit(".", 1)[0] for item in self.adapter.items]
+        sent = [item["filename"][len("sticker-"):-len(".png")] for item in self.adapter.items]
         self.assertEqual(sent, PILOT9)
         self.assertEqual(len(self.adapter.summaries), 1)
         self.order.refresh_from_db()
@@ -152,7 +152,7 @@ class ProductionConsoleFinalDeliveryTests(TestCase):
 
         with self._patched():
             response = self.client.post(resume_url, follow=True)
-        sent = [item["filename"].split("-", 2)[2].rsplit(".", 1)[0] for item in self.adapter.items]
+        sent = [item["filename"][len("sticker-"):-len(".png")] for item in self.adapter.items]
         self.assertEqual(sent, ["hello", "thanks", "bye", "great", "no"])
         self.assertContains(response, "Слот «Label bye» · отправлен")
         self.assertEqual(FinalDelivery.objects.filter(order=self.order).count(), 2)

@@ -94,6 +94,9 @@ def classify_delivery_failure(exc: Exception) -> str:
     re-sending a file cannot duplicate billable work, and the retry is an
     explicit operator action anyway.
     """
+    if getattr(exc, "retryable", None) is True:
+        # e.g. MaxAttachmentNotReady: 400, but nothing was sent — resend later
+        return "retryable"
     status = getattr(exc, "status_code", None)
     if not isinstance(status, int) or status <= 0:
         return "retryable"
@@ -390,7 +393,7 @@ class FinalDeliveryService:
                 recipient_id=recipient,
                 content=content,
                 mime_type=asset.mime_type or "image/png",
-                filename=f"sticker-{index}-{slot}.png",
+                filename=f"sticker-{slot}.png",
                 caption=caption,
                 index=index,
                 total=total,

@@ -35,6 +35,7 @@ from apps.core.services.order_state import InvalidOrderTransition, OrderStateSer
 from apps.core.services.preview_delivery import DeliveryResult
 from apps.core.services.qc import HUMAN_CRITERIA, QcService
 from apps.core.storage import LocalMediaStorage
+from apps.max_bot.client import MaxAttachmentNotReady
 
 READY_FOR_DELIVERY = Order.Status.READY_FOR_DELIVERY
 
@@ -49,6 +50,12 @@ def product_config(quantity):
         "emotion_count": quantity,
         "emotions": EMOTIONS,
     }
+
+
+def slot_of(filename: str) -> str:
+    """``sticker-<slot>.png`` → ``<slot>`` (the name the customer saves)."""
+    assert filename.startswith("sticker-") and filename.endswith(".png"), filename
+    return filename[len("sticker-"):-len(".png")]
 
 
 class ChannelError(Exception):
@@ -73,7 +80,7 @@ class FakeAdapter:
         self._seq = 0
 
     def send_final_item(self, **kwargs):
-        slot = kwargs["filename"].split("-", 2)[2].rsplit(".", 1)[0]
+        slot = slot_of(kwargs["filename"])
         if slot in self.fail_slots:
             if not self.permanent:
                 self.fail_slots.discard(slot)
@@ -216,7 +223,7 @@ class FinalDeliveryTestCase(TestCase):
         plan = self.service(adapter).deliver(order=order)
 
         self.assertEqual(len(adapter.items), 9)
-        sent_slots = [item["filename"].split("-", 2)[2].rsplit(".", 1)[0] for item in adapter.items]
+        sent_slots = [slot_of(item["filename"]) for item in adapter.items]
         self.assertEqual(sent_slots, shuffled)
         self.assertEqual([item["index"] for item in adapter.items], list(range(1, 10)))
         self.assertTrue(all(item["total"] == 9 for item in adapter.items))
@@ -358,7 +365,7 @@ class FinalDeliveryTestCase(TestCase):
         self.service(adapter).deliver(order=order)
 
         by_slot = {
-            item["filename"].split("-", 2)[2].rsplit(".", 1)[0]: item for item in adapter.items
+            slot_of(item["filename"]): item for item in adapter.items
         }
         self.assertEqual(by_slot["bye"]["content"], b"final-bye-regenerated")
         run = FinalDelivery.objects.get(order=order)
@@ -404,7 +411,7 @@ class FinalDeliveryTestCase(TestCase):
 
         plan = service.resume(order=order)
         self.assertEqual(len(adapter.items), 3)
-        resent = [item["filename"].split("-", 2)[2].rsplit(".", 1)[0] for item in adapter.items[2:]]
+        resent = [slot_of(item["filename"]) for item in adapter.items[2:]]
         self.assertEqual(resent, ["bye"])
         self.assertEqual(len(adapter.summaries), 1)
         self.assertTrue(plan.complete)
@@ -495,6 +502,41 @@ class FinalDeliveryTestCase(TestCase):
         self.assertEqual(classify_delivery_failure(ChannelError(429)), "retryable")
         self.assertEqual(classify_delivery_failure(ChannelError(400)), "permanent")
         self.assertEqual(classify_delivery_failure(RuntimeError("x")), "retryable")
+        # MAX file still processing after every retry: 400, but nothing was sent
+        self.assertEqual(classify_delivery_failure(MaxAttachmentNotReady(400, '{"code":"attachment.not.ready"}')), "retryable")
+
+    def test_max_attachment_not_ready_leaves_slot_failed_retryable_and_resume_resends_once(self):
+        """P1 (MAX file delivery): the client exhausted attachment.not.ready
+        retries → the slot is failed/retryable (no message was created), the
+        summary is not sent, and a resume sends exactly that slot again."""
+        order, _assets = self.make_ready_order(quantity=2)
+        adapter = FakeAdapter()
+        real_send = adapter.send_final_item
+        state = {"failed": False}
+
+        def send(**kwargs):
+            if slot_of(kwargs["filename"]) == "bye" and not state["failed"]:
+                state["failed"] = True
+                raise MaxAttachmentNotReady(400, '{"code":"attachment.not.ready","message":"..."}')
+            return real_send(**kwargs)
+
+        adapter.send_final_item = send
+        service = self.service(adapter)
+        plan = service.deliver(order=order)
+        self.assertFalse(plan.complete)
+        by_slot = {slot.slot_key: slot for slot in plan.slots}
+        self.assertEqual(by_slot["hello"].status, "sent")
+        self.assertEqual(by_slot["bye"].status, "failed")
+        self.assertEqual(by_slot["bye"].failure_class, "retryable")
+        self.assertEqual(by_slot["bye"].message_id, "")
+        self.assertEqual(len(adapter.summaries), 0)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.DELIVERY_IN_PROGRESS)
+
+        plan = service.resume(order=order)
+        self.assertTrue(plan.complete)
+        self.assertEqual([slot_of(item["filename"]) for item in adapter.items], ["hello", "bye"])  # no duplicate
+        self.assertEqual(len(adapter.summaries), 1)
 
     def test_missing_asset_file_is_recorded_as_slot_failure(self):
         order, assets = self.make_ready_order(quantity=2)
