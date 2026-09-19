@@ -111,8 +111,22 @@ pull), so code rollback deploys an exact previous commit:
 DEPLOY_REF=<previous-good-sha> ./deploy/scripts/deploy.sh
 ```
 
+A sha that is already in the local checkout is deployed without any
+`git fetch`, so a rollback does not depend on GitHub being reachable.
+
 After a successful rollback, return the checkout to main:
 `git checkout main`.
+
+### Flaky `git fetch` from the VPS
+
+`github.com` resolves to several anycast IPs and at least one of them
+(140.82.121.4) is unreachable from the staging VPS, so a fetch fails on a bad
+DNS answer with `Failed to connect to github.com port 443`. Nothing is changed
+on staging when this happens (the failure is before build). Every fetch in
+`resolve-deploy-ref.sh` is retried (`DEPLOY_FETCH_ATTEMPTS`, default 3, with a
+`DEPLOY_FETCH_RETRY_DELAY`-second pause, default 15); each attempt re-resolves
+DNS. If all attempts fail, rerun the GitHub Actions job or run
+`DEPLOY_REF=dev ./deploy/scripts/deploy.sh` on the server again.
 
 Data restore (only if a migration caused damage):
 
