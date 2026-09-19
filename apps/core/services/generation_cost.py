@@ -240,8 +240,13 @@ def aggregate(input_metadatas) -> dict:
 def format_known_cost(summary: dict) -> str:
     """Operator-facing figure: «7,42 ₽ (известно по 3 вызовам)» / «неизвестна»."""
     known = summary.get("known_count", 0)
+    jobs = summary.get("jobs", summary.get("calls", 0))  # aggregate() or an order_economics stage
     if not known:
+        if jobs and summary.get("not_billable_count", 0) == jobs:
+            # every call provably never reached the provider: a fact, not an
+            # unknown — 0 with the reason spelled out
+            return f"0 ₽ (провайдер не принял {jobs})"
         return "неизвестна"
     rub = summary["known_cost_minor"] / 100
     text = f"{rub:.2f}".replace(".", ",") + " ₽"
-    return f"{text} (известно по {known} вызовам)" if known != summary.get("jobs") else text
+    return f"{text} (известно по {known} вызовам)" if known != jobs else text

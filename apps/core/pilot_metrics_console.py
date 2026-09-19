@@ -10,6 +10,7 @@ from django import forms
 from django.contrib import admin
 
 from apps.core.models import ManualWorkLog, OrderEvent
+from apps.core.services.order_economics import RATE_KEY, manual_work_snapshot
 
 
 class ManualWorkLogForm(forms.ModelForm):
@@ -30,6 +31,11 @@ class ManualWorkLogForm(forms.ModelForm):
             "activity": self.cleaned_data["activity"],
             "note": (self.cleaned_data.get("note") or "").strip(),
         }
+        # DRF-2111: operator rate snapshot at logging time (immutable); no
+        # configured rate → no snapshot → the log's cost stays "не настроено".
+        rate = manual_work_snapshot(self.cleaned_data["minutes"])
+        if rate is not None:
+            instance.payload[RATE_KEY] = rate
         if commit:
             instance.save()
         return instance
