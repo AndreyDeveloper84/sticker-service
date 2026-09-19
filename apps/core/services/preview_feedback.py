@@ -84,3 +84,42 @@ class PreviewFeedbackService:
         metadata.pop("internal_approved_at", None)
         asset.metadata = metadata
         asset.save(update_fields=["metadata", "updated_at"])
+
+    # «Сменить одежду» is the only category where the bot invites free text
+    # ("во что переодеть"). The text is optional and accepted once, only while
+    # the revision is still REQUESTED (not yet generating) and still empty.
+    TEXT_CATEGORIES = frozenset({Revision.Category.CLOTHES})
+
+    @classmethod
+    def pending_text_revision(cls, *, identity):
+        """The identity's requested revision that is waiting for optional
+        customer text, or None (free text is then handled by the order flow)."""
+        return (
+            Revision.objects.filter(
+                order__channel_identity=identity,
+                order__status=Order.Status.REVISION_REQUESTED,
+                status=Revision.Status.REQUESTED,
+                category__in=cls.TEXT_CATEGORIES,
+                customer_text="",
+            )
+            .order_by("-created_at")
+            .first()
+        )
+
+    @classmethod
+    @transaction.atomic
+    def attach_revision_text(cls, *, identity, text: str):
+        """Store the customer's optional text on the pending clothes revision.
+        Returns the revision, or None when nothing is waiting for text."""
+        text = (text or "").strip()
+        if not text:
+            return None
+        pending = cls.pending_text_revision(identity=identity)
+        if pending is None:
+            return None
+        revision = Revision.objects.select_for_update().get(pk=pending.pk)
+        if revision.status != Revision.Status.REQUESTED or revision.customer_text:
+            return None
+        revision.customer_text = text[:500]
+        revision.save(update_fields=["customer_text", "updated_at"])
+        return revision

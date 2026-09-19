@@ -6,7 +6,13 @@ from django.views.decorators.csrf import csrf_exempt
 
 import logging
 
-from apps.core.customer_hints import PHOTO_GUIDANCE, customer_hint
+from apps.core.customer_hints import (
+    PHOTO_GUIDANCE,
+    REVISION_ACCEPTED_TEXT,
+    REVISION_CLOTHES_ACCEPTED_TEXT,
+    REVISION_TEXT_SAVED_TEXT,
+    customer_hint,
+)
 from apps.core.bot_menu import PAYLOAD_CONFIRM_ORDER, OrderStepper
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
@@ -135,6 +141,12 @@ def _handle_message(message, *, adapter, payment_adapter, client):
         adapter.save_photo_bytes(identity=identity, content=content, filename=file_path.rsplit("/", 1)[-1], mime_type=mime_type)
         return stepper.photo_saved(identity)
 
+    # optional «во что переодеть» after the «Сменить одежду» revision button
+    revision = PreviewFeedbackService.attach_revision_text(identity=identity, text=message.get("text") or "")
+    if revision is not None:
+        client.send_message(chat_id=chat_id, text=REVISION_TEXT_SAVED_TEXT.format(text=revision.customer_text))
+        return None
+
     # free text: the 9 phrases or the name/contact, when the bot asked for them
     stepper.handle_text(identity, message.get("text") or "")
     return None
@@ -179,6 +191,12 @@ def _summary_stars_price(product):
         return None
 
 
+def _revision_accepted_text(revision):
+    if revision.category == Revision.Category.CLOTHES and not revision.customer_text:
+        return REVISION_CLOTHES_ACCEPTED_TEXT
+    return REVISION_ACCEPTED_TEXT
+
+
 def _revision_buttons():
     labels = {
         Revision.Category.FACE: "Лицо",
@@ -187,6 +205,7 @@ def _revision_buttons():
         Revision.Category.DETAIL: "Детали",
         Revision.Category.COLORS: "Цвета",
         Revision.Category.STYLE_EXPECTATION: "Стиль",
+        Revision.Category.CLOTHES: "Сменить одежду",
         Revision.Category.OTHER: "Другое",
     }
     return [[{"text": label, "callback_data": f"preview_revision:{value}"}] for value, label in labels.items()]
@@ -225,10 +244,10 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
         )
     elif data.startswith("preview_revision:"):
         category = data.split(":", 1)[1]
-        PreviewFeedbackService.request_revision(
+        revision = PreviewFeedbackService.request_revision(
             order=_feedback_order(identity),
             category=category,
         )
-        client.send_message(chat_id=chat_id, text="Правка принята. Мы подготовим обновлённое превью.")
+        client.send_message(chat_id=chat_id, text=_revision_accepted_text(revision))
 
     return client.answer_callback_query(callback_query_id=callback["id"])

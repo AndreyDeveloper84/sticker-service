@@ -57,6 +57,7 @@ REVISION_CATEGORIES = {
     Revision.Category.DETAIL: "Детали",
     Revision.Category.COLORS: "Цвета",
     Revision.Category.STYLE_EXPECTATION: "Стиль",
+    Revision.Category.CLOTHES: "Сменить одежду",
     Revision.Category.OTHER: "Другое",
 }
 # FullProductionService.SlotState.status
