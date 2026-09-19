@@ -10,6 +10,7 @@ and a fixed query count (3 vs 30 orders).
 import csv
 import io
 import json
+import re
 from datetime import date, datetime
 from unittest.mock import patch
 from zoneinfo import ZoneInfo
@@ -19,7 +20,7 @@ from django.test import override_settings
 from django.test.utils import CaptureQueriesContext
 from django.urls import reverse
 
-from apps.core.models import GenerationJob, Order, OrderEvent, Product, QcReport, Revision
+from apps.core.models import GenerationJob, Order, OrderEvent, Payment, Product, QcReport, Revision
 from apps.core.services import generation_cost as gc
 from apps.core.services.pilot_analytics import EXPORT_COLUMNS, PilotAnalyticsService, period_for
 from apps.core.tests_order_economics import EconomicsFixture, PHRASES, TARIFF, custom_config, pack_config
@@ -155,7 +156,7 @@ class SnapshotTests(ThreeProductsFixture):
         self.assertEqual(ai["total"]["known_cost_minor"], 13 * TARIFF)
         self.assertEqual(ai["total"]["unknown_price_count"], 1)
         self.assertEqual(ai["paid_orders"], 4)
-        self.assertEqual(ai["paid_orders_fully_known"], 3)
+        self.assertEqual(ai["paid_orders_with_known_cost"], 3)
         # single: 2 calls, pack9: 10 calls, custom9: 1 call → mean 13/3 calls
         self.assertEqual(ai["known_cost_minor_per_paid_order_avg"], round(13 * TARIFF / 3, 2))
         self.assertEqual(ai["known_cost_minor_per_paid_order_median"], 2 * TARIFF)
@@ -378,3 +379,119 @@ class QueryCountTests(EconomicsFixture):
         self.assertEqual(len(big_service), len(small_service))
         self.assertLessEqual(len(big_service), 12)
         # measured: service 12 queries, page 14 (admin session/user), CSV 7 — for 3 and for 30 orders
+
+
+class UnknownRenderingTests(EconomicsFixture):
+    """DRF-2111 C1 (staging finding): a known part of 0 with unknown components
+    must never print as «0,00 ₽»; a 0 needs evidence."""
+
+    def _unknown_order(self, code="pack-unknown"):
+        """Historical AI job (no snapshot) + payment without fee + log without rate."""
+        order = self._order(pack_config(1, 10000), amount_minor=10000, code=code)
+        GenerationJob.objects.create(
+            order=order, task_type=GenerationJob.TaskType.PREVIEW, status=GenerationJob.Status.SUCCEEDED,
+            attempt=1, provider="fake", started_at=order.created_at, finished_at=order.created_at,
+        )
+        with override_settings(PILOT_OPERATOR_COST_PER_HOUR_RUB=None), \
+                patch.dict("os.environ", {"PILOT_OPERATOR_COST_PER_HOUR_RUB": ""}):
+            self._log_minutes(order, 10)
+        return order
+
+    def _unit_row(self, code):
+        response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=today")
+        rows = {row["product"]: row for row in response.context["unit_rows"]}
+        return rows[code], response
+
+    def test_unit_economics_all_unknown_is_not_zero(self):
+        order = self._unknown_order()
+        row, response = self._unit_row(order.product.code)
+        self.assertEqual(row["ai"], "неизвестна")
+        self.assertEqual(row["manual"], "не настроено")
+        self.assertEqual(row["fee"], "неизвестна")
+        self.assertEqual(row["contribution"], "100,00 ₽ (по 1 заказам, не учтено у 1)")
+        for value in row.values():
+            self.assertIsNone(re.search(r"(?<![\d,])0(,00)? ₽", str(value)), value)
+        item = {i["product"]: i for i in PilotAnalyticsService(period_for("today")).snapshot()["unit_economics"]}
+        item = item[order.product.code]
+        self.assertEqual(item["known_ai_cost_minor"], 0)  # the number stays; the evidence says "unknown"
+        self.assertEqual(item["ai"]["known_count"], 0)
+        self.assertEqual(item["ai"]["unknown_price_count"], 1)
+        self.assertEqual(item["manual"], {"orders_with_logs": 1, "orders_not_configured": 1})
+        self.assertEqual(item["payment_fee"], {"orders_known": 0, "orders_unknown": 1})
+
+    def test_unit_economics_nothing_happened_is_named_not_zero(self):
+        order = self._order(pack_config(1, 10000), amount_minor=10000, code="pack-empty")
+        Payment.objects.filter(order=order).delete()
+        row, _ = self._unit_row(order.product.code)
+        self.assertEqual(row["ai"], "нет вызовов")
+        self.assertEqual(row["manual"], "нет логов")
+        self.assertEqual(row["fee"], "нет платежей")
+        self.assertEqual(row["contribution"], "не вычисляется")
+
+    def test_unit_economics_proven_zero_and_partially_known(self):
+        rejected = self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-rejected")
+        self.provider.fail = "transport"
+        with self.assertRaises(Exception):
+            self.generation.generate_preview(order=rejected)
+        self.provider.fail = None
+        row, _ = self._unit_row(rejected.product.code)
+        self.assertEqual(row["ai"], "0 ₽ (провайдер не принял 1)")
+        self.assertEqual(row["fee"], "3,50 ₽")
+
+        mixed = self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-mixed")
+        self._preview(mixed)  # priced preview
+        GenerationJob.objects.create(  # + a historical job without a snapshot
+            order=mixed, task_type=GenerationJob.TaskType.REVISION, status=GenerationJob.Status.SUCCEEDED,
+            attempt=1, provider="fake", started_at=mixed.created_at,
+        )
+        self._log_minutes(mixed, 5)
+        row, _ = self._unit_row(mixed.product.code)
+        self.assertEqual(row["ai"], "7,42 ₽ (известно по 1 вызовам) (+ неизвестно: 1)")
+        self.assertEqual(row["manual"], "50,00 ₽")
+        self.assertEqual(row["fee"], "3,50 ₽")
+
+    def test_avg_and_median_need_at_least_one_call(self):
+        # the only "fully known" paid order has no AI calls at all
+        self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-nocalls")
+        self._unknown_order("pack-unknown")
+        ai = PilotAnalyticsService(period_for("today")).snapshot()["ai_cost"]
+        self.assertEqual(ai["paid_orders_with_known_cost"], 0)
+        self.assertIsNone(ai["known_cost_minor_per_paid_order_avg"])
+        self.assertIsNone(ai["known_cost_minor_per_paid_order_median"])
+        response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=today")
+        rows = dict(response.context["ai_rows"])
+        self.assertEqual(rows["Средняя на оплаченный заказ"], "неизвестна (нет заказов с известной стоимостью)")
+        self.assertEqual(rows["Медиана на оплаченный заказ"], "неизвестна (нет заказов с известной стоимостью)")
+        # one priced order with a call → it alone drives the figures
+        priced = self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-priced")
+        self._preview(priced)
+        ai = PilotAnalyticsService(period_for("today")).snapshot()["ai_cost"]
+        self.assertEqual(ai["paid_orders_with_known_cost"], 1)
+        self.assertEqual(ai["known_cost_minor_per_paid_order_avg"], TARIFF)
+        response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=today")
+        self.assertIn("7,42 ₽ (по 1 из", dict(response.context["ai_rows"])["Средняя на оплаченный заказ"])
+
+    def test_export_known_variable_cost_empty_when_nothing_known(self):
+        unknown = self._unknown_order()
+        known = self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-known")
+        self._preview(known)
+        response = self.client.get(reverse("admin:core_order_pilot_metrics_export_csv") + "?preset=today")
+        rows = {int(r["order_id"]): r for r in csv.DictReader(io.StringIO(response.content.decode("utf-8")))}
+        self.assertEqual(rows[unknown.pk]["known_variable_cost"], "")
+        self.assertEqual(rows[unknown.pk]["ai_total"], "")
+        self.assertEqual(rows[unknown.pk]["manual_cost"], "")
+        self.assertEqual(rows[unknown.pk]["payment_fee"], "")
+        self.assertEqual(rows[known.pk]["known_variable_cost"], "10.92")  # 7.42 + 3.50
+        payload = json.loads(self.client.get(reverse("admin:core_order_pilot_metrics_export_json") + "?preset=today").content)
+        by_id = {r["order_id"]: r for r in payload["rows"]}
+        self.assertIsNone(by_id[unknown.pk]["known_variable_cost"])
+        self.assertEqual(by_id[known.pk]["known_variable_cost"], "10.92")
+        # an order with no cost gaps and no calls: the fee alone is the proven variable cost
+        empty = self._order(pack_config(1, 10000), amount_minor=10000, fee_minor=350, code="pack-empty")
+        response = self.client.get(reverse("admin:core_order_pilot_metrics_export_csv") + "?preset=today")
+        rows = {int(r["order_id"]): r for r in csv.DictReader(io.StringIO(response.content.decode("utf-8")))}
+        self.assertEqual(rows[empty.pk]["known_variable_cost"], "3.50")
+
+    def test_format_known_cost_no_calls(self):
+        self.assertEqual(gc.format_known_cost(gc.aggregate([])), "нет вызовов")
+        self.assertEqual(gc.format_known_cost({"calls": 0, "known_count": 0}), "нет вызовов")
