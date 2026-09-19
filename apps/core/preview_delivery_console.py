@@ -8,6 +8,7 @@ from django.utils import timezone
 from django.utils.html import format_html
 
 from apps.core.console_html import lines_html
+from apps.core.console_text import PREVIEW_ALREADY_SENT
 from apps.core.models import GeneratedAsset, GenerationJob, Order
 from apps.core.production_console import ProductionOrderAdmin
 from apps.core.services.preview_delivery import PreviewDeliveryError, PreviewDeliveryService
@@ -35,7 +36,9 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
             failed = [item for item in deliveries if item.get("status") == "failed"]
             open_url = reverse("admin:core_preview_asset_file", args=[asset.pk])
             action = ""
-            if order.status == Order.Status.INTERNAL_PREVIEW_REVIEW and not approved:
+            if order.status == Order.Status.INTERNAL_PREVIEW_REVIEW and not approved and not sent:
+                # an already-sent preview cannot be sent again — approving it
+                # would only lead to «уже отправлено»
                 action = format_html(
                     ' · <a class="button" href="{}">Одобрить это превью</a>',
                     reverse("admin:core_order_approve_preview", args=[order.pk, asset.pk]),
@@ -138,6 +141,21 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
         self.message_user(request, f"Превью #{asset.pk} одобрено. Теперь отправьте его клиенту.", level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
+    def _already_delivered_hint(self, order, exc) -> str:
+        """«уже отправлено» + which preview to approve instead (the newest
+        successful one that has not been sent), so the operator is not left
+        with a bare refusal after a customer revision."""
+        if "already delivered" not in str(exc):
+            return ""
+        assets = order.generated_assets.filter(kind=GeneratedAsset.Kind.PREVIEW).select_related("job")
+        for asset in assets.order_by("-created_at", "-pk"):
+            if asset.job.status == GenerationJob.Status.SUCCEEDED and not self._preview_sent(asset):
+                return (
+                    f"{PREVIEW_ALREADY_SENT} — одобрите новое превью #{asset.pk} "
+                    "(«Превью» → «Одобрить это превью»)."
+                )
+        return f"{PREVIEW_ALREADY_SENT} — новых превью нет, сначала «Перегенерировать превью»."
+
     def deliver_preview_view(self, request, order_id):
         order = self.get_object(request, str(order_id))
         if order is None:
@@ -154,7 +172,11 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
         try:
             asset = self.get_delivery_service(order).deliver(order=order)
         except PreviewDeliveryError as exc:
-            self._fail(request, exc)
+            hint = self._already_delivered_hint(order, exc)
+            if hint:
+                self.message_user(request, hint, level=messages.ERROR)
+            else:
+                self._fail(request, exc)
         else:
             self.message_user(request, f"Превью #{asset.pk} отправлено клиенту.", level=messages.SUCCESS)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))

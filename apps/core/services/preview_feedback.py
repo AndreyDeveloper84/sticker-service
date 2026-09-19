@@ -66,5 +66,21 @@ class PreviewFeedbackService:
             category=category,
             customer_text=(customer_text or "").strip(),
         )
+        # The customer has rejected this preview: its internal approval is
+        # spent. Left in place, it made the console offer «Отправить превью
+        # клиенту» for the OLD preview after the revision was generated —
+        # a dead end (the delivery service refuses a second send). The
+        # rejected preview stays on record as ``revision.source_preview``.
+        cls._clear_internal_approval(source)
         OrderStateService.transition(order=locked, to_status=Order.Status.REVISION_REQUESTED)
         return revision
+
+    @staticmethod
+    def _clear_internal_approval(asset: GeneratedAsset) -> None:
+        metadata = dict(asset.metadata or {})
+        if not any(key in metadata for key in ("internal_approved", "internal_approved_at")):
+            return
+        metadata.pop("internal_approved", None)
+        metadata.pop("internal_approved_at", None)
+        asset.metadata = metadata
+        asset.save(update_fields=["metadata", "updated_at"])

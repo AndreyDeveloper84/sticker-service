@@ -196,6 +196,8 @@ def reason_label(code: str) -> str:
 
 # --- domain errors -> operator sentences ------------------------------------
 
+PREVIEW_ALREADY_SENT = "Это превью уже отправлено клиенту"
+
 _ERROR_PATTERNS = [
     (r"No production slots requested", "Не выбраны слоты для перегенерации."),
     (r"Unknown production slots for order #\d+: (.+)", "Неизвестные слоты: {0}."),
@@ -220,6 +222,7 @@ _ERROR_PATTERNS = [
     (r"final set is incomplete, missing slots: (.+)", "Набор неполный, нет слотов: {0}."),
     (r"emotion selection does not match product quantity (\d+)", "Выбор эмоций не совпадает с количеством стикеров в продукте ({0})."),
     (r"Delivery adapter does not match order channel", "Канал доставки не совпадает с каналом заказа."),
+    (r"Approved preview was already delivered", PREVIEW_ALREADY_SENT + " — одобрите новое превью в блоке «Превью»."),
     (r"cannot generate preview from (\S+)", "Превью нельзя сгенерировать из статуса «{status:0}»."),
     (r"cannot generate revision from (\S+)", "Правку нельзя сгенерировать из статуса «{status:0}»."),
     (r"Order has no revision request", "Клиент не запрашивал правку."),

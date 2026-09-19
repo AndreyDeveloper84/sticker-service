@@ -128,11 +128,10 @@ class MaxM2SmokeTests(TestCase):
         self.assertEqual(self.order.status, Order.Status.INTERNAL_PREVIEW_REVIEW)
         self.assertEqual(revised.job.input_metadata["source_preview_id"], first.pk)
 
+        # The rejected preview lost its internal approval at request_revision:
+        # the revised one is approved and sent without any manual clean-up.
         first.refresh_from_db()
-        metadata = dict(first.metadata or {})
-        metadata.pop("internal_approved", None)
-        first.metadata = metadata
-        first.save(update_fields=["metadata", "updated_at"])
+        self.assertNotIn("internal_approved", first.metadata)
         self.approve_asset(revised)
         PreviewDeliveryService(adapter=FakeMaxDelivery(), storage=self.storage).deliver(order=self.order)
         self.order.refresh_from_db()

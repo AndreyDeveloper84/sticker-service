@@ -306,3 +306,99 @@ class ProductionConsoleRevisionTests(TestCase):
             response = self.client.get(self.change_url)
         self.assertContains(response, "Клиент не запрашивал правку.")
         self.assertNotContains(response, "Сгенерировать правку")
+
+    # ------------------------------------------- after the revision (trap)
+
+    def _next_step_block(self, response):
+        html = response.content.decode()
+        start = html.index("field-next_step")
+        end = html.index("field-", start + 1)
+        return html[start:end]
+
+    def test_after_revision_next_step_is_approve_new_preview_not_resend_old(self):
+        """Live regression (Order 16): the rejected preview kept its internal
+        approval, so «Следующий шаг» offered «Отправить превью клиенту» for
+        the OLD preview — a dead end (delivery refuses a second send)."""
+        source, revision = self.request_revision()
+        source.refresh_from_db()
+        # request_revision spends the approval of the rejected preview
+        self.assertNotIn("internal_approved", source.metadata)
+        self.assertNotIn("internal_approved_at", source.metadata)
+        self.assertEqual(revision.source_preview_id, source.pk)
+
+        with self._patched():
+            response = self.client.post(self.action_url, follow=True)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.INTERNAL_PREVIEW_REVIEW)
+        new_asset = (
+            GeneratedAsset.objects.filter(order=self.order, kind=GeneratedAsset.Kind.PREVIEW)
+            .exclude(pk=source.pk)
+            .get()
+        )
+
+        next_step = self._next_step_block(response)
+        approve_new = reverse("admin:core_order_approve_preview", args=[self.order.pk, new_asset.pk])
+        self.assertIn(f"Одобрить превью #{new_asset.pk}", next_step)
+        self.assertIn(approve_new, next_step)
+        self.assertNotIn("Отправить превью клиенту", next_step)
+        self.assertNotIn(reverse("admin:core_order_deliver_preview", args=[self.order.pk]), next_step)
+        # The old, already-sent preview is not offered for approval again.
+        approve_old = reverse("admin:core_order_approve_preview", args=[self.order.pk, source.pk])
+        self.assertNotContains(response, approve_old)
+        self.assertContains(response, approve_new)
+
+        # Approving the new preview makes it the one to send.
+        response = self.client.post(approve_new, follow=True)
+        next_step = self._next_step_block(response)
+        self.assertIn("Отправить превью клиенту", next_step)
+        self.assertIn(f"Превью #{new_asset.pk} одобрено", next_step)
+
+    def test_stale_approval_on_sent_preview_is_never_offered_for_resend(self):
+        """Orders that requested a revision before the fix (staging Order 16)
+        still carry internal_approved on the sent preview: the console must
+        not offer to resend it, and the refusal must name the preview to
+        approve instead."""
+        source, revision = self.request_revision()
+        with self._patched():
+            self.client.post(self.action_url, follow=True)
+        # stale flag exactly as recorded before request_revision cleared it
+        source.refresh_from_db()
+        source.metadata = {**source.metadata, "internal_approved": True}
+        source.save(update_fields=["metadata", "updated_at"])
+        new_asset = (
+            GeneratedAsset.objects.filter(order=self.order, kind=GeneratedAsset.Kind.PREVIEW)
+            .exclude(pk=source.pk)
+            .get()
+        )
+
+        response = self.client.get(self.change_url)
+        next_step = self._next_step_block(response)
+        self.assertIn(f"Одобрить превью #{new_asset.pk}", next_step)
+        self.assertNotIn("Отправить превью клиенту", next_step)
+        self.assertNotContains(
+            response, reverse("admin:core_order_approve_preview", args=[self.order.pk, source.pk])
+        )
+
+        # Even a direct «Отправить превью клиенту» (bookmarked URL, old tab)
+        # is refused in Russian with the way out.
+        from apps.core.preview_delivery_console import PreviewDeliveryOrderAdmin
+        from apps.core.services.preview_delivery import PreviewDeliveryService
+
+        class RefusingAdapter:
+            channel = "telegram"
+
+            def send_preview(self, *args, **kwargs):
+                raise AssertionError("adapter must not be called")
+
+        deliver_url = reverse("admin:core_order_deliver_preview", args=[self.order.pk])
+        with patch.object(
+            PreviewDeliveryOrderAdmin,
+            "get_delivery_service",
+            return_value=PreviewDeliveryService(adapter=RefusingAdapter(), storage=self.storage),
+        ):
+            response = self.client.post(deliver_url, follow=True)
+        self.assertContains(response, "Это превью уже отправлено клиенту")
+        self.assertContains(response, f"одобрите новое превью #{new_asset.pk}")
+        self.assertNotContains(response, "Approved preview was already delivered")
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.status, Order.Status.INTERNAL_PREVIEW_REVIEW)
