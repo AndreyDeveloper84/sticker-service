@@ -28,6 +28,7 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
             return "Превью пока нет."
 
         rows = []
+        generating = bool(self.active_jobs(order))
         for asset in assets:
             metadata = asset.metadata or {}
             approved = bool(metadata.get("internal_approved"))
@@ -36,7 +37,9 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
             failed = [item for item in deliveries if item.get("status") == "failed"]
             open_url = reverse("admin:core_preview_asset_file", args=[asset.pk])
             action = ""
-            if order.status == Order.Status.INTERNAL_PREVIEW_REVIEW and not approved and not sent:
+            if generating:
+                pass  # no approve / send while an attempt is queued or running
+            elif order.status == Order.Status.INTERNAL_PREVIEW_REVIEW and not approved and not sent:
                 # an already-sent preview cannot be sent again — approving it
                 # would only lead to «уже отправлено»
                 action = format_html(
@@ -107,6 +110,8 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
             raise Http404 from exc
 
         action_url = reverse("admin:core_order_approve_preview", args=[order.pk, asset.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -161,6 +166,8 @@ class PreviewDeliveryOrderAdmin(ProductionOrderAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_deliver_preview", args=[order.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,

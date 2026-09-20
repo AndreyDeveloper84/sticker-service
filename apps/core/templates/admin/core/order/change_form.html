@@ -1,0 +1,7 @@
+{% extends "admin/change_form.html" %}
+{% block extrahead %}{{ block.super }}
+  {% if generation_active %}
+    {# an attempt is queued / running: the card is the waiting screen and refreshes itself (GET, safe) #}
+    <meta http-equiv="refresh" content="10">
+  {% endif %}
+{% endblock %}
