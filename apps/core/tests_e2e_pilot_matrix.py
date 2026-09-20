@@ -220,7 +220,7 @@ class TelegramDriver:
         t = self.test
         t.assertEqual(self._post(self._message(text="/start")).status_code, 200)
         keyboard = self.bot.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
-        t.assertEqual(len(keyboard), 6, "main menu: six items")
+        t.assertEqual(len(keyboard), 7, "main menu: six items + «📍 Где я?»")
         t.assertEqual(keyboard[0][0]["callback_data"], "menu:order")
         t.assertEqual(self._post(self._callback("menu:order")).status_code, 200)
         keyboard = self.bot.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
@@ -403,7 +403,7 @@ class MaxDriver:
         started = {"update_type": "bot_started", "chat_id": self.chat_id, "user": self.user}
         t.assertEqual(self._post(started).status_code, 200)
         buttons = self.bot.send_message.call_args.kwargs["buttons"]
-        t.assertEqual(len(buttons), 6, "main menu: six items")
+        t.assertEqual(len(buttons), 7, "main menu: six items + «📍 Где я?»")
         t.assertEqual(buttons[0][0]["payload"], "menu:order")
         t.assertEqual(self._post(self._callback("menu:order")).status_code, 200)
         buttons = self.bot.send_message.call_args.kwargs["buttons"]

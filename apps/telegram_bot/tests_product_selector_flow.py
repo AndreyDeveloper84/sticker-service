@@ -89,7 +89,7 @@ class TelegramProductSelectorFlowTests(TestCase):
         # /start → main menu (6 items); «🎨 Заказать стикеры» → products
         keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]
         self.assertEqual(keyboard[0][0]["callback_data"], "menu:order")
-        self.assertEqual(len(keyboard), 6)
+        self.assertEqual(len(keyboard), 7)  # six items + «📍 Где я?»
         response = self._post(_callback("menu:order"))
         self.assertEqual(response.status_code, 200)
         keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]

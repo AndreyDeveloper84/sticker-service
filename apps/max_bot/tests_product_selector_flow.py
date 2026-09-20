@@ -101,7 +101,7 @@ class MaxProductSelectorFlowTests(TestCase):
         # bot_started → main menu (6 items); «🎨 Заказать стикеры» → products
         buttons = client.send_message.call_args.kwargs["buttons"]
         self.assertEqual(buttons[0][0]["payload"], "menu:order")
-        self.assertEqual(len(buttons), 6)
+        self.assertEqual(len(buttons), 7)  # six items + «📍 Где я?»
         response = self._post(_callback("menu:order"))
         self.assertEqual(response.status_code, 200)
         buttons = client.send_message.call_args.kwargs["buttons"]

@@ -252,6 +252,14 @@ class TelegramBotClient:
             payload["error_message"] = error_message
         return self._post("answerPreCheckoutQuery", payload)
 
+    def edit_message_reply_markup(self, *, chat_id, message_id, reply_markup):
+        """editMessageReplyMarkup — ``{"inline_keyboard": []}`` removes the
+        keyboard of an earlier bot message (stale step buttons)."""
+        return self._post(
+            "editMessageReplyMarkup",
+            {"chat_id": chat_id, "message_id": message_id, "reply_markup": reply_markup},
+        )
+
     def answer_callback_query(self, *, callback_query_id, text=None):
         payload = {"callback_query_id": callback_query_id}
         if text:
