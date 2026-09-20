@@ -159,3 +159,44 @@ class LazyChainTests(FullProductionTestCase):
         self.assertEqual(job.status, GenerationJob.Status.FAILED)
         self.assertEqual(job.output_metadata["failure_class"], "ambiguous")
         self.assertEqual(service.provider.requests, [])
+
+
+class RegenerateChainTests(FullProductionTestCase):
+    """Bug found while wiring the chain: finalizing after EVERY slot bounced
+    a regenerate chain to QUALITY_CONTROL after its first slot (the other
+    requested slots still carried their old, QC-rejected asset) and the next
+    _prepare() then refused to run from quality_control. The chain must
+    finalize only when it ends and must never re-pick a slot it already
+    regenerated."""
+
+    def test_regenerate_chain_finishes_all_requested_slots_before_qc(self):
+        order, _preview = self._make_order()
+        self._service(FakeProvider()).start(order=order, max_slots=None)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        order.status = Order.Status.PACK_GENERATING  # QC FAIL → regenerate path
+        order.save(update_fields=["status"])
+        old_assets = {a.slot_key: a.pk for a in self._final_assets(order)}
+
+        provider = FakeProvider()
+        service = self._service(provider)
+        with use_executor(RecordingExecutor()) as executor:
+            service.regenerate_slots(order=order, slot_keys=["hello", "thanks"], max_slots=None)
+            executor.run_all(service=service)  # hello regenerated → thanks queued, NOT finalized yet
+            order.refresh_from_db()
+            self.assertEqual(order.status, Order.Status.PACK_GENERATING)
+            queued = self._full_jobs(order).get(status=GenerationJob.Status.PENDING)
+            self.assertEqual(queued.slot_key, "thanks")
+            self.assertEqual(queued.input_metadata["chain"]["requested_slots"], ["thanks"])
+            executor.run_all(service=service)  # thanks regenerated → chain ends → finalize
+            self.assertEqual(executor.dispatched, [])
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        self.assertEqual([r.metadata["slot_key"] for r in provider.requests], ["hello", "thanks"])
+        # exactly one new attempt per requested slot, bye untouched
+        self.assertEqual(self._full_jobs(order).filter(slot_key="hello").count(), 2)
+        self.assertEqual(self._full_jobs(order).filter(slot_key="thanks").count(), 2)
+        self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 1)
+        current = {a.slot_key: a.pk for a in self._final_assets(order).order_by("pk")}
+        self.assertNotEqual(current["hello"], old_assets["hello"])
+        self.assertNotEqual(current["thanks"], old_assets["thanks"])
