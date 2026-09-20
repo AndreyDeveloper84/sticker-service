@@ -12,6 +12,20 @@ Tariff: ``PILOT_IMAGE_CALL_COST_RUB`` (float ₽ per call) + optional
 snapshot time). No tariff configured → ``cost_source=UNKNOWN``,
 ``cost_minor=null`` — never a default price, never 0.
 
+Token pricing (owner GO 2026-09-20, ``cost_source=ESTIMATED``): with the
+three rates ``PILOT_TEXT_INPUT_USD_PER_1M`` / ``PILOT_IMAGE_INPUT_USD_PER_1M``
+/ ``PILOT_IMAGE_OUTPUT_USD_PER_1M`` configured (+ ``PILOT_TOKEN_PRICING_MODEL``,
+``PILOT_TOKEN_PRICING_VERSION``, optional ``PILOT_FX_USD_RUB`` / ``PILOT_FX_DATE``
+/ ``PILOT_FX_SOURCE`` — the owner sets the rate, there is no lookup) the
+snapshot carries the rates and the fx (``pricing``), and the cost is computed
+AFTER the provider answered from the actual ``usage``:
+``usd = text_in × r_t + image_in × r_i + out × r_o`` (per 1M, 6 decimals),
+``rub_minor = round(usd × fx × 100)`` only when the fx is in the snapshot.
+Rates are read from the job's own snapshot only — an env change tomorrow
+never re-prices an old job. No ``input_tokens_details`` in the answer →
+``usage_split_unknown`` and the cost is UNKNOWN (conservative, never an
+upper bound). Token pricing takes precedence over the per-call tariff.
+
 Invariants (owner document):
 - UNKNOWN != 0 — an unknown price or an unknown billing outcome is reported
   as unknown, never folded into a sum;
@@ -25,12 +39,16 @@ Invariants (owner document):
 
 from __future__ import annotations
 
+import logging
 from datetime import datetime
+from decimal import ROUND_HALF_UP, Decimal
 
 from django.utils import timezone
 
 from apps.core.models import GenerationJob
 from apps.core.services.budget import call_cost_rub, setting
+
+logger = logging.getLogger(__name__)
 
 COST_KEY = "cost"
 CURRENCY = "RUB"
@@ -40,8 +58,12 @@ UNIT_CALL = "call"
 class CostSource:
     PROVIDER_CONFIRMED = "PROVIDER_CONFIRMED"  # reserved: only via an imported provider statement
     CONFIG_SNAPSHOT = "CONFIG_SNAPSHOT"  # tariff from config at attempt time
-    ESTIMATED = "ESTIMATED"  # reserved, not used in PR-A
+    ESTIMATED = "ESTIMATED"  # token rates snapshotted at attempt time × actual usage
     UNKNOWN = "UNKNOWN"
+
+
+KNOWN_SOURCES = (CostSource.CONFIG_SNAPSHOT, CostSource.ESTIMATED)
+UNIT_TOKEN = "token"
 
 
 class BillingOutcome:
@@ -70,8 +92,11 @@ FAILURE_OUTCOMES = {
 PRICE_FIELDS = (
     "provider", "endpoint", "model", "unit", "pricing_version", "unit_price_minor",
     "currency", "cost_minor", "cost_source", "captured_at", "task_type", "mode", "qc_attempt",
+    "pricing",
 )
 OUTCOME_FIELDS = ("billing_outcome", "billable", "request_id", "moderation_stage", "outcome_at")
+# ESTIMATED only: written once by apply_success from the snapshot rates × usage.
+ESTIMATE_FIELDS = ("tokens", "usd_estimate", "rub_estimate_minor", "usage_split_unknown")
 
 MODE_INITIAL = "initial"
 MODE_RETRY_FAILED = "retry_failed"
@@ -79,6 +104,93 @@ MODE_REGENERATE = "regenerate"
 MODE_FORCE_RETRY = "force_retry"
 
 PROVIDER_ENDPOINTS = {"openai": "images.edit", "nodule": "images.generations"}
+
+
+# ---------------------------------------------------------- token pricing
+
+
+def _float_setting(name: str):
+    """(value, valid): None/"" → (None, True); a non-negative float →
+    (float, True); anything else → (None, False)."""
+    raw = setting(name)
+    if raw is None:
+        return None, True
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None, False
+    if value != value or value < 0:  # NaN / negative
+        return None, False
+    return value, True
+
+
+def token_pricing(now=None) -> dict | None:
+    """The token tariff to snapshot, or None (no token pricing → the per-call
+    tariff / UNKNOWN as before). All three rates are required; an invalid
+    rate fails closed (None + warning). The fx is optional; an invalid fx
+    drops the fx only (USD is still estimated, RUB stays unknown)."""
+    rates = {}
+    for key, name in (
+        ("text_input_rate_usd_per_1m", "PILOT_TEXT_INPUT_USD_PER_1M"),
+        ("image_input_rate_usd_per_1m", "PILOT_IMAGE_INPUT_USD_PER_1M"),
+        ("image_output_rate_usd_per_1m", "PILOT_IMAGE_OUTPUT_USD_PER_1M"),
+    ):
+        value, valid = _float_setting(name)
+        if not valid:
+            logger.warning("generation_cost.token_pricing invalid %s=%r: cost stays UNKNOWN", name, setting(name))
+            return None
+        if value is None:
+            if rates:
+                logger.warning("generation_cost.token_pricing %s is not set: cost stays UNKNOWN", name)
+            return None
+        rates[key] = value
+    fx, valid = _float_setting("PILOT_FX_USD_RUB")
+    if not valid or (fx is not None and fx == 0):
+        logger.warning("generation_cost.token_pricing invalid PILOT_FX_USD_RUB=%r: RUB stays unknown", setting("PILOT_FX_USD_RUB"))
+        fx = None
+    now = now or timezone.now()
+    model = str(setting("PILOT_TOKEN_PRICING_MODEL") or "gpt-image-2").strip()
+    version = setting("PILOT_TOKEN_PRICING_VERSION")
+    version = str(version).strip() if version else f"openai-pricing@{timezone.localtime(now).date().isoformat()}"
+    return {
+        "model": model,
+        "pricing_version": version,
+        **rates,
+        "fx_usd_rub": fx,
+        "fx_date": str(setting("PILOT_FX_DATE") or "").strip() if fx is not None else "",
+        "fx_source": str(setting("PILOT_FX_SOURCE") or "").strip() if fx is not None else "",
+        "captured_at": now.isoformat(),
+    }
+
+
+def usage_tokens(usage: dict | None) -> dict | None:
+    """{text_input, image_input, output} from a provider ``usage`` with
+    ``input_tokens_details``; None when the split is not reported."""
+    usage = usage or {}
+    details = usage.get("input_tokens_details") or {}
+    text = details.get("text_tokens")
+    image = details.get("image_tokens")
+    output = usage.get("output_tokens")
+    if not all(isinstance(v, int) and not isinstance(v, bool) for v in (text, image, output)):
+        return None
+    return {"text_input": text, "image_input": image, "output": output}
+
+
+def estimate_usd(tokens: dict, pricing: dict) -> float:
+    usd = (
+        tokens["text_input"] * pricing["text_input_rate_usd_per_1m"]
+        + tokens["image_input"] * pricing["image_input_rate_usd_per_1m"]
+        + tokens["output"] * pricing["image_output_rate_usd_per_1m"]
+    ) / 1_000_000
+    return round(usd, 6)
+
+
+def estimate_rub_minor(usd: float, pricing: dict) -> int | None:
+    fx = pricing.get("fx_usd_rub")
+    if not fx:
+        return None
+    minor = (Decimal(str(usd)) * Decimal(str(fx)) * 100).quantize(Decimal("1"), rounding=ROUND_HALF_UP)
+    return int(minor)
 
 
 def pricing_version(price: float, now: datetime) -> str:
@@ -97,6 +209,7 @@ def cost_snapshot(*, provider, task_type: str, mode: str = MODE_INITIAL, qc_atte
     now = now or timezone.now()
     name = str(getattr(provider, "name", "") or "")
     price = call_cost_rub()
+    pricing = token_pricing(now)
     snapshot = {
         "provider": name,
         "endpoint": str(getattr(provider, "endpoint", "") or PROVIDER_ENDPOINTS.get(name, "")),
@@ -112,7 +225,16 @@ def cost_snapshot(*, provider, task_type: str, mode: str = MODE_INITIAL, qc_atte
         "billable": None,
         "request_id": "",
     }
-    if price is None:
+    if pricing is not None:
+        if price is not None:
+            logger.warning(
+                "generation_cost: PILOT_IMAGE_CALL_COST_RUB is ignored — token pricing (%s) takes precedence",
+                pricing["pricing_version"],
+            )
+        # the price is computed after the answer, from these rates × usage
+        snapshot.update({"unit": UNIT_TOKEN, "pricing_version": pricing["pricing_version"], "unit_price_minor": None,
+                         "cost_minor": None, "cost_source": CostSource.ESTIMATED, "pricing": pricing})
+    elif price is None:
         snapshot.update({"pricing_version": None, "unit_price_minor": None, "cost_minor": None,
                          "cost_source": CostSource.UNKNOWN})
     else:
@@ -151,15 +273,30 @@ def apply_success(job: GenerationJob, result_metadata: dict | None) -> None:
     cost = (job.input_metadata or {}).get(COST_KEY)
     if cost is None:
         return  # historical job without a snapshot stays UNKNOWN — no backfill
-    job.input_metadata = {
-        **(job.input_metadata or {}),
-        COST_KEY: with_outcome(
-            cost,
-            outcome=BillingOutcome.SUCCESS,
-            billable=True,
-            request_id=str((result_metadata or {}).get("request_id") or ""),
-        ),
-    }
+    updated = with_outcome(
+        cost,
+        outcome=BillingOutcome.SUCCESS,
+        billable=True,
+        request_id=str((result_metadata or {}).get("request_id") or ""),
+    )
+    if updated.get("cost_source") == CostSource.ESTIMATED:
+        updated.update(estimate_from_usage(updated, (result_metadata or {}).get("usage")))
+    job.input_metadata = {**(job.input_metadata or {}), COST_KEY: updated}
+
+
+def estimate_from_usage(cost: dict, usage: dict | None) -> dict:
+    """The ESTIMATED part of the snapshot: snapshot rates × actual usage.
+    Without the input split the cost is UNKNOWN (``usage_split_unknown``),
+    never an upper bound; without an fx the USD stays and RUB is null."""
+    pricing = cost.get("pricing") or {}
+    tokens = usage_tokens(usage)
+    if tokens is None or not pricing:
+        return {"tokens": None, "usd_estimate": None, "rub_estimate_minor": None, "usage_split_unknown": True,
+                "cost_minor": None}
+    usd = estimate_usd(tokens, pricing)
+    rub = estimate_rub_minor(usd, pricing)
+    return {"tokens": tokens, "usd_estimate": usd, "rub_estimate_minor": rub, "usage_split_unknown": False,
+            "cost_minor": rub}
 
 
 def apply_failure(job: GenerationJob, failure: dict | None) -> None:
@@ -190,22 +327,41 @@ def job_cost(input_metadata: dict | None) -> dict | None:
 
 
 def is_known(cost: dict | None) -> bool:
-    return bool(cost) and cost.get("cost_source") == CostSource.CONFIG_SNAPSHOT and cost.get("billable") is True
+    """A priced, billable job: per-call tariff (CONFIG_SNAPSHOT) or a token
+    estimate (ESTIMATED) that reached RUB."""
+    return (
+        bool(cost)
+        and cost.get("cost_source") in KNOWN_SOURCES
+        and cost.get("billable") is True
+        and cost.get("cost_minor") is not None
+    )
+
+
+def is_estimated(cost: dict | None) -> bool:
+    return bool(cost) and cost.get("cost_source") == CostSource.ESTIMATED
 
 
 def aggregate(input_metadatas) -> dict:
     """Aggregate snapshots of started jobs.
 
     - known_cost_minor: sum(cost_minor) where billable is True and the price
-      was a CONFIG_SNAPSHOT (the only sum that is a fact);
-    - known_count: jobs behind that sum;
+      is a CONFIG_SNAPSHOT (per call) or an ESTIMATED token cost in RUB —
+      split into known_config_minor + known_estimated_minor;
+    - known_count: jobs behind that sum (estimated_count of them estimated);
+    - usd_estimate_total / usd_known_count: USD estimates of billable
+      ESTIMATED jobs (also those without an fx, which have no RUB);
+    - tokens: summed usage of the jobs that reported it;
     - not_billable_count: billable is False (never reached the provider);
     - possibly_billable_count: billable is null (outcome unknown / pending);
-    - unknown_price_count: no snapshot or cost_source UNKNOWN, and not
-      provably free.
+    - unknown_price_count: no snapshot, cost_source UNKNOWN, or an estimate
+      without a RUB figure (no split / no fx), and not provably free.
     """
-    known_minor = 0
-    known = 0
+    known_minor = known_config = known_estimated = 0
+    known = estimated = 0
+    usd_total = 0.0
+    usd_known = 0
+    tokens = {"text_input": 0, "image_input": 0, "output": 0}
+    tokens_jobs = 0
     not_billable = 0
     possibly = 0
     unknown_price = 0
@@ -223,17 +379,36 @@ def aggregate(input_metadatas) -> dict:
             continue
         if billable is None:
             possibly += 1
-        if cost.get("cost_source") != CostSource.CONFIG_SNAPSHOT or cost.get("cost_minor") is None:
+        if is_estimated(cost) and billable is True:
+            if cost.get("tokens"):
+                tokens_jobs += 1
+                for key in tokens:
+                    tokens[key] += int(cost["tokens"].get(key) or 0)
+            if cost.get("usd_estimate") is not None:
+                usd_total += float(cost["usd_estimate"])
+                usd_known += 1
+        if cost.get("cost_source") not in KNOWN_SOURCES or cost.get("cost_minor") is None:
             unknown_price += 1
             continue
         if billable is True:
             known += 1
             known_minor += int(cost["cost_minor"])
+            if is_estimated(cost):
+                estimated += 1
+                known_estimated += int(cost["cost_minor"])
+            else:
+                known_config += int(cost["cost_minor"])
     return {
         "currency": CURRENCY,
         "jobs": total,
         "known_cost_minor": known_minor,
+        "known_config_minor": known_config,
+        "known_estimated_minor": known_estimated,
         "known_count": known,
+        "estimated_count": estimated,
+        "usd_estimate_total": round(usd_total, 6),
+        "usd_known_count": usd_known,
+        "tokens": tokens if tokens_jobs else None,
         "not_billable_count": not_billable,
         "possibly_billable_count": possibly,
         "unknown_price_count": unknown_price,
@@ -256,4 +431,58 @@ def format_known_cost(summary: dict) -> str:
         return "неизвестна"
     rub = summary["known_cost_minor"] / 100
     text = f"{rub:.2f}".replace(".", ",") + " ₽"
+    if summary.get("estimated_count"):
+        text = "≈ " + text  # an estimate from usage × snapshotted rates, not a tariff
     return f"{text} (известно по {known} вызовам)" if known != jobs else text
+
+
+def format_ai_total(summary: dict) -> str:
+    """Owner wording for the order card: «≈ 12,30 ₽» when every call is
+    priced, «известно: ≈ 12,30 ₽ + 2 вызовов с неизвестной стоимостью» when
+    some are not; the unknown ones are counted, never priced as 0."""
+    known = summary.get("known_count", 0)
+    jobs = summary.get("jobs", summary.get("calls", 0))
+    unknown = jobs - known - summary.get("not_billable_count", 0)
+    if not known or unknown <= 0:
+        return format_known_cost(summary)
+    rub = summary["known_cost_minor"] / 100
+    text = f"{rub:.2f}".replace(".", ",") + " ₽"
+    if summary.get("estimated_count"):
+        text = "≈ " + text
+    return f"известно: {text} + {unknown} вызовов с неизвестной стоимостью"
+
+
+def format_tokens(tokens: dict | None) -> str:
+    if not tokens:
+        return ""
+    return f"tokens in {tokens['text_input'] + tokens['image_input']} / out {tokens['output']}"
+
+
+def pricing_caption(input_metadatas) -> str:
+    """«Оценка по фактическому usage (gpt-image-2, тариф openai-pricing@…,
+    курс 90,00 ₽/$ от 2026-09-20, cbr.ru)» from the ESTIMATED snapshots of
+    the jobs; every distinct tariff/fx is named; "" without estimates."""
+    seen = []
+    for metadata in input_metadatas:
+        cost = job_cost(metadata)
+        if not is_estimated(cost):
+            continue
+        pricing = cost.get("pricing") or {}
+        key = (pricing.get("model"), pricing.get("pricing_version"), pricing.get("fx_usd_rub"), pricing.get("fx_date"), pricing.get("fx_source"))
+        if key not in seen:
+            seen.append(key)
+    if not seen:
+        return ""
+    parts = []
+    for model, version, fx, fx_date, fx_source in seen:
+        text = f"{model}, тариф {version}"
+        if fx:
+            text += f", курс {fx:.2f}".replace(".", ",") + " ₽/$"
+            if fx_date:
+                text += f" от {fx_date}"
+            if fx_source:
+                text += f", {fx_source}"
+        else:
+            text += ", курс не задан — только USD"
+        parts.append(text)
+    return "Оценка по фактическому usage (" + "; ".join(parts) + ")"

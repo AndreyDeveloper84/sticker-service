@@ -193,7 +193,8 @@ class CostSnapshotTests(CostFixture):
         self.assertEqual(tampered["cost_minor"], 1)
         self.assertEqual({k for k in tampered if k not in snapshot}, {"outcome_at"})
         for key in gc.PRICE_FIELDS:
-            self.assertEqual(tampered[key], {**snapshot, "cost_minor": 1}[key], key)
+            if key in snapshot:  # "pricing" exists on ESTIMATED snapshots only
+                self.assertEqual(tampered[key], {**snapshot, "cost_minor": 1}[key], key)
 
     # 6. unknown price → UNKNOWN (not 0, no default)
     @override_settings(PILOT_IMAGE_CALL_COST_RUB=None, PILOT_IMAGE_PRICING_VERSION=None)
@@ -347,7 +348,9 @@ class CostSnapshotTests(CostFixture):
         self.provider.fail = "api"
         self.production.start(order=self.order)
         response = self.client.get(reverse("admin:core_order_change", args=[self.order.pk]))
-        self.assertContains(response, "стоимость: 7,42 ₽ (известно по 1 вызовам)")
+        # the cost lives in «Экономика заказа» only (one block, owner wording 2026-09-20)
+        self.assertContains(response, "AI всего: известно: 7,42 ₽ + 2 вызовов с неизвестной стоимостью")  # api_error + historical
+        self.assertNotContains(response, "стоимость: 7,42")
         self.assertContains(response, "возможно платных: 2")  # api_error + fixture preview (historical)
         response = self.client.get(reverse("admin:core_order_changelist"))
         self.assertContains(response, "стоимость 7,42 ₽ (известно по 1 вызовам)")
