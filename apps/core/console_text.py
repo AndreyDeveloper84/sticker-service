@@ -63,6 +63,7 @@ REVISION_CATEGORIES = {
 # FullProductionService.SlotState.status
 PRODUCTION_SLOT_STATES = {
     "pending": "ожидает",
+    "queued": "в очереди",
     "running": "генерируется",
     "succeeded": "готов",
     "failed": "ошибка",
