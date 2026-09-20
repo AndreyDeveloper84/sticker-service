@@ -269,7 +269,8 @@ class NavigationScenarios:
         self.assertEqual(self.last_text(), PHOTO_SAVED)
         self.assert_photos_done_button()
         photo = self.order().photos.get()
-        self.assertEqual(photo.mime_type, "image/png")
+        self.assertEqual(photo.mime_type, "image/png")  # a real PNG document — the gate decodes the container
+        self.assertEqual(photo.metadata["gate"]["format"], "PNG")
 
     def test_every_photo_answers_with_the_done_button(self):
         self.start_single()

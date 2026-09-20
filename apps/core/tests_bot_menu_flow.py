@@ -31,6 +31,12 @@ from apps.core.services.channel_order_flow import PILOT_CONSENT_TEXT
 from apps.max_bot.payments import CheckoutSession
 from apps.core.tests_photo_gate import good_photo_bytes
 
+
+def _download_by_extension(url_or_path):
+    """Fake CDN / Bot API download: PNG bytes for a .png name, JPEG otherwise
+    (DRF-2164: the gate records the decoded container as the mime type)."""
+    return good_photo_bytes("PNG") if str(url_or_path).lower().endswith(".png") else good_photo_bytes()
+
 EMOTIONS = [{"code": c, "label": l} for c, l in (("hello", "Привет"), ("bye", "Пока"), ("thanks", "Спасибо"))]
 NINE = [{"code": f"custom-{n}", "label": f"Фраза {n}"} for n in range(1, 10)]
 PRODUCTS = {
@@ -127,7 +133,9 @@ class MaxBot(CatalogMixin):
         self.provider = FakeCheckoutProvider()
         patches = [
             mock.patch("apps.max_bot.views.MaxBotClient"),
-            mock.patch("apps.max_bot.views.download_photo", return_value=good_photo_bytes()),
+            # the CDN serves what the file name says: a .png «sent as a file» is a
+            # real PNG, a compressed .jpg photo a JPEG (the gate decodes the container)
+            mock.patch("apps.max_bot.views.download_photo", side_effect=_download_by_extension),
             mock.patch("apps.max_bot.checkout.YooKassaPaymentProvider.from_env", return_value=self.provider),
         ]
         self.client_cls = patches[0].start()
@@ -212,8 +220,13 @@ class TelegramBot(CatalogMixin):
         self.client_cls = patcher.start()
         self.addCleanup(patcher.stop)
         self.bot = self.client_cls.return_value
-        self.bot.get_file.side_effect = lambda file_id: {"file_path": f"photos/{file_id}.jpg"}
-        self.bot.download_file.return_value = good_photo_bytes()
+        # a compressed photo is a .jpg; a document «sent as a file» keeps its
+        # own .png path — and the bytes match the extension (the gate decodes)
+        self.bot.get_file.side_effect = lambda file_id: {
+            "file_path": f"documents/{file_id}.png" if file_id in self.document_ids else f"photos/{file_id}.jpg"
+        }
+        self.bot.download_file.side_effect = _download_by_extension
+        self.document_ids = set()
 
     def _post(self, payload):
         return self.client.post("/telegram/webhook/", data=json.dumps(payload), content_type="application/json")
@@ -236,6 +249,7 @@ class TelegramBot(CatalogMixin):
 
     def photo_as_file(self, name="p"):
         """A photo sent «as a file» (uncompressed): Telegram delivers a document with an image mime type."""
+        self.document_ids.add(name)
         return self.attachment({"document": {"file_id": name, "file_name": f"{name}.png", "mime_type": "image/png"}})
 
     def sticker(self):
