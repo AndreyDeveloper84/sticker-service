@@ -19,8 +19,10 @@ Limits (Django setting first, then env):
 
 - ``PILOT_MAX_IMAGE_CALLS_PER_DAY`` / ``PILOT_MAX_IMAGE_CALLS_PER_MONTH`` —
   jobs with ``started_at`` in the current local day / month, every task
-  type and outcome (an attempt that reached the provider is billable);
-  unset or ``0`` = unlimited;
+  type and outcome (an attempt that reached the provider is billable),
+  PLUS queued (PENDING) jobs by ``created_at`` — a queued attempt is a
+  committed billable call the worker will make (async C-1); unset or
+  ``0`` = unlimited;
 - ``PILOT_MAX_IMAGE_CALLS_PER_ORDER`` (unset → 15; ``0`` = unlimited);
 - ``PILOT_MAX_FULL_ATTEMPTS_PER_SLOT`` (unset → 3; ``0`` = unlimited) —
   FULL jobs per slot.
@@ -46,7 +48,8 @@ from datetime import datetime, time
 
 from django.conf import settings
 from django.db import connection
-from django.db.models import Count
+from django.db.models import Count, Q
+from django.db.models.functions import Coalesce
 from django.utils import timezone
 
 from apps.core.models import GenerationJob, Order, OrderEvent
@@ -242,15 +245,29 @@ class BudgetService:
 
     @staticmethod
     def _started():
-        return GenerationJob.objects.filter(started_at__isnull=False)
+        """Attempts that count against the budget: everything that reached
+        (or will reach) the provider — started jobs by ``started_at`` and
+        queued PENDING jobs by ``created_at`` (async C-1: ``started_at`` is
+        set by the worker's claim, so a PENDING job would otherwise be
+        invisible and N queued jobs could overshoot a day limit; with the
+        worker down, indefinitely). ``counted_at`` is the window key.
+
+        Nuance: a job requested at 23:59 and claimed at 00:01 moves from
+        today's window (as PENDING by created_at) to tomorrow's (as started
+        by started_at). The limit is still enforced at request time against
+        the window in which the request is made, which is the intent.
+        """
+        return GenerationJob.objects.filter(
+            Q(started_at__isnull=False) | Q(status=GenerationJob.Status.PENDING)
+        ).annotate(counted_at=Coalesce("started_at", "created_at"))
 
     def calls_today(self) -> int:
         start, end = self.day_window()
-        return self._started().filter(started_at__gte=start, started_at__lte=end).count()
+        return self._started().filter(counted_at__gte=start, counted_at__lte=end).count()
 
     def calls_this_month(self) -> int:
         start, end = self.month_window()
-        return self._started().filter(started_at__gte=start, started_at__lt=end).count()
+        return self._started().filter(counted_at__gte=start, counted_at__lt=end).count()
 
     def calls_for_order(self, order: Order) -> int:
         return self._started().filter(order=order).count()
@@ -354,8 +371,8 @@ class BudgetService:
     def _window_cost(self, start, end, *, inclusive_end: bool) -> dict:
         from apps.core.services import generation_cost
 
-        jobs = self._started().filter(started_at__gte=start)
-        jobs = jobs.filter(started_at__lte=end) if inclusive_end else jobs.filter(started_at__lt=end)
+        jobs = self._started().filter(counted_at__gte=start)
+        jobs = jobs.filter(counted_at__lte=end) if inclusive_end else jobs.filter(counted_at__lt=end)
         return generation_cost.aggregate(jobs.values_list("input_metadata", flat=True))
 
     def summary(self) -> dict:

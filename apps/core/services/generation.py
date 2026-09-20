@@ -16,6 +16,7 @@ from apps.core.image_providers import (
 )
 from apps.core.models import GeneratedAsset, GenerationJob, Order, OrderPhoto, Revision
 from apps.core.services.generation_prompts import FRAMING_CLAUSE, SAFE_FOR_WORK_CLAUSE, render_revision_request
+from apps.core.services import generation_queue
 from apps.core.services.budget import BudgetGuard, BudgetOverride
 from apps.core.services import generation_cost
 from apps.core.services.order_state import InvalidOrderTransition, OrderStateService
@@ -30,11 +31,37 @@ class GenerationError(ValueError):
 
 
 ALREADY_RUNNING_MESSAGE = "Генерация уже выполняется, дождитесь завершения (~1–1.5 мин)"
+QUEUED_MESSAGE = "Генерация уже поставлена в очередь (job #{job_id}), дождитесь worker'а"
 
-# A RUNNING preview/revision job older than this is a dead worker (gunicorn
-# times out at 300 s): it is failed closed as "ambiguous" so the operator
-# is not locked out forever, mirroring FullProductionService re-entry.
+# A RUNNING job older than this is a dead worker (gunicorn kill, OOM, host
+# restart): it is failed closed as "ambiguous" so the operator is not locked
+# out forever. A PENDING job is never reaped automatically (decision C-2):
+# the operator dequeues it explicitly (generation_queue.dequeue).
 STALE_RUNNING_AFTER = timedelta(minutes=15)
+
+
+def reap_stale(order: Order) -> list[GenerationJob]:
+    """Fail closed every RUNNING job of the order older than
+    STALE_RUNNING_AFTER (any task type). Returns the jobs marked. Used by the
+    RUNNING guard, the worker before claim and the console card."""
+    stale_before = timezone.now() - STALE_RUNNING_AFTER
+    reaped = []
+    with transaction.atomic():
+        running = GenerationJob.objects.select_for_update().filter(
+            order=order, status=GenerationJob.Status.RUNNING
+        )
+        for job in running:
+            started = job.started_at or job.created_at
+            if not (started and started < stale_before):
+                continue
+            job.status = GenerationJob.Status.FAILED
+            job.error = "stale RUNNING job (worker gone); failed closed"
+            job.output_metadata = {**(job.output_metadata or {}), "failure_class": "ambiguous"}
+            generation_cost.apply_failure(job, job.output_metadata)
+            job.finished_at = timezone.now()
+            job.save(update_fields=["status", "error", "output_metadata", "input_metadata", "finished_at", "updated_at"])
+            reaped.append(job)
+    return reaped
 
 
 class GenerationService:
@@ -42,15 +69,20 @@ class GenerationService:
         self.provider = provider
         self.storage = storage or LocalMediaStorage()
 
-    def generate_preview(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+    # ------------------------------------------------ async API (C-1)
+    # request_*: create the PENDING attempt (guards + budget + snapshot in one
+    # transaction) and hand it to the executor. Returns the job; with the
+    # inline executor the job is already finished on return.
+
+    def request_preview(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GenerationJob:
         job = self._start_job(order=order, task_type=GenerationJob.TaskType.PREVIEW, budget_override=budget_override)
-        return self._run_job(job)
+        return self._dispatch(job)
 
-    def generate_revision(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+    def request_revision(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GenerationJob:
         job = self._start_job(order=order, task_type=GenerationJob.TaskType.REVISION, budget_override=budget_override)
-        return self._run_job(job)
+        return self._dispatch(job)
 
-    def restart_preview(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+    def request_preview_restart(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GenerationJob:
         """Console «Перегенерировать превью»: INTERNAL_PREVIEW_REVIEW →
         PREVIEW_GENERATING and the new attempt in ONE transaction, so a
         budget refusal (or any other error before the job exists) leaves
@@ -60,9 +92,17 @@ class GenerationService:
             job = self._start_job(
                 order=order, task_type=GenerationJob.TaskType.PREVIEW, budget_override=budget_override
             )
-        return self._run_job(job)
+        return self._dispatch(job)
 
-    def _run_job(self, job):
+    def _dispatch(self, job: GenerationJob) -> GenerationJob:
+        generation_queue.dispatch(job, service=self)
+        job.refresh_from_db()
+        return job
+
+    def execute_claimed(self, job: GenerationJob) -> GeneratedAsset | None:
+        """Worker side: ``job`` is RUNNING (claimed). Builds the request, calls
+        the provider once and records the outcome on the job; never raises
+        for provider failures (the job carries them)."""
         try:
             request = self._build_request(job=job)
             result = self.provider.generate_preview(request)
@@ -70,12 +110,36 @@ class GenerationService:
                 raise GenerationError("Image provider returned empty content")
             return self._complete(job=job, result=result)
         except Exception as exc:
-            failure = self._fail_job(job=job, exc=exc)
-            if isinstance(exc, GenerationError):
-                raise
-            error = GenerationError(str(exc))
-            error.failure = failure
-            raise error from exc
+            self._fail_job(job=job, exc=exc)
+            return None
+
+    # ------------------------------------------------ sync API
+    # generate_* / restart_preview = request + result: the historical contract
+    # (asset or GenerationError). Meaningful with the inline executor only;
+    # with the background worker enabled the console uses request_*.
+
+    def generate_preview(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+        return self._sync_result(self.request_preview(order=order, budget_override=budget_override))
+
+    def generate_revision(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+        return self._sync_result(self.request_revision(order=order, budget_override=budget_override))
+
+    def restart_preview(self, *, order: Order, budget_override: BudgetOverride | None = None) -> GeneratedAsset:
+        return self._sync_result(self.request_preview_restart(order=order, budget_override=budget_override))
+
+    @staticmethod
+    def _sync_result(job: GenerationJob) -> GeneratedAsset:
+        if job.status == GenerationJob.Status.SUCCEEDED:
+            return GeneratedAsset.objects.get(pk=(job.output_metadata or {})["asset_id"])
+        if job.status == GenerationJob.Status.FAILED:
+            error = GenerationError(job.error or f"Job #{job.pk} failed")
+            error.failure = {
+                key: value
+                for key, value in (job.output_metadata or {}).items()
+                if key != generation_queue.WORKER_KEY
+            }
+            raise error
+        raise GenerationError(QUEUED_MESSAGE.format(job_id=job.pk))
 
     @transaction.atomic
     def _start_job(
@@ -157,35 +221,39 @@ class GenerationService:
             provider=self.provider, task_type=task_type
         )
 
+        # PENDING = created, not yet picked up by the executor; started_at is
+        # set by generation_queue.claim (PENDING → RUNNING) in the worker.
+        input_metadata["queue"] = {"requested_at": timezone.now().isoformat()}
         return GenerationJob.objects.create(
             order=locked_order,
             task_type=task_type,
-            status=GenerationJob.Status.RUNNING,
+            status=GenerationJob.Status.PENDING,
             attempt=latest_attempt + 1,
             provider=self.provider.name,
             input_metadata=input_metadata,
-            started_at=timezone.now(),
         )
 
     @staticmethod
     def _guard_running(*, locked_order: Order, task_type: str) -> None:
-        running = GenerationJob.objects.select_for_update().filter(
-            order=locked_order,
-            task_type=task_type,
-            status=GenerationJob.Status.RUNNING,
+        """One billable attempt at a time: a fresh RUNNING job or a PENDING
+        (queued) job refuses a new attempt; only a stale RUNNING job is
+        reaped (ambiguous). PENDING is never reaped here — see dequeue."""
+        reap_stale(locked_order)
+        active = (
+            GenerationJob.objects.select_for_update()
+            .filter(
+                order=locked_order,
+                task_type=task_type,
+                status__in=[GenerationJob.Status.PENDING, GenerationJob.Status.RUNNING],
+            )
+            .order_by("pk")
+            .first()
         )
-        stale_before = timezone.now() - STALE_RUNNING_AFTER
-        for job in running:
-            started = job.started_at or job.created_at
-            if started and started < stale_before:
-                job.status = GenerationJob.Status.FAILED
-                job.error = "stale RUNNING job (worker gone); failed closed"
-                job.output_metadata = {**(job.output_metadata or {}), "failure_class": "ambiguous"}
-                generation_cost.apply_failure(job, job.output_metadata)
-                job.finished_at = timezone.now()
-                job.save(update_fields=["status", "error", "output_metadata", "input_metadata", "finished_at", "updated_at"])
-                continue
-            raise GenerationError(ALREADY_RUNNING_MESSAGE)
+        if active is None:
+            return
+        if active.status == GenerationJob.Status.PENDING:
+            raise GenerationError(QUEUED_MESSAGE.format(job_id=active.pk))
+        raise GenerationError(ALREADY_RUNNING_MESSAGE)
 
     def _build_request(self, *, job: GenerationJob) -> ImageGenerationRequest:
         order = (
@@ -262,6 +330,8 @@ class GenerationService:
         )
         self.storage.save(storage_key, BytesIO(result.content))
         metadata = {**(result.metadata or {}), "task_type": locked_job.task_type}
+        # the outbound route is job evidence (worker.proxy), not asset metadata
+        asset_metadata = {key: value for key, value in metadata.items() if key != "proxy"}
         asset = GeneratedAsset.objects.create(
             order=locked_order,
             job=locked_job,
@@ -269,10 +339,11 @@ class GenerationService:
             storage_key=storage_key,
             mime_type=result.mime_type or "image/png",
             size_bytes=len(result.content),
-            metadata=metadata,
+            metadata=asset_metadata,
         )
         locked_job.status = GenerationJob.Status.SUCCEEDED
-        locked_job.output_metadata = {"asset_id": asset.pk, **metadata}
+        # keep the worker facts written at claim (picked_at, host, pid)
+        locked_job.output_metadata = {**(locked_job.output_metadata or {}), "asset_id": asset.pk, **metadata}
         generation_cost.apply_success(locked_job, metadata)
         locked_job.finished_at = timezone.now()
         locked_job.save(

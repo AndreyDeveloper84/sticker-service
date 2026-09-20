@@ -62,6 +62,9 @@ FAILURE_OUTCOMES = {
     "moderation": (BillingOutcome.MODERATION_BLOCKED, None),
     "api": (BillingOutcome.API_ERROR, None),
     "ambiguous": (BillingOutcome.TIMEOUT_AMBIGUOUS, None),
+    # async C-1: a queued job nobody picked up, dequeued by the operator —
+    # the provider was never called.
+    "queue_lost": (BillingOutcome.BEFORE_PROVIDER, False),
 }
 
 PRICE_FIELDS = (

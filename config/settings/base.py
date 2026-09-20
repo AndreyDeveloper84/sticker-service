@@ -60,6 +60,16 @@ DATABASES = {
 }
 
 REDIS_URL = os.getenv("REDIS_URL", "redis://redis:6379/0")
+# Background generation (async design 2026-09-20). Default off: the console
+# runs the provider call inline (today's behaviour). When on, the console only
+# creates the PENDING job and enqueues its id; a separate `generation_worker`
+# process performs the provider call (RQ, Redis holds job ids only).
+GENERATION_WORKER_ENABLED = os.getenv("GENERATION_WORKER_ENABLED", "false").strip().lower() in {"1", "true", "yes", "on"}
+GENERATION_QUEUE_NAME = os.getenv("GENERATION_QUEUE_NAME", "generation")
+GENERATION_QUEUE_REDIS_URL = os.getenv("GENERATION_QUEUE_REDIS_URL", "") or REDIS_URL
+# RQ job_timeout must exceed the worker's OpenAI read timeout (540 s) and stay
+# below the stale-RUNNING guard (15 min): read 540 < job 560 < stale 900.
+GENERATION_JOB_TIMEOUT_S = int(os.getenv("GENERATION_JOB_TIMEOUT_S", "560"))
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
 ORDER_PHOTO_MAX_BYTES = int(os.getenv("ORDER_PHOTO_MAX_BYTES", str(20 * 1024 * 1024)))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
