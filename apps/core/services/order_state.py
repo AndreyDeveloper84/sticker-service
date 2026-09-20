@@ -34,22 +34,29 @@ class OrderStateService:
             Order.Status.CANCELLED,
             Order.Status.FAILED,
         },
+        # CANCELLED after payment: the operator's «Закрыть заказ» only
+        # (OrderCloseService) — and only when no attempt ever reached the
+        # provider; otherwise the close is FAILED.
         Order.Status.PAID: {
             Order.Status.PREVIEW_GENERATING,
+            Order.Status.CANCELLED,
             Order.Status.FAILED,
         },
         Order.Status.PREVIEW_GENERATING: {
             Order.Status.INTERNAL_PREVIEW_REVIEW,
+            Order.Status.CANCELLED,
             Order.Status.FAILED,
         },
         Order.Status.INTERNAL_PREVIEW_REVIEW: {
             Order.Status.PREVIEW_GENERATING,
             Order.Status.PREVIEW_REVIEW,
+            Order.Status.CANCELLED,
             Order.Status.FAILED,
         },
         Order.Status.PREVIEW_REVIEW: {
             Order.Status.REVISION_REQUESTED,
             Order.Status.PACK_GENERATING,
+            Order.Status.CANCELLED,
             Order.Status.FAILED,
         },
         Order.Status.REVISION_REQUESTED: {
@@ -70,6 +77,7 @@ class OrderStateService:
             # exactly the requested slot_keys.
             Order.Status.READY_FOR_DELIVERY,
             Order.Status.PACK_GENERATING,
+            Order.Status.CANCELLED,
             Order.Status.FAILED,
         },
         Order.Status.READY_FOR_DELIVERY: {

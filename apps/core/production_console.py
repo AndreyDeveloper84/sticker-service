@@ -62,6 +62,7 @@ from .services.order_economics import (
 from .services.full_production import FullProductionError, FullProductionService
 from .services import generation_queue
 from .services.generation import GenerationError, GenerationService, reap_stale
+from .services.order_close import PAYMENT_NOTES, OrderCloseError, OrderCloseService
 from .services.order_state import InvalidOrderTransition, OrderStateService
 from .services.qc import QcError, QcService
 from .storage import LocalMediaStorage
@@ -703,6 +704,15 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
                             "и не была оплачена — иначе возможен дубль платной генерации.",
                         )
                     )
+        if OrderCloseService.closable(order):
+            links.append(
+                (
+                    "Закрыть заказ…",
+                    reverse("admin:core_order_close", args=[order.pk]),
+                    "Только суперпользователь, с причиной и пометкой по оплате. Заказ станет «Отменён» "
+                    "(или «Ошибка», если платная генерация уже была); платежи, генерации и файлы сохраняются.",
+                )
+            )
         return links
 
     @admin.display(description="Второстепенные действия")
@@ -1090,6 +1100,11 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
                 name="core_order_pilot_metrics_export_json",
             ),
             path(
+                "<int:order_id>/close/",
+                self.admin_site.admin_view(self.close_order_view),
+                name="core_order_close",
+            ),
+            path(
                 "<int:order_id>/dequeue-job/<int:job_id>/",
                 self.admin_site.admin_view(self.dequeue_job_view),
                 name="core_order_dequeue_job",
@@ -1303,6 +1318,67 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
                 "Страница обновится сама.",
                 level=messages.SUCCESS,
             )
+
+    def close_order_view(self, request, order_id):
+        """«Закрыть заказ» (superuser): mandatory reason + money note →
+        OrderCloseService (CANCELLED, or FAILED after a billable attempt)."""
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        change_url = reverse("admin:core_order_change", args=[order.pk])
+        if not request.user.is_superuser:
+            self.message_user(request, "Закрыть заказ может только суперпользователь.", level=messages.ERROR)
+            return redirect(change_url)
+        if not OrderCloseService.closable(order):
+            self.message_user(
+                request, f"Заказ #{order.pk} нельзя закрыть из статуса «{order.get_status_display()}».",
+                level=messages.ERROR,
+            )
+            return redirect(change_url)
+        if self._refuse_if_generating(request, order):
+            return redirect(change_url)
+        action_url = reverse("admin:core_order_close", args=[order.pk])
+        jobs = list(order.generation_jobs.all())
+        billable = OrderCloseService.had_billable_generation(jobs)
+        target = "Ошибка" if billable else "Отменён"
+        errors = []
+        reason = request.POST.get("reason", "").strip()
+        payment_note = request.POST.get("payment_note", "")
+        if request.method == "POST":
+            try:
+                OrderCloseService.close(
+                    order=order, actor_ref=request.user.get_username(), reason=reason, payment_note=payment_note,
+                )
+            except OrderCloseError as exc:
+                errors.append(str(exc))
+            else:
+                order.refresh_from_db()
+                self.message_user(
+                    request,
+                    f"Заказ #{order.pk} закрыт: «{order.get_status_display()}» "
+                    f"({PAYMENT_NOTES[payment_note]}). Платежи, генерации и файлы сохранены.",
+                    level=messages.SUCCESS,
+                )
+                return redirect(change_url)
+        return self._confirmation(
+            request,
+            order=order,
+            title=f"Закрыть заказ #{order.pk}",
+            action_url=action_url,
+            detail=(
+                f"Заказ перейдёт в «{target}»"
+                + (" — платная (или возможно платная) генерация уже была, поэтому не «Отменён»." if billable
+                   else " — ни одна генерация не дошла до провайдера.")
+                + " Платежи, генерации и файлы не удаляются; клиенту ничего не отправляется."
+            ),
+            warning="Действие необратимо: из закрытого заказа переходов нет.",
+            close_form=True,
+            close_reason=reason,
+            close_payment_note=payment_note,
+            close_payment_notes=list(PAYMENT_NOTES.items()),
+            close_errors=errors,
+            payments=list(order.payments.order_by("pk")),
+        )
 
     def dequeue_job_view(self, request, order_id, job_id):
         """«Снять из очереди» (decision C-2): a PENDING job no worker picked
