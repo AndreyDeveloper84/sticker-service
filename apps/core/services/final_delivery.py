@@ -427,7 +427,7 @@ class FinalDeliveryService:
     def _send_summary(self, *, run, recipient, total) -> bool:
         try:
             result = self.adapter.send_final_summary(
-                recipient_id=recipient, text=SUMMARY_TEXT, total=total
+                recipient_id=recipient, text=getattr(self.adapter, "summary_text", SUMMARY_TEXT), total=total
             )
         except Exception as exc:
             self._record_summary(

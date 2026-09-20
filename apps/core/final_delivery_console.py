@@ -1,3 +1,4 @@
+import logging
 import os
 
 from django.contrib import admin, messages
@@ -23,8 +24,12 @@ from apps.core.services.final_delivery import (
 from apps.core.services.qc import QcError
 from apps.max_bot.client import MaxBotClient
 from apps.max_bot.final_delivery import MaxFinalDeliveryAdapter
+from apps.core.models import ChannelIdentity
 from apps.telegram_bot.client import TelegramBotClient
 from apps.telegram_bot.final_delivery import TelegramFinalDeliveryAdapter
+from apps.telegram_bot.sticker_set import StickerSetError, TelegramStickerSetService, sticker_set_record
+
+logger = logging.getLogger(__name__)
 
 # One synchronous console request sends at most this many stickers so a
 # 9-item pack cannot outlive the worker timeout; the operator re-runs
@@ -61,6 +66,102 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
         except QcError:
             return False
         return True
+
+    # ------------------------------------------------ Telegram sticker set (DRF-2163)
+
+    def get_sticker_set_service(self):
+        """None when no bot token is configured (tests / non-Telegram
+        deployments): the set is then not attempted and nothing is said —
+        a real Telegram delivery already used the same token."""
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return None
+        return TelegramStickerSetService(client=TelegramBotClient(token))
+
+    def _after_delivery(self, request, order, plan):
+        """A completed Telegram delivery → the customer's sticker set + the
+        t.me/addstickers link (at-most-once, errors shown to the operator)."""
+        if not plan.complete or order.channel_identity.channel != ChannelIdentity.Channel.TELEGRAM:
+            return
+        order.refresh_from_db()
+        if order.status != Order.Status.DELIVERED:
+            return
+        self._ensure_sticker_set(request, order)
+
+    def _ensure_sticker_set(self, request, order):
+        service = self.get_sticker_set_service()
+        if service is None:
+            logger.info("telegram.sticker_set.skipped order=%s reason=no_bot_token", order.pk)
+            return None
+        try:
+            record = service.ensure(order, actor_ref=request.user.get_username())
+        except (StickerSetError, FinalDeliveryError) as exc:
+            self.message_user(request, f"Набор стикеров Telegram не создан: {exc}", level=messages.WARNING)
+            return None
+        if record.get("status") == "done":
+            self.message_user(
+                request,
+                f"Набор стикеров Telegram готов: {record['link']} ({len(record.get('stickers') or {})} стикеров), "
+                "ссылка отправлена клиенту.",
+                level=messages.SUCCESS,
+            )
+        else:
+            self.message_user(
+                request,
+                f"Набор стикеров Telegram не создан: {record.get('error') or 'ошибка Bot API'} — "
+                "нажмите «Создать набор повторно» в блоке «Доставка».",
+                level=messages.WARNING,
+            )
+        return record
+
+    def sticker_set_line(self, order):
+        """Panel line: the set link / the failure + the retry button, Telegram only."""
+        if order.channel_identity.channel != ChannelIdentity.Channel.TELEGRAM:
+            return None
+        record = sticker_set_record(order)
+        retry = reverse("admin:core_order_create_sticker_set", args=[order.pk])
+        if record is None:
+            if order.status != Order.Status.DELIVERED:
+                return None
+            return format_html(
+                "Набор стикеров Telegram: ещё не создан · {}",
+                buttons_html([(retry, "Создать набор повторно")]),
+            )
+        count = len(record.get("stickers") or {})
+        if record.get("status") == "done":
+            return format_html(
+                'Набор стикеров Telegram: <a href="{}" target="_blank" rel="noopener">{}</a> · {} стикеров · '
+                "ссылка клиенту: {}",
+                record["link"], record["set_name"], count, "отправлена" if record.get("link_message_id") else "—",
+            )
+        return format_html(
+            "Набор стикеров Telegram: <strong>сбой</strong> — {} · добавлено {} стикеров · {}",
+            record.get("error") or "ошибка Bot API", count, buttons_html([(retry, "Создать набор повторно")]),
+        )
+
+    def create_sticker_set_view(self, request, order_id):
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        change_url = reverse("admin:core_order_change", args=[order.pk])
+        action_url = reverse("admin:core_order_create_sticker_set", args=[order.pk])
+        if request.method != "POST":
+            return self._confirmation(
+                request,
+                order=order,
+                title="Создать набор повторно",
+                action_url=action_url,
+                detail=(
+                    "Стикеры заказа будут добавлены в набор клиента в Telegram (только ещё не добавленные), "
+                    "клиенту отправится ссылка t.me/addstickers/… (если ещё не отправлялась). "
+                    "Доставленные файлы не пересылаются."
+                ),
+            )
+        if order.status != Order.Status.DELIVERED or order.channel_identity.channel != ChannelIdentity.Channel.TELEGRAM:
+            self.message_user(request, "Набор создаётся после полной доставки заказа в Telegram.", level=messages.ERROR)
+            return redirect(change_url)
+        self._ensure_sticker_set(request, order)
+        return redirect(change_url)
 
     def get_final_delivery_service(self, order):
         if order.channel_identity.channel == "telegram":
@@ -152,6 +253,9 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
                     detail,
                 )
             )
+        sticker_line = self.sticker_set_line(order)
+        if sticker_line:
+            lines.append(sticker_line)
         if actions:
             lines.append(
                 buttons_html(actions)
@@ -164,6 +268,11 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
                 "<int:order_id>/deliver-final/",
                 self.admin_site.admin_view(self.deliver_final_view),
                 name="core_order_deliver_final",
+            ),
+            path(
+                "<int:order_id>/create-sticker-set/",
+                self.admin_site.admin_view(self.create_sticker_set_view),
+                name="core_order_create_sticker_set",
             ),
             path(
                 "<int:order_id>/resume-final-delivery/",
@@ -228,6 +337,7 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
             self._fail(request, exc)
         else:
             self.message_user(request, self._delivery_plan_message(plan, order), level=messages.SUCCESS)
+            self._after_delivery(request, order, plan)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
     def resume_final_delivery_view(self, request, order_id):
@@ -255,6 +365,7 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
             self._fail(request, exc)
         else:
             self.message_user(request, self._delivery_plan_message(plan, order), level=messages.SUCCESS)
+            self._after_delivery(request, order, plan)
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
 
