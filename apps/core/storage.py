@@ -10,8 +10,10 @@ class LocalMediaStorage:
 
     def _path(self, key):
         root = self.root.resolve()
+        if not str(key or "").strip():
+            raise ValueError("Invalid storage key")
         path = (root / key).resolve()
-        if root != path and root not in path.parents:
+        if root == path or root not in path.parents:
             raise ValueError("Invalid storage key")
         return path
 
@@ -32,9 +34,13 @@ class LocalMediaStorage:
         return self._path(key).exists()
 
     def delete(self, key) -> bool:
-        """Remove the file; True when it existed (DRF-2170 media lifecycle)."""
+        """Remove the file; True when it existed (DRF-2170 media lifecycle).
+        An empty key or a directory is refused (ValueError) — never unlink
+        the root or a folder."""
         path = self._path(key)
         if not path.exists():
             return False
+        if path.is_dir():
+            raise ValueError("Storage key is a directory")
         path.unlink()
         return True

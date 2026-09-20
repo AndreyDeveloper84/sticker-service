@@ -199,7 +199,7 @@ class MediaLifecycleService:
     def apply_retention(self, plan: PurgePlan, *, actor_ref: str = "media_retention") -> dict:
         if not retention_enabled():
             raise MediaLifecycleError("MEDIA_RETENTION_ENABLED is not true — nothing was deleted")
-        report = {"orders": 0, "files": 0, "bytes": 0, "counts": {kind: 0 for kind in KINDS}}
+        report = {"orders": 0, "files": 0, "bytes": 0, "errors": 0, "counts": {kind: 0 for kind in KINDS}}
         for order in plan.orders:
             items = [item for item in plan.items if item.order.pk == order.pk]
             result = self._purge(order, items, rule=RULE_RETENTION, reason="retention policy", actor_ref=actor_ref,
@@ -207,6 +207,7 @@ class MediaLifecycleService:
             report["orders"] += 1
             report["files"] += result["files"]
             report["bytes"] += result["bytes"]
+            report["errors"] += result["errors"]
             for kind in KINDS:
                 report["counts"][kind] += result["counts"][kind]
         return report
@@ -238,13 +239,17 @@ class MediaLifecycleService:
         moment = timezone.now()
         counts = {kind: 0 for kind in KINDS}
         files = 0
+        errors = 0
         total = 0
         for item in items:
             obj = type(item.obj).objects.select_for_update().get(pk=item.obj.pk)
             if is_purged(obj):
                 continue
             for key in item.storage_keys:
-                if self._delete_file(key):
+                deleted = self._delete_file(key)
+                if deleted is None:
+                    errors += 1  # a file system error: the row is still marked, the run goes on
+                elif deleted:
                     files += 1
             obj.metadata = {
                 **(obj.metadata or {}),
@@ -270,14 +275,21 @@ class MediaLifecycleService:
                 actor_kind=OrderEvent.Actor.OPERATOR if rule == RULE_CUSTOMER_REQUEST else OrderEvent.Actor.SYSTEM,
                 actor_ref=str(actor_ref or ""),
                 payload={"rule": rule, "reason": reason, "counts": counts, "files": files, "bytes": total,
-                         "contact_cleared": contact_cleared},
+                         "errors": errors, "contact_cleared": contact_cleared},
             )
-        logger.info("media_lifecycle.purged order=%s rule=%s files=%s bytes=%s", order.pk, rule, files, total)
-        return {"counts": counts, "files": files, "bytes": total, "contact_cleared": contact_cleared}
+        logger.info("media_lifecycle.purged order=%s rule=%s files=%s errors=%s bytes=%s",
+                    order.pk, rule, files, errors, total)
+        return {"counts": counts, "files": files, "bytes": total, "errors": errors, "contact_cleared": contact_cleared}
 
-    def _delete_file(self, key: str) -> bool:
+    def _delete_file(self, key: str) -> bool | None:
+        """True: deleted; False: was not there / invalid key; None: a file
+        system error (logged, counted as ``errors``) — never an exception,
+        so one bad file cannot roll back the marks of the others."""
         try:
             return self.storage.delete(key)
         except ValueError:
             logger.warning("media_lifecycle: invalid storage key skipped")
             return False
+        except OSError as exc:
+            logger.warning("media_lifecycle: file delete failed (%s) — counted as an error", type(exc).__name__)
+            return None

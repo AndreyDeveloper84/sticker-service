@@ -162,7 +162,7 @@ class RetentionPolicyTests(LifecycleFixture):
         with cfg(MEDIA_RETENTION_ENABLED="true", MEDIA_RETENTION_FINALS_DAYS=30), env_off():
             service = MediaLifecycleService(storage=self.storage)
             report = service.apply_retention(service.retention_plan())
-        self.assertEqual(report, {"orders": 1, "files": 2, "bytes": len(b"final-normalized"),
+        self.assertEqual(report, {"orders": 1, "files": 2, "bytes": len(b"final-normalized"), "errors": 0,
                                   "counts": {KIND_SOURCE: 0, KIND_PREVIEW: 0, KIND_FINAL: 1}})
         self.assertEqual(self.files_present(), [True, True, False, False], "final + its provider original")
         self.final.refresh_from_db()
@@ -175,7 +175,8 @@ class RetentionPolicyTests(LifecycleFixture):
         self.assertEqual(event.actor_kind, OrderEvent.Actor.SYSTEM)
         self.assertEqual(event.payload, {"rule": "retention", "reason": "retention policy",
                                          "counts": {KIND_SOURCE: 0, KIND_PREVIEW: 0, KIND_FINAL: 1},
-                                         "files": 2, "bytes": len(b"final-normalized"), "contact_cleared": False})
+                                         "files": 2, "bytes": len(b"final-normalized"), "errors": 0,
+                                         "contact_cleared": False})
         for pii in ("photo.jpg", "Анна", "anna", "storage_key"):
             self.assertNotIn(pii, str(event.payload))
         self.order.refresh_from_db()
@@ -230,6 +231,46 @@ class CustomerRequestTests(LifecycleFixture):
         again = MediaLifecycleService(storage=self.storage).purge_order(self.order, reason="повтор", actor_ref="root")
         self.assertEqual(again["files"], 0)
         self.assertEqual(OrderEvent.objects.filter(order=self.order, event_type=OrderEvent.MEDIA_PURGED).count(), 1)
+
+    def test_file_system_error_on_one_file_does_not_roll_back_the_others(self):
+        """D's finding on PR #96: PermissionError from unlink() used to escape
+        the atomic purge — files already gone, rows unmarked, no event, a 500
+        in the console. Now the error is logged and counted; the run goes on."""
+        real_delete = self.storage.delete
+
+        def flaky_delete(key):
+            if key == self.preview_key:
+                raise PermissionError(13, "Permission denied")
+            return real_delete(key)
+
+        service = MediaLifecycleService(storage=self.storage)
+        with mock.patch.object(self.storage, "delete", side_effect=flaky_delete), \
+                self.assertLogs("apps.core.services.media_lifecycle", "WARNING") as logs:
+            result = service.purge_order(self.order, reason="запрос клиента", actor_ref="root")
+        self.assertEqual(result["files"], 3)
+        self.assertEqual(result["errors"], 1)
+        self.assertEqual(result["counts"], {KIND_SOURCE: 1, KIND_PREVIEW: 1, KIND_FINAL: 1})
+        self.assertEqual(self.files_present(), [False, True, False, False])
+        self.assertTrue(any("file delete failed (PermissionError)" in line for line in logs.output))
+        for obj in (self.photo, self.preview, self.final):
+            obj.refresh_from_db()
+            self.assertTrue(is_purged(obj), f"{obj} is marked even though one unlink failed")
+        event = OrderEvent.objects.get(order=self.order, event_type=OrderEvent.MEDIA_PURGED)
+        self.assertEqual(event.payload["errors"], 1)
+        self.assertEqual(event.payload["files"], 3)
+        self.order.refresh_from_db()
+        self.assertEqual(self.order.selection["contact"], "")
+        self.assert_accounting_intact()
+
+    def test_storage_delete_refuses_empty_keys_directories_and_escapes(self):
+        for key in ("", "   ", ".", "orders", f"orders/{self.order.pk}/source", "../outside"):
+            with self.assertRaises(ValueError, msg=key):
+                self.storage.delete(key)
+        self.assertTrue(self.storage.root.exists(), "the root is never unlinked")
+        self.assertEqual(self.files_present(), [True, True, True, True])
+        self.assertFalse(self.storage.delete(f"orders/{self.order.pk}/source/missing.jpg"))
+        self.assertTrue(self.storage.delete(self.photo_key))
+        self.assertFalse(self.storage.exists(self.photo_key))
 
     def test_open_orders_and_empty_reasons_are_refused(self):
         with self.assertRaisesMessage(MediaLifecycleError, "reason is required"):

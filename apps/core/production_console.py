@@ -1306,7 +1306,9 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
             request,
             f"Медиа клиента удалены: фото {counts['source_photos']}, превью {counts['previews']}, "
             f"финалы {counts['finals']} ({result['files']} файл(ов), {result['bytes']} байт)"
-            + (", контакт стёрт" if result["contact_cleared"] else "") + ". Платежи и генерации сохранены.",
+            + (", контакт стёрт" if result["contact_cleared"] else "")
+            + (f"; ошибок файловой системы: {result['errors']} — см. лог" if result["errors"] else "")
+            + ". Платежи и генерации сохранены.",
             level=messages.SUCCESS,
         )
         return redirect(change_url)

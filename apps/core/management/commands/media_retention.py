@@ -40,4 +40,5 @@ class Command(BaseCommand):
             raise CommandError(str(exc)) from exc
         self.stdout.write(
             f"applied: {report['orders']} order(s), {report['files']} file(s), {report['bytes']} bytes deleted"
+            + (f", {report['errors']} file system error(s) — see the log" if report["errors"] else "")
         )
