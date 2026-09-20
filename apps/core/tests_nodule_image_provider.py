@@ -186,10 +186,10 @@ class NoduleFailClosedTests(SimpleTestCase):
         with mock.patch.object(service, "_build_request", return_value=request), mock.patch.object(
             service, "_fail_job"
         ) as fail_job:
-            with self.assertRaises(Exception) as ctx:
-                service._run_job(job)
-        self.assertIn("text-to-image only", str(ctx.exception))
+            # worker side (async C-1): the failure is recorded on the job, not raised
+            self.assertIsNone(service.execute_claimed(job))
         fail_job.assert_called_once()
+        self.assertIn("text-to-image only", str(fail_job.call_args.kwargs["exc"]))
         self.assertEqual(recorder.requests, [])
 
 

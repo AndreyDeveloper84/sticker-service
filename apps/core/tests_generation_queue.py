@@ -366,3 +366,29 @@ class RQExecutorTests(QueueTestCase):
     @override_settings(GENERATION_WORKER_ENABLED=True)
     def test_flag_selects_rq_executor(self):
         self.assertIsInstance(generation_queue.get_executor(), RQExecutor)
+
+
+@override_settings(GENERATION_WORKER_ENABLED=True)
+class WorkerEnabledWebInvariantTests(QueueTestCase):
+    """With the background worker enabled, the web process never calls the
+    provider and Redis receives the job id only (no prompt, no photos)."""
+
+    def test_web_request_never_calls_provider_and_redis_gets_only_the_id(self):
+        fake_queue = mock.Mock()
+        fake_queue.enqueue_call.return_value = mock.Mock(id="generation-job-1")
+        service = self.service()
+        with mock.patch("apps.core.services.generation_queue.rq_queue", return_value=fake_queue):
+            with self.captureOnCommitCallbacks(execute=True):
+                job = service.request_preview(order=self.order)
+        self.assertEqual(service.provider.requests, [])
+        job.refresh_from_db()
+        self.assertEqual(job.status, GenerationJob.Status.PENDING)
+        self.assertNotIn("prompt", job.input_metadata)  # rendered by the worker, not the web
+        kwargs = fake_queue.enqueue_call.call_args.kwargs
+        self.assertEqual(kwargs["args"], (job.pk,))
+        self.assertEqual(kwargs.get("kwargs"), None)
+        payload = repr(kwargs)
+        self.assertNotIn("Make preview", payload)
+        self.assertNotIn("person-photo", payload)
+        self.assertEqual(kwargs["timeout"], 560)
+        self.assertIsNone(kwargs["retry"])

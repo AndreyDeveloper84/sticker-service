@@ -59,7 +59,8 @@ class OpenAIImageParamsDefaultTests(SimpleTestCase):
         self.assertEqual(images.calls[0]["model"], "test-model")
         self.assertEqual(images.calls[0]["prompt"], "Preserve likeness")
         self.assertEqual(result.mime_type, "image/png")
-        self.assertEqual(result.metadata, {"model": "test-model"})
+        # "proxy": the outbound route of the call (async C-1 evidence; direct = no pool)
+        self.assertEqual(result.metadata, {"model": "test-model", "proxy": "direct"})
 
     def test_empty_env_values_are_treated_as_unset(self):
         images = Images()
@@ -95,7 +96,7 @@ class OpenAIImageParamsConfiguredTests(SimpleTestCase):
         self.assertEqual(result.mime_type, "image/png")
         self.assertEqual(
             result.metadata,
-            {"model": "test-model", "size": "1024x1024", "background": "transparent", "output_format": "png"},
+            {"model": "test-model", "size": "1024x1024", "background": "transparent", "output_format": "png", "proxy": "direct"},
         )
 
     def test_partial_configuration_sends_only_set_parameters(self):
@@ -152,7 +153,7 @@ class OpenAIImageInputFidelityTests(SimpleTestCase):
             result = provider(images).generate_preview(request())
         self.assertEqual(sorted(images.calls[0]), ["image", "input_fidelity", "model", "prompt"])
         self.assertEqual(images.calls[0]["input_fidelity"], "high")  # normalised
-        self.assertEqual(result.metadata, {"model": "test-model", "input_fidelity": "high"})
+        self.assertEqual(result.metadata, {"model": "test-model", "input_fidelity": "high", "proxy": "direct"})
         self.assertEqual(result.mime_type, "image/png")
 
     def test_combines_with_other_parameters(self):
