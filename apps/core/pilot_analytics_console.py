@@ -229,6 +229,7 @@ def build_context(snapshot: dict) -> dict:
         "funnel_overall": _percent(funnel["overall_percent"]),
         "revenue_rows": revenue_rows,
         "revenue_totals": _per_currency(revenue["totals"]),
+        "revenue_refunded": _per_currency(revenue["refunded"]) if revenue["refunded"] else "",
         "ai_rows": ai_rows,
         "quality_rows": quality_rows,
         "ops_rows": ops_rows,
