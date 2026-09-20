@@ -44,6 +44,10 @@ class Command(BaseCommand):
     def add_arguments(self, parser):
         parser.add_argument("--burst", action="store_true", help="process queued jobs and exit")
         parser.add_argument("--name", default="", help="worker name (default: generation@<host>.<pid>)")
+        # RQ refreshes the idle heartbeat every (worker_ttl - 15) s, so the
+        # compose healthcheck (worker_health --max-age) must be > that gap:
+        # ttl 120 → idle heartbeat every 105 s → max-age 150 (A-1).
+        parser.add_argument("--worker-ttl", type=int, default=120, help="RQ worker TTL in seconds (default 120)")
 
     def handle(self, *args, **options):
         import os
@@ -57,9 +61,10 @@ class Command(BaseCommand):
             connection=connection,
             name=name,
             default_result_ttl=0,
+            worker_ttl=options["worker_ttl"],
         )
         self.stdout.write(
             f"generation_worker name={name} queue={settings.GENERATION_QUEUE_NAME} "
-            f"job_timeout={settings.GENERATION_JOB_TIMEOUT_S}s burst={options['burst']}"
+            f"job_timeout={settings.GENERATION_JOB_TIMEOUT_S}s worker_ttl={options['worker_ttl']}s burst={options['burst']}"
         )
         worker.work(burst=options["burst"], with_scheduler=False)

@@ -136,6 +136,51 @@ gunzip -c backups/staging-<db>-<timestamp>.sql.gz | \
     exec -T db psql -U "$POSTGRES_USER" -d "$POSTGRES_DB"
 ```
 
+## Generation worker (background generation, 2026-09-20)
+
+The `worker` compose service runs ONE RQ worker (`manage.py generation_worker
+--name sticker-generation-1`, queue `generation`, Redis logical DB 1) on the
+same image as `backend`. While `GENERATION_WORKER_ENABLED=false` (the default)
+the console still generates inline and the worker just idles; with the flag
+`true` the console enqueues the job id and the worker runs the provider call.
+Job state always lives in the database — Redis holds only job ids, so no Redis
+persistence is configured or needed.
+
+Guarantees and knobs (docker-compose.staging.yml):
+- exactly one instance — never `--scale worker=2`, never run `generation_worker`
+  by hand on the host or in a second container while the service runs (RQ
+  refuses a second worker with the same name; the DB claim is the real gate);
+- `mem_limit`/`memswap_limit` 512 MiB (shared VPS), `restart: unless-stopped`;
+- `stop_grace_period: 600s` — on redeploy RQ finishes the in-flight provider
+  call (≤ 540 s) before exiting; `deploy.sh` also waits for an idle worker
+  before `up -d` and fails the deploy if the worker does not become healthy;
+- healthcheck `manage.py worker_health --max-age 150` (heartbeat-based; idle
+  heartbeat every 105 s with `--worker-ttl 120`, every 30 s while busy).
+
+```bash
+$COMPOSE ps worker                                                   # State / Health
+$COMPOSE exec -T worker python manage.py worker_health --max-age 150 # ok queued=N <name> state=idle|busy heartbeat_age=..s
+$COMPOSE logs --since 1h worker                                      # job start / done / fail lines
+$COMPOSE exec -T redis redis-cli -n 1 llen rq:queue:generation       # queued (not yet claimed) job ids
+$COMPOSE up -d --force-recreate --no-deps worker                     # restart the worker (waits ≤ 600 s for an in-flight job)
+```
+
+Failure modes:
+- worker OOM-killed / crashed mid-job → container restarts; the job stays
+  RUNNING in the DB and becomes `timeout_ambiguous` through the stale guard
+  (≥ 15 min), exactly like a hung provider today. Never re-run it by hand —
+  the operator decides in the console (retry / regenerate).
+- Redis restarted → queued-but-unclaimed ids are gone; the job stays PENDING
+  and the console shows it waiting for the worker; the operator re-enqueues or
+  removes it from the queue. Nothing is charged.
+- `worker_health` red while `$COMPOSE ps` says Up → Redis unreachable from the
+  worker or the worker process wedged: check `logs worker`, then recreate it.
+
+Enabling the flag on staging: set `GENERATION_WORKER_ENABLED=true` in
+`.env.staging`, then `$COMPOSE up -d --force-recreate --no-deps backend`
+(the worker reads the queue regardless of the flag). Roll back the same way
+with `false` — in-flight jobs finish on the worker, new ones run inline.
+
 ## Backups
 
 - `./deploy/scripts/backup.sh` → `./backups/staging-<db>-<UTC timestamp>.sql.gz`

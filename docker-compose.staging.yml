@@ -34,6 +34,9 @@ services:
 
   backend:
     build: .
+    # explicit name so the worker can reuse the very same image (one build
+    # per deploy, one SHA for web and worker)
+    image: sticker-service-backend
     restart: unless-stopped
     env_file:
       # optional so `docker compose -f docker-compose.staging.yml config`
@@ -45,6 +48,9 @@ services:
       POSTGRES_HOST: db
       POSTGRES_PORT: "5432"
       REDIS_URL: redis://redis:6379/0
+      # generation queue on its own logical DB: cache traffic / a FLUSHDB on
+      # DB 0 can never drop queued job ids. Must match the worker below.
+      GENERATION_QUEUE_REDIS_URL: redis://redis:6379/1
       MEDIA_ROOT: /app/media
     volumes:
       - media_data:/app/media
@@ -72,6 +78,53 @@ services:
       retries: 6
       start_period: 20s
     # no ports: backend is reachable only through nginx
+
+  # Background generation worker (RQ, queue "generation"). Runs even while
+  # GENERATION_WORKER_ENABLED is false (then it simply idles, ~100 MiB) so
+  # enabling the flag later is an env change + backend recreate, not a
+  # topology change. Exactly ONE instance: the fixed --name makes RQ refuse a
+  # second worker with the same name, and the DB claim (PENDING→RUNNING under
+  # select_for_update) is the real at-most-once gate. Never scale this service.
+  worker:
+    image: sticker-service-backend
+    restart: unless-stopped
+    env_file:
+      - path: .env.staging
+        required: false
+    environment:
+      DJANGO_SETTINGS_MODULE: config.settings.staging
+      POSTGRES_HOST: db
+      POSTGRES_PORT: "5432"
+      REDIS_URL: redis://redis:6379/0
+      GENERATION_QUEUE_REDIS_URL: redis://redis:6379/1
+      MEDIA_ROOT: /app/media
+    volumes:
+      - media_data:/app/media
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: python manage.py generation_worker --name sticker-generation-1
+    # Shared VPS: cap the worker so a leak or a huge decode can never squeeze
+    # the neighbours. Idle ~100 MiB, peak (1254² PNG + forked work-horse)
+    # well under 512 MiB. No swap creep.
+    mem_limit: 512m
+    memswap_limit: 512m
+    # A redeploy sends SIGTERM: RQ warm shutdown finishes the in-flight
+    # provider call (OpenAI read timeout ≤ 540 s) before exiting. Only then
+    # does compose recreate the container — a paid call is never killed.
+    stop_grace_period: 600s
+    healthcheck:
+      # heartbeat-based (no HTTP, no ports): the worker registers in Redis
+      # and refreshes its heartbeat every worker_ttl-15 = 105 s while idle,
+      # every 30 s while busy → max-age 150 with 3 retries flags a dead
+      # worker within ~4 min without flapping on an idle one
+      test: ["CMD", "python", "manage.py", "worker_health", "--max-age", "150"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
 
   nginx:
     image: nginx:1.27-alpine
