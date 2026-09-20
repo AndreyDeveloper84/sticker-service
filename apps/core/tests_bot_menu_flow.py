@@ -17,6 +17,7 @@ from django.test import TestCase, override_settings
 from apps.core.bot_menu import (
     CONTACT_PROMPT,
     MAIN_MENU,
+    PHOTO_SAVED,
     PHOTO_REQUIREMENTS,
     RESULT_REQUIREMENTS,
     STYLES_TITLE,
@@ -157,6 +158,29 @@ class MaxBot(CatalogMixin):
                                        "body": {"mid": f"mid-{name}", "attachments": [
                                            {"type": "image", "payload": {"url": f"https://cdn.max.test/{name}.jpg"}}]}}})
 
+    def attachment(self, attachment, name="att"):
+        """Any non-image attachment (file, sticker, …) as the customer sends it."""
+        return self._post({"update_type": "message_created",
+                           "message": {"sender": self.USER, "recipient": {"chat_id": self.CHAT_ID},
+                                       "body": {"mid": f"mid-{name}", "attachments": [attachment]}}})
+
+    def photo_as_file(self, name="p"):
+        return self.attachment({"type": "file", "payload": {"url": f"https://cdn.max.test/{name}.png",
+                                                            "token": "t", "filename": f"{name}.png"}}, name=name)
+
+    def sticker(self):
+        return self.attachment({"type": "sticker", "payload": {"url": "https://cdn.max.test/s.webp", "code": "x"}})
+
+    def keyboard_drops(self):
+        return [call.kwargs for call in self.bot.edit_message.call_args_list]
+
+    def pressed_message_id(self):
+        return "m"
+
+    def fail_keyboard_drop(self):
+        from apps.max_bot.client import MaxAPIError
+        self.bot.edit_message.side_effect = MaxAPIError(400, "message.not.found")
+
     def last(self):
         return self.bot.send_message.call_args.kwargs
 
@@ -197,13 +221,34 @@ class TelegramBot(CatalogMixin):
         return self._post({"message": {"from": self.USER, "chat": {"id": self.CHAT_ID}, "text": "/start"}})
 
     def tap(self, payload):
-        return self._post({"callback_query": {"id": "cb", "from": self.USER, "message": {"chat": {"id": self.CHAT_ID}}, "data": payload}})
+        return self._post({"callback_query": {"id": "cb", "from": self.USER,
+                                              "message": {"message_id": 777, "chat": {"id": self.CHAT_ID}}, "data": payload}})
 
     def say(self, text):
         return self._post({"message": {"from": self.USER, "chat": {"id": self.CHAT_ID}, "text": text}})
 
     def photo(self, name="p"):
         return self._post({"message": {"from": self.USER, "chat": {"id": self.CHAT_ID}, "photo": [{"file_id": name}]}})
+
+    def attachment(self, fields):
+        return self._post({"message": {"from": self.USER, "chat": {"id": self.CHAT_ID}, **fields}})
+
+    def photo_as_file(self, name="p"):
+        """A photo sent «as a file» (uncompressed): Telegram delivers a document with an image mime type."""
+        return self.attachment({"document": {"file_id": name, "file_name": f"{name}.png", "mime_type": "image/png"}})
+
+    def sticker(self):
+        return self.attachment({"sticker": {"file_id": "stk", "emoji": "😀"}})
+
+    def keyboard_drops(self):
+        return [call.kwargs for call in self.bot.edit_message_reply_markup.call_args_list]
+
+    def pressed_message_id(self):
+        return 777
+
+    def fail_keyboard_drop(self):
+        from apps.telegram_bot.client import TelegramAPIError
+        self.bot.edit_message_reply_markup.side_effect = TelegramAPIError("editMessageReplyMarkup", status_code=400, description="message can't be edited")
 
     def last(self):
         return self.bot.send_message.call_args.kwargs
@@ -260,7 +305,7 @@ class MenuFlowScenarios:
     def test_main_menu_has_six_items_and_each_answers(self):
         self.start()
         self.assertEqual(self.last_text(), MAIN_MENU)
-        self.assertEqual(self.last_payloads(), ["menu:order", "menu:prices", "menu:examples", "menu:photos", "menu:how", "menu:contact"])
+        self.assertEqual(self.last_payloads(), ["menu:order", "menu:prices", "menu:examples", "menu:photos", "menu:how", "menu:contact", "menu:where"])
         for payload, needle in (("menu:prices", "💰 Цены"), ("menu:examples", "🖼 Примеры"),
                                 ("menu:photos", "📸 Требования к фото"), ("menu:how", "❓ Как проходит заказ"),
                                 ("menu:contact", "💬 Связаться со мной")):
@@ -407,7 +452,7 @@ class MenuFlowScenarios:
         self.photo("a")
         self.tap("photos_done")
         self.tap("back:photos")
-        self.assertEqual(self.last_text(), PHOTO_GUIDANCE)
+        self.assertEqual(self.last_text(), PHOTO_SAVED)  # a photo is already in → «Фото загружены» is offered
         self.assertNotIn("awaiting_input", self.order().selection)
         self.tap("photos_done")
         self.say(PHRASES_9)
@@ -451,7 +496,7 @@ class MenuFlowScenarios:
         self.assertEqual(order.selection.get("emotions"), [])
         self.assertEqual(order.selection.get("contact"), CONTACT)
         self.assertEqual(order.photos.count(), 1)
-        self.assertEqual(self.last_text(), PHOTO_GUIDANCE)
+        self.assertEqual(self.last_text(), PHOTO_SAVED)  # the kept photo counts: «Фото загружены» is offered
 
     def test_menu_after_payment_does_not_touch_the_paid_order(self):
         self.go_to_photos("single-sticker")

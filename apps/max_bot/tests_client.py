@@ -60,6 +60,15 @@ class MaxBotClientTests(SimpleTestCase):
         self.assertEqual(kwargs["params"], {"user_id": "123"})
         self.assertEqual(kwargs["json"], {"text": "hello"})
 
+    def test_edit_message_with_empty_attachments_removes_a_stale_keyboard(self):
+        patcher, fake = self._fake_http()
+        with patcher:
+            self.client.edit_message(message_id="mid.1", attachments=[])
+        args, kwargs = fake.request.call_args
+        self.assertEqual(args[:2], ("PUT", f"{DEFAULT_API_BASE}/messages"))
+        self.assertEqual(kwargs["params"], {"message_id": "mid.1"})
+        self.assertEqual(kwargs["json"], {"attachments": []})  # text untouched: not sent
+
     def test_send_message_with_chat_id(self):
         patcher, fake = self._fake_http()
         with patcher:

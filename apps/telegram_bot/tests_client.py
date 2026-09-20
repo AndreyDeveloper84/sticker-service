@@ -96,6 +96,14 @@ class TelegramClientMethodTests(SimpleTestCase):
             {"chat_id": 42, "text": "hi", "reply_markup": {"inline_keyboard": []}},
         )
 
+    def test_edit_message_reply_markup_removes_a_stale_keyboard(self):
+        patcher, fake = self._fake()
+        with patcher:
+            self.client.edit_message_reply_markup(chat_id=42, message_id=777, reply_markup={"inline_keyboard": []})
+        args, kwargs = fake.post.call_args
+        self.assertEqual(args[0], f"{DEFAULT_API_ORIGIN}/bot{TOKEN}/editMessageReplyMarkup")
+        self.assertEqual(kwargs["json"], {"chat_id": 42, "message_id": 777, "reply_markup": {"inline_keyboard": []}})
+
     def _fake(self, **kwargs):
         return _fake_http(**kwargs)
 

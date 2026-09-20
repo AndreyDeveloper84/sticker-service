@@ -14,6 +14,7 @@ from apps.core.customer_hints import (
     customer_hint,
 )
 from apps.core.bot_menu import PAYLOAD_CONFIRM_ORDER, OrderStepper
+from apps.core.services.media import ALLOWED_IMAGE_MIME_TYPES
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
@@ -126,30 +127,63 @@ def _handle_message(message, *, adapter, payment_adapter, client):
         notify_customer_paid(payment=payment, client=client, chat_id=chat_id)
         return None
 
-    if (message.get("text") or "").startswith("/start"):
+    text = message.get("text") or ""
+    if text.startswith("/start"):
         return stepper.main_menu(identity)
+    if text.split()[:1] == ["/status"]:
+        return stepper.status(identity)
 
-    photos = message.get("photo") or []
-    if photos:
+    photo_file = _photo_file(message)
+    if photo_file is not None:
         # Flow check before the download: a photo that no order is waiting
         # for is answered with a hint, never fetched from Telegram.
         adapter.current_photo_order(identity)
-        file_info = client.get_file(photos[-1]["file_id"])
+        file_id, mime_type = photo_file
+        file_info = client.get_file(file_id)
         file_path = file_info["file_path"]
         content = client.download_file(file_path)
-        mime_type = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
+        if mime_type is None:
+            mime_type = "image/png" if file_path.lower().endswith(".png") else "image/jpeg"
         adapter.save_photo_bytes(identity=identity, content=content, filename=file_path.rsplit("/", 1)[-1], mime_type=mime_type)
         return stepper.photo_saved(identity)
 
+    if not text or text.startswith("/") or _non_photo_attachment(message):
+        # a sticker, a non-image document, a voice note, an unknown command:
+        # never silence — the current step again (or the main menu)
+        stepper.reprompt(identity)
+        return None
+
     # optional «во что переодеть» after the «Сменить одежду» revision button
-    revision = PreviewFeedbackService.attach_revision_text(identity=identity, text=message.get("text") or "")
+    revision = PreviewFeedbackService.attach_revision_text(identity=identity, text=text)
     if revision is not None:
         client.send_message(chat_id=chat_id, text=REVISION_TEXT_SAVED_TEXT.format(text=revision.customer_text))
         return None
 
-    # free text: the 9 phrases or the name/contact, when the bot asked for them
-    stepper.handle_text(identity, message.get("text") or "")
+    # free text: the 9 phrases or the name/contact when the bot asked for
+    # them; anything else re-prompts the current step
+    stepper.handle_text(identity, text)
     return None
+
+
+def _photo_file(message) -> tuple[str, str | None] | None:
+    """(file_id, mime_type) of the photo in ``message``: the largest
+    ``photo`` size, or a ``document`` that is an image (a photo sent «as a
+    file», uncompressed — the mime type comes from Telegram then)."""
+    photos = message.get("photo") or []
+    if photos:
+        return str(photos[-1]["file_id"]), None
+    document = message.get("document") or {}
+    mime_type = str(document.get("mime_type") or "").lower()
+    if document.get("file_id") and mime_type in ALLOWED_IMAGE_MIME_TYPES:
+        return str(document["file_id"]), mime_type
+    return None
+
+
+NON_PHOTO_KEYS = ("document", "sticker", "video", "video_note", "voice", "audio", "animation", "contact", "location")
+
+
+def _non_photo_attachment(message) -> bool:
+    return any(message.get(key) for key in NON_PHOTO_KEYS)
 
 
 def _feedback_order(identity):
@@ -211,6 +245,21 @@ def _revision_buttons():
     return [[{"text": label, "callback_data": f"preview_revision:{value}"}] for value, label in labels.items()]
 
 
+def _drop_keyboard(client, callback) -> None:
+    """Best-effort: the keyboard of the message whose button was just
+    pressed is now behind the customer — remove it so old buttons stop
+    living on. A failure never breaks the step."""
+    message = callback.get("message") or {}
+    message_id = message.get("message_id")
+    chat_id = (message.get("chat") or {}).get("id")
+    if message_id is None or chat_id is None:
+        return
+    try:
+        client.edit_message_reply_markup(chat_id=chat_id, message_id=message_id, reply_markup={"inline_keyboard": []})
+    except TelegramAPIError as exc:
+        logger.info("telegram.webhook.drop_keyboard_failed error=%s", exc)
+
+
 def _handle_callback(callback, *, adapter, payment_adapter, client):
     identity = adapter.get_or_create_identity(callback["from"])
     chat_id = callback["message"]["chat"]["id"]
@@ -218,7 +267,9 @@ def _handle_callback(callback, *, adapter, payment_adapter, client):
     stepper = _stepper(chat_id=chat_id, adapter=adapter, client=client)
 
     if stepper.handle_callback(identity, data):
-        pass  # menu / navigation / product / style / emotions / photos_done
+        # menu / navigation / product / style / emotions / photos_done: the
+        # customer moved on — the pressed message's keyboard is stale now
+        _drop_keyboard(client, callback)
     elif data == PAYLOAD_CONFIRM_ORDER:
         # every step complete → the existing consent screen (pilot contract)
         stepper.confirm_order(identity)

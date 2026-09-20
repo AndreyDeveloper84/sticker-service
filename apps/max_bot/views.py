@@ -20,6 +20,7 @@ from apps.core.customer_hints import (
 from apps.core.bot_menu import PAYLOAD_CONFIRM_ORDER, OrderStepper
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
+from apps.core.services.media import ALLOWED_IMAGE_MIME_TYPES
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
 from apps.max_bot.adapter import MaxAdapter, MaxFlowError
 from apps.max_bot.checkout import start_checkout
@@ -136,11 +137,11 @@ def _handle_message(event: MaxEvent, *, adapter, client):
 
     if event.text.startswith("/start"):
         return stepper.main_menu(identity)
+    if event.text.split()[:1] == ["/status"]:
+        return stepper.status(identity)
 
     for attachment in event.attachments:
-        if not isinstance(attachment, dict) or attachment.get("type") != "image":
-            continue
-        image_url = extract_photo_url(attachment)
+        image_url = _photo_attachment_url(attachment)
         if not image_url:
             continue
         # Flow check before the download: a photo that no order is waiting
@@ -167,13 +168,37 @@ def _handle_message(event: MaxEvent, *, adapter, client):
             return _reply(client, event, text=PHOTO_REJECTED)
         return stepper.photo_saved(identity)
 
+    if not event.text or event.text.startswith("/") or event.attachments:
+        # a sticker, a non-image file, an unknown command: never silence —
+        # the current step again (or the main menu)
+        stepper.reprompt(identity)
+        return None
+
     # optional «во что переодеть» after the «Сменить одежду» revision button
     revision = PreviewFeedbackService.attach_revision_text(identity=identity, text=event.text)
     if revision is not None:
         return _reply(client, event, text=REVISION_TEXT_SAVED_TEXT.format(text=revision.customer_text))
 
-    # free text: the 9 phrases or the name/contact, when the bot asked for them
+    # free text: the 9 phrases or the name/contact when the bot asked for
+    # them; anything else re-prompts the current step
     stepper.handle_text(identity, event.text)
+    return None
+
+
+def _photo_attachment_url(attachment) -> str | None:
+    """URL of a customer photo: an ``image`` attachment, or a ``file``
+    attachment that is an image by its name (a photo sent «as a file»)."""
+    if not isinstance(attachment, dict):
+        return None
+    if attachment.get("type") == "image":
+        return extract_photo_url(attachment)
+    if attachment.get("type") == "file":
+        payload = attachment.get("payload") or {}
+        url = payload.get("url")
+        name = str(payload.get("filename") or payload.get("name") or "")
+        mime_type = guess_type(name)[0] or ""
+        if isinstance(url, str) and url and mime_type in ALLOWED_IMAGE_MIME_TYPES:
+            return url
     return None
 
 
@@ -232,13 +257,28 @@ def _revision_buttons():
     return [[{"text": label, "payload": f"preview_revision:{value}"}] for value, label in labels.items()]
 
 
+def _drop_keyboard(client, event: MaxEvent) -> None:
+    """Best-effort: the keyboard of the message whose button was just
+    pressed is now behind the customer — remove it (PUT /messages with an
+    empty attachments list) so old buttons stop living on. A failure never
+    breaks the step."""
+    if not event.message_id:
+        return
+    try:
+        client.edit_message(message_id=event.message_id, attachments=[])
+    except MaxAPIError as exc:
+        logger.info("max.webhook.drop_keyboard_failed status=%s body=%r", exc.status_code, exc.body[:200])
+
+
 def _handle_callback(event: MaxEvent, *, adapter, client):
     identity = adapter.get_or_create_identity(event.user)
     payload = event.callback_payload
     stepper = _stepper(event, adapter=adapter, client=client)
 
     if stepper.handle_callback(identity, payload):
-        pass  # menu / navigation / product / style / emotions / photos_done
+        # menu / navigation / product / style / emotions / photos_done: the
+        # customer moved on — the pressed message's keyboard is stale now
+        _drop_keyboard(client, event)
     elif payload == PAYLOAD_CONFIRM_ORDER:
         # every step complete → the existing consent screen (pilot contract)
         stepper.confirm_order(identity)

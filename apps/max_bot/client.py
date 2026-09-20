@@ -241,6 +241,16 @@ class MaxBotClient:
         query = {"chat_id": chat_id} if user_id is None else {"user_id": user_id}
         return self._request("POST", "/messages", query=query, body=body)
 
+    def edit_message(self, *, message_id: str, text: str | None = None, attachments=None):
+        """PUT /messages?message_id=… — ``attachments=[]`` removes every
+        attachment (incl. the inline keyboard); None leaves it unchanged."""
+        body = {}
+        if text is not None:
+            body["text"] = text
+        if attachments is not None:
+            body["attachments"] = list(attachments)
+        return self._request("PUT", "/messages", query={"message_id": message_id}, body=body)
+
     def answer_callback(self, *, callback_id: str, notification: str = ""):
         """ACK an inline-keyboard callback: POST /answers?callback_id=...
 
