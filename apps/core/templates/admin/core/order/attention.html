@@ -1,0 +1,42 @@
+{% extends "admin/base_site.html" %}
+{% block title %}{{ title }} | {{ site_title|default:"Django site admin" }}{% endblock %}
+{% block breadcrumbs %}
+  <div class="breadcrumbs">
+    <a href="{% url 'admin:index' %}">Главная</a> › <a href="{% url 'admin:core_order_changelist' %}">Заказы</a> › {{ title }}
+  </div>
+{% endblock %}
+{% block content %}
+<div id="content-main" class="attention-queue">
+  <style>
+    .attention-queue .module { margin-bottom: 16px; }
+    .attention-queue table { width: 100%; }
+    .attention-queue th, .attention-queue td { padding: 4px 8px; vertical-align: top; }
+    .attention-queue .empty { color: #666; padding: 4px 8px; }
+    .attention-queue .urgent h2 { background: #a12622; }
+    .attention-queue .action h2 { background: #b26a00; }
+  </style>
+  <p>Заказов, требующих внимания или ожидания: <strong>{{ total }}</strong>. Страница только читает состояние; действия — в карточке заказа.</p>
+  {% for section in sections %}
+    <div class="module{% if section.key == 'recovery_required' or section.key == 'error' %} urgent{% elif section.key == 'paid_idle' or section.key == 'operator_action' or section.key == 'revision_requested' or section.key == 'partial_delivery' %} action{% endif %}" id="bucket-{{ section.key }}">
+      <h2>{{ section.title }} ({{ section.rows|length }})</h2>
+      {% if section.rows %}
+        <table>
+          <tr><th>Заказ</th><th>Канал · продукт</th><th>Статус</th><th>Сколько</th><th>Что именно</th><th>Что делать</th></tr>
+          {% for row in section.rows %}
+            <tr>
+              <td><a href="{{ row.url }}">#{{ row.order_id }}</a></td>
+              <td>{{ row.channel }} · {{ row.product }}</td>
+              <td>{{ row.status }}</td>
+              <td>{{ row.age }}</td>
+              <td>{{ row.detail|default:"—" }}</td>
+              <td>{{ row.next_step }} <a href="{{ row.url }}">Открыть</a></td>
+            </tr>
+          {% endfor %}
+        </table>
+      {% else %}
+        <div class="empty">—</div>
+      {% endif %}
+    </div>
+  {% endfor %}
+</div>
+{% endblock %}

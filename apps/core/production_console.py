@@ -11,6 +11,7 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 from PIL import Image
 
+from .attention_console import AttentionViews
 from .console_generation import (
     active_jobs,
     dequeue_candidates,
@@ -162,7 +163,7 @@ class ProductionOrderPhotoInline(admin.TabularInline):
         return False
 
 
-class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
+class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin):
     """Production Console (DRF-2084: Russian, «Следующий шаг», secondary actions).
 
     Subclasses (preview delivery → QC → final delivery) add their panels
@@ -1067,6 +1068,12 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         urls = super().get_urls()
         custom = [
             # DRF-2111 PR-C: «Метрики Pilot» page + §21 export (read-only)
+            # DRF-2167: «Требует внимания» (read-only)
+            path(
+                "attention/",
+                self.admin_site.admin_view(self.attention_view),
+                name="core_order_attention",
+            ),
             path(
                 "pilot-metrics/",
                 self.admin_site.admin_view(self.pilot_metrics_view),
