@@ -185,6 +185,51 @@ def reference_upload(reference: ReferenceImage) -> tuple[str, bytes, str]:
     return filename, reference.content, mime_type
 
 
+# Explicit OpenAI client timeouts (Order 14, 2026-09-20: two preview jobs were
+# killed by gunicorn at 300 s inside images.edit — the SDK default read
+# timeout is 600 s, so the hang was never closed by the client itself and the
+# jobs went stale → ambiguous with no evidence). The read timeout must be
+# shorter than the web worker limit so a hang ends as a clean APITimeoutError
+# (classified "ambiguous", fail closed) while the request is still alive.
+# Env-tunable so the future background worker can raise the read timeout
+# without a code change.
+OPENAI_CONNECT_TIMEOUT_S = 10.0
+OPENAI_READ_TIMEOUT_S = 240.0
+OPENAI_WRITE_TIMEOUT_S = 60.0
+OPENAI_POOL_TIMEOUT_S = 10.0
+
+# The SDK retries timeouts / connection errors itself (default max_retries=2).
+# A retry after a read timeout re-submits images.edit while the first call
+# may still be generating — a blind duplicate billable generation. The
+# provider owns the retry decision (classify_failure), so the SDK gets none.
+OPENAI_MAX_RETRIES = 0
+
+
+def _timeout_seconds(env_name: str, default: float) -> float:
+    raw = (os.getenv(env_name) or "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ProviderConfigurationError(f"{env_name}={raw!r} is not a number of seconds") from exc
+    if value <= 0:
+        raise ProviderConfigurationError(f"{env_name}={raw!r} must be positive")
+    return value
+
+
+def openai_client_timeout():
+    """httpx.Timeout for the OpenAI client: connect / read / write / pool."""
+    import httpx
+
+    return httpx.Timeout(
+        connect=_timeout_seconds("OPENAI_CONNECT_TIMEOUT_S", OPENAI_CONNECT_TIMEOUT_S),
+        read=_timeout_seconds("OPENAI_READ_TIMEOUT_S", OPENAI_READ_TIMEOUT_S),
+        write=_timeout_seconds("OPENAI_WRITE_TIMEOUT_S", OPENAI_WRITE_TIMEOUT_S),
+        pool=_timeout_seconds("OPENAI_POOL_TIMEOUT_S", OPENAI_POOL_TIMEOUT_S),
+    )
+
+
 class OpenAIImageProvider:
     name = "openai"
 
@@ -237,11 +282,14 @@ class OpenAIImageProvider:
     def _default_client_factory(proxy_url: str | None):
         from openai import OpenAI
 
+        # timeout is applied per request by the SDK, so it also governs the
+        # proxied httpx client; max_retries=0 keeps at-most-once per attempt.
+        options = {"timeout": openai_client_timeout(), "max_retries": OPENAI_MAX_RETRIES}
         if proxy_url is None:
-            return OpenAI()
+            return OpenAI(**options)
         import httpx
 
-        return OpenAI(http_client=httpx.Client(proxy=proxy_url))
+        return OpenAI(http_client=httpx.Client(proxy=proxy_url), **options)
 
     # ----------------------------------------------------------- failover
 
