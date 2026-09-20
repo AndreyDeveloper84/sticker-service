@@ -276,7 +276,7 @@ def humanize_error(exc: Exception) -> str:
     if isinstance(failure, dict) and failure.get("failure_class") == "moderation":
         return moderation_text(failure)
     text = str(exc)
-    if text.startswith("Генерация уже выполняется"):
+    if text.startswith("Генерация уже"):  # already running / already queued
         return text + "."
     for pattern, template in _ERROR_PATTERNS:
         match = re.search(pattern, text)

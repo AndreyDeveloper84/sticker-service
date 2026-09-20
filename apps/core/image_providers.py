@@ -3,7 +3,7 @@ from __future__ import annotations
 import base64
 import logging
 import os
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Protocol
 
 logger = logging.getLogger(__name__)
@@ -126,7 +126,16 @@ def describe_provider_failure(provider, exc: Exception) -> dict:
     request_id = getattr(exc, "request_id", None)
     if request_id and not details.get("request_id"):
         details["request_id"] = str(request_id)
+    # async C-1: which outbound route carried the failed attempt (evidence;
+    # the sanitized proxy identity, never the URL / credentials).
+    proxy = getattr(exc, "proxy_identity", None)
+    if proxy:
+        details["proxy"] = str(proxy)
     return details
+
+
+# Route label of a direct (no proxy pool) provider call.
+PROXY_DIRECT = "direct"
 
 
 class ProviderConfigurationError(RuntimeError):
@@ -334,7 +343,12 @@ class OpenAIImageProvider:
         images = [reference_upload(reference) for reference in request.reference_images]
 
         if self._pool is None:
-            return self._generate(self.client, images, request.prompt)
+            try:
+                result = self._generate(self.client, images, request.prompt)
+            except Exception as exc:
+                exc.proxy_identity = PROXY_DIRECT
+                raise
+            return self._with_proxy(result, PROXY_DIRECT)
 
         from apps.core.outbound_proxy import Service
 
@@ -346,6 +360,7 @@ class OpenAIImageProvider:
             try:
                 result = self._generate(self._client_factory(endpoint.url), images, request.prompt)
             except Exception as exc:
+                exc.proxy_identity = endpoint.identity
                 kind = self.classify_failure(exc)
                 if kind in ("transport", "geo"):
                     logger.warning(
@@ -356,10 +371,15 @@ class OpenAIImageProvider:
                     continue
                 raise  # api/ambiguous: no rotation, no blind duplicate
             self._pool.report_success(endpoint, Service.OPENAI)
-            return result
+            return self._with_proxy(result, endpoint.identity)
         raise RuntimeError(
             "OpenAI generation failed: all configured outbound proxies unavailable"
         ) from last_error
+
+    @staticmethod
+    def _with_proxy(result: ImageGenerationResult, identity: str) -> ImageGenerationResult:
+        """Record the route that carried a successful call (async C-1 evidence)."""
+        return replace(result, metadata={**(result.metadata or {}), "proxy": str(identity)})
 
     def edit_parameters(self) -> dict:
         """Optional images.edit kwargs; only the configured ones are sent."""
