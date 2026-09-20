@@ -16,6 +16,7 @@ from apps.core.bot_menu import CONTACT_PROMPT
 from apps.core.customer_hints import EMOTION_CHOICE_HINT, NEED_PHOTO_HINT
 from apps.core.models import Order, Product, Style
 from apps.core.services.channel_order_flow import order_emotion_codes
+from apps.core.tests_photo_gate import good_photo_bytes
 
 WEBHOOK_URL = "/max/webhook/"
 
@@ -126,7 +127,7 @@ class MaxProductSelectorFlowTests(TestCase):
 
     def _send_photo(self, client, media_root):
         with override_settings(MEDIA_ROOT=Path(media_root)):
-            with mock.patch("apps.max_bot.views.download_photo", return_value=b"image-bytes"):
+            with mock.patch("apps.max_bot.views.download_photo", return_value=good_photo_bytes()):
                 client.reset_mock()
                 response = self._post(_photo_message())
                 self.assertEqual(response.status_code, 200)

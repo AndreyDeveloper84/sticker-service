@@ -127,6 +127,9 @@ class OrderPhoto(TimestampedModel):
     mime_type = models.CharField(max_length=127, blank=True)
     size_bytes = models.PositiveBigIntegerField(default=0)
     status = models.CharField(max_length=32, choices=Status.choices, default=Status.ACCEPTED)
+    # DRF-2164: what the suitability gate measured on accept ("gate": format,
+    # width/height, aspect, blur variance, thresholds) — evidence for tuning.
+    metadata = models.JSONField(default=dict, blank=True)
 
     class Meta:
         constraints = [

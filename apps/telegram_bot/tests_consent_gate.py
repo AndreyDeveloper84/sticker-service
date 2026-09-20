@@ -21,6 +21,7 @@ from apps.core.services.channel_order_flow import (
 )
 from apps.telegram_bot.paid_notice import PAID_NOTICE_TEXT
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
+from apps.core.tests_photo_gate import good_photo_bytes
 
 WEBHOOK_URL = "/telegram/webhook/"
 USER = {"id": 3201, "first_name": "Olga"}
@@ -55,7 +56,7 @@ class TelegramConsentWebhookFlowTests(TestCase):
 
     def _order_with_photo(self, client):
         client.get_file.return_value = {"file_path": "photos/source.jpg"}
-        client.download_file.return_value = b"image-bytes"
+        client.download_file.return_value = good_photo_bytes()
         self._post(_callback("product:single-sticker"))
         self._post(_callback("style:single-sticker:comic"))
         self._post(_callback("emotion:hello"))

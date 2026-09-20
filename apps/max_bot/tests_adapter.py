@@ -5,6 +5,7 @@ from django.test import TestCase, override_settings
 
 from apps.core.models import ChannelIdentity, Order, Product, Style, User
 from apps.max_bot.adapter import MaxAdapter
+from apps.core.tests_photo_gate import good_photo_bytes
 
 
 class MaxAdapterTests(TestCase):
@@ -68,7 +69,7 @@ class MaxAdapterTests(TestCase):
             with override_settings(MEDIA_ROOT=Path(media_root)):
                 photo = self.adapter.save_photo_bytes(
                     identity=identity,
-                    content=b"image-bytes",
+                    content=good_photo_bytes(),
                     filename="portrait.jpg",
                     mime_type="image/jpeg",
                 )

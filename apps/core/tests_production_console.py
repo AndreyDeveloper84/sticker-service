@@ -8,6 +8,7 @@ from django.urls import reverse
 
 from apps.core.models import ChannelIdentity, Order, Product, Style, User
 from apps.core.services.media import MediaService
+from apps.core.tests_photo_gate import good_photo_bytes
 
 
 class ProductionConsoleTests(TestCase):
@@ -79,7 +80,7 @@ class ProductionConsoleTests(TestCase):
                     order=order,
                     file=SimpleUploadedFile(
                         "portrait.jpg",
-                        b"image-bytes",
+                        good_photo_bytes(),
                         content_type="image/jpeg",
                     ),
                 )

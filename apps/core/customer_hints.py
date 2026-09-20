@@ -91,6 +91,11 @@ def phrases_count_hint(required: int, received: int) -> str:
 
 def customer_hint(exc: Exception, *, received_lines: int | None = None) -> str:
     """Short Russian hint for a domain flow/feedback error."""
+    # DRF-2164: a rejected photo carries its own sentence (with the measured
+    # size etc.); the next step is always "send another photo"
+    own_hint = getattr(exc, "hint", None)
+    if isinstance(own_hint, str) and own_hint:
+        return own_hint
     text = str(exc)
     match = _PHRASE_COUNT.match(text)
     if match:

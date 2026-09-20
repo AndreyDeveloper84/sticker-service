@@ -24,6 +24,7 @@ from apps.core.models import Order, Product, Style
 from apps.core.services.channel_order_flow import ChannelFlowError
 from apps.core.services.preview_feedback import PreviewFeedbackError
 from apps.max_bot.client import MaxAPIError
+from apps.core.tests_photo_gate import good_photo_bytes
 
 WEBHOOK_URL = "/max/webhook/"
 USER = {"user_id": 7301, "first_name": "Ivan"}
@@ -117,7 +118,7 @@ class MaxFlowHintTests(TestCase):
 
     def test_happy_path_still_saves_photo(self):
         with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(
-            "apps.max_bot.views.download_photo", return_value=b"image-bytes"
+            "apps.max_bot.views.download_photo", return_value=good_photo_bytes()
         ) as download:
             client = client_cls.return_value
             self._post(_callback("product:stickers"))

@@ -9,6 +9,7 @@ from apps.core.models import ChannelIdentity, Order, Product, Style, User
 from apps.core.services.order_state import InvalidOrderTransition, OrderStateService
 from apps.max_bot.adapter import MaxAdapter
 from apps.telegram_bot.adapter import TelegramAdapter
+from apps.core.tests_photo_gate import good_photo_bytes
 
 
 class M1EndToEndSmokeTests(TestCase):
@@ -42,7 +43,7 @@ class M1EndToEndSmokeTests(TestCase):
 
         photo = adapter.save_photo_bytes(
             identity=identity,
-            content=b"source-photo-bytes",
+            content=good_photo_bytes(),
             filename=filename,
             mime_type="image/jpeg",
         )
@@ -163,7 +164,7 @@ class M1EndToEndSmokeTests(TestCase):
 
         self.max.save_photo_bytes(
             identity=max_identity,
-            content=b"max-channel-still-works",
+            content=good_photo_bytes("PNG"),
             filename="max-after-telegram-error.jpg",
             mime_type="image/jpeg",
         )

@@ -4,6 +4,7 @@ from django.test import TestCase, override_settings
 
 from apps.core.models import Order, Product, Style
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
+from apps.core.tests_photo_gate import good_photo_bytes
 
 
 class TelegramMediaFlowTests(TestCase):
@@ -22,7 +23,7 @@ class TelegramMediaFlowTests(TestCase):
         with TemporaryDirectory() as media_root, override_settings(MEDIA_ROOT=media_root):
             photo = self.adapter.save_photo_bytes(
                 identity=self.identity,
-                content=b"image-bytes",
+                content=good_photo_bytes(),
                 filename="source.jpg",
                 mime_type="image/jpeg",
             )
