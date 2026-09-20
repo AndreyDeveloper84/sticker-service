@@ -50,6 +50,19 @@
           <input type="text" id="reason" name="reason" value="{{ reason_value }}" size="60" required>
         </p>
       {% endif %}
+      {% if reason_options %}
+        <p>
+          <label for="reason">Причина (обязательно):</label>
+          <select id="reason" name="reason" required>
+            <option value="">— выберите —</option>
+            {% for code, title in reason_options %}<option value="{{ code }}"{% if code == reason_value %} selected{% endif %}>{{ title }}</option>{% endfor %}
+          </select>
+        </p>
+        <p>
+          <label for="note">Комментарий (необязательно, только в журнал):</label>
+          <input type="text" id="note" name="note" value="{{ note_value }}" size="60" maxlength="120">
+        </p>
+      {% endif %}
       <input type="submit" value="{{ submit_label|default:"Подтвердить" }}">
       <a href="{% url 'admin:core_order_change' order.pk %}">Отмена</a>
     </form>
