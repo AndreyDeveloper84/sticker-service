@@ -29,6 +29,7 @@ from apps.core.customer_hints import PHOTO_GUIDANCE, phrases_count_hint
 from apps.core.models import Order, Payment, Product, Style
 from apps.core.services.channel_order_flow import PILOT_CONSENT_TEXT
 from apps.max_bot.payments import CheckoutSession
+from apps.core.tests_photo_gate import good_photo_bytes
 
 EMOTIONS = [{"code": c, "label": l} for c, l in (("hello", "Привет"), ("bye", "Пока"), ("thanks", "Спасибо"))]
 NINE = [{"code": f"custom-{n}", "label": f"Фраза {n}"} for n in range(1, 10)]
@@ -126,7 +127,7 @@ class MaxBot(CatalogMixin):
         self.provider = FakeCheckoutProvider()
         patches = [
             mock.patch("apps.max_bot.views.MaxBotClient"),
-            mock.patch("apps.max_bot.views.download_photo", return_value=b"image-bytes"),
+            mock.patch("apps.max_bot.views.download_photo", return_value=good_photo_bytes()),
             mock.patch("apps.max_bot.checkout.YooKassaPaymentProvider.from_env", return_value=self.provider),
         ]
         self.client_cls = patches[0].start()
@@ -212,7 +213,7 @@ class TelegramBot(CatalogMixin):
         self.addCleanup(patcher.stop)
         self.bot = self.client_cls.return_value
         self.bot.get_file.side_effect = lambda file_id: {"file_path": f"photos/{file_id}.jpg"}
-        self.bot.download_file.return_value = b"image-bytes"
+        self.bot.download_file.return_value = good_photo_bytes()
 
     def _post(self, payload):
         return self.client.post("/telegram/webhook/", data=json.dumps(payload), content_type="application/json")

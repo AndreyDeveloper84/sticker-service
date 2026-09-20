@@ -5,6 +5,7 @@ from django.conf import settings
 from django.core.exceptions import ValidationError
 
 from apps.core.models import OrderPhoto
+from apps.core.services import photo_gate
 from apps.core.storage import LocalMediaStorage
 
 
@@ -40,6 +41,25 @@ class MediaService:
 
         if hasattr(file, "seek"):
             file.seek(0)
+        metadata = {}
+        if photo_gate.gate_enabled():
+            # DRF-2164: decode + measure before anything is stored; a
+            # rejected photo raises PhotoRejected (ChannelFlowError → RU hint
+            # in both bots) and leaves no file and no row behind.
+            content = file.read()
+            if hasattr(file, "seek"):
+                file.seek(0)
+            try:
+                gate = photo_gate.inspect_photo(content)
+            except photo_gate.PhotoRejected as exc:
+                photo_gate.logger.info(
+                    "photo.gate.rejected order=%s reason=%r metrics=%s", order.pk, exc.reason, exc.metrics
+                )
+                raise
+            metadata["gate"] = gate
+            # the decoded container is authoritative over the declared type
+            # (MAX guesses the MIME type from the file name)
+            mime_type = photo_gate.FORMAT_MIME[gate["format"]]
         self._storage().save(storage_key, file)
 
         return OrderPhoto.objects.create(
@@ -48,4 +68,5 @@ class MediaService:
             original_filename=original_filename[:255],
             mime_type=mime_type,
             size_bytes=size_bytes,
+            metadata=metadata,
         )

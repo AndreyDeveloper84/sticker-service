@@ -68,6 +68,7 @@ from apps.telegram_bot.payments import TelegramStarsPaymentAdapter
 from apps.core.services.final_delivery import FinalDeliveryError, FinalDeliveryService
 
 from apps.core.services.pilot_metrics import PilotMetricsService
+from apps.core.tests_photo_gate import good_photo_bytes
 
 
 TELEGRAM_WEBHOOK = "/telegram/webhook/"
@@ -190,7 +191,7 @@ class TelegramDriver:
         self.client = test.client
         self.bot = mock.MagicMock(name="TelegramBotClient")
         self.bot.get_file.return_value = {"file_path": "photos/source.jpg"}
-        self.bot.download_file.return_value = b"customer-photo-bytes"
+        self.bot.download_file.return_value = good_photo_bytes()
         self.bot.send_message.return_value = {"message_id": 1}
         self.bot.send_photo.return_value = {"message_id": 2, "chat": {"id": self.chat_id}}
 
@@ -379,7 +380,7 @@ class MaxDriver:
     def _post(self, payload):
         with mock.patch("apps.max_bot.views.MaxBotClient", return_value=self.bot), mock.patch(
             "apps.max_bot.checkout.YooKassaPaymentProvider.from_env", return_value=self.yookassa
-        ), mock.patch("apps.max_bot.views.download_photo", return_value=b"customer-photo-bytes"):
+        ), mock.patch("apps.max_bot.views.download_photo", return_value=good_photo_bytes()):
             return self.client.post(MAX_WEBHOOK, data=json.dumps(payload), content_type="application/json")
 
     def _text(self, text):

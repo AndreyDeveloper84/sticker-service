@@ -72,6 +72,12 @@ GENERATION_QUEUE_REDIS_URL = os.getenv("GENERATION_QUEUE_REDIS_URL", "") or REDI
 GENERATION_JOB_TIMEOUT_S = int(os.getenv("GENERATION_JOB_TIMEOUT_S", "560"))
 MEDIA_ROOT = Path(os.getenv("MEDIA_ROOT", str(BASE_DIR / "media")))
 ORDER_PHOTO_MAX_BYTES = int(os.getenv("ORDER_PHOTO_MAX_BYTES", str(20 * 1024 * 1024)))
+# Photo Suitability Gate (DRF-2164): decode + min side + aspect + blur before
+# a photo is accepted (see services/photo_gate.py for the rationale).
+PHOTO_GATE_ENABLED = os.getenv("PHOTO_GATE_ENABLED", "true").strip().lower() in {"1", "true", "yes", "on"}
+PHOTO_MIN_SIDE = int(os.getenv("PHOTO_MIN_SIDE", "512"))
+PHOTO_MAX_ASPECT = float(os.getenv("PHOTO_MAX_ASPECT", "2.5"))
+PHOTO_BLUR_MIN_VARIANCE = float(os.getenv("PHOTO_BLUR_MIN_VARIANCE", "30"))
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 # Telegram outbound transport (DRF-1870): defaults are production-compatible

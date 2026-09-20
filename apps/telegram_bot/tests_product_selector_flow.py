@@ -16,6 +16,7 @@ from apps.core.bot_menu import CONTACT_PROMPT
 from apps.core.customer_hints import EMOTION_CHOICE_HINT, NEED_PHOTO_HINT
 from apps.core.models import Order, Product, Style
 from apps.core.services.channel_order_flow import order_emotion_codes
+from apps.core.tests_photo_gate import good_photo_bytes
 
 WEBHOOK_URL = "/telegram/webhook/"
 
@@ -116,7 +117,7 @@ class TelegramProductSelectorFlowTests(TestCase):
         with override_settings(MEDIA_ROOT=Path(media_root)):
             client.reset_mock()
             client.get_file.return_value = {"file_path": "photos/source.jpg"}
-            client.download_file.return_value = b"image-bytes"
+            client.download_file.return_value = good_photo_bytes()
             response = self._post(_photo_message())
             self.assertEqual(response.status_code, 200)
             keyboard = client.send_message.call_args.kwargs["reply_markup"]["inline_keyboard"]

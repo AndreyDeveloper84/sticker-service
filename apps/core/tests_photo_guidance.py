@@ -12,6 +12,7 @@ from django.test import TestCase, override_settings
 from apps.core.customer_hints import PHOTO_GUIDANCE, SINGLE_PHOTO_REMINDER
 from apps.core.models import Order, Product, Style
 from apps.core.bot_menu import CONTACT_PROMPT
+from apps.core.tests_photo_gate import good_photo_bytes
 
 SINGLE_CONFIG = {
     "kind": "single", "quantity": 1, "emotion_count": 1,
@@ -80,7 +81,7 @@ class MaxPhotoGuidanceFlowTests(TestCase):
 
     def test_one_photo_gets_soft_reminder_then_consent(self):
         with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(
-            "apps.max_bot.views.download_photo", return_value=b"image-bytes"
+            "apps.max_bot.views.download_photo", return_value=good_photo_bytes()
         ):
             client = client_cls.return_value
             self._to_photo_step(client)
@@ -97,7 +98,7 @@ class MaxPhotoGuidanceFlowTests(TestCase):
 
     def test_two_photos_get_no_reminder(self):
         with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(
-            "apps.max_bot.views.download_photo", return_value=b"image-bytes"
+            "apps.max_bot.views.download_photo", return_value=good_photo_bytes()
         ):
             client = client_cls.return_value
             self._to_photo_step(client)
@@ -138,7 +139,7 @@ class TelegramPhotoGuidanceFlowTests(TestCase):
 
     def _to_photo_step(self, client):
         client.get_file.side_effect = lambda file_id: {"file_path": f"photos/{file_id}.jpg"}
-        client.download_file.return_value = b"image-bytes"
+        client.download_file.return_value = good_photo_bytes()
         self._post(self._callback("product:single-sticker"))
         self._post(self._callback("style:single-sticker:comic"))
         client.reset_mock()

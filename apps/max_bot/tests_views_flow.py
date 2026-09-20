@@ -12,6 +12,7 @@ from unittest import mock
 from django.test import TestCase, override_settings
 
 from apps.core.models import ChannelIdentity, Order, Product, Style
+from apps.core.tests_photo_gate import good_photo_bytes
 
 WEBHOOK_URL = "/max/webhook/"
 
@@ -90,7 +91,7 @@ class MaxStickerFlowRegressionTests(TestCase):
         with tempfile.TemporaryDirectory() as media_root:
             with override_settings(MEDIA_ROOT=Path(media_root)):
                 with mock.patch("apps.max_bot.views.MaxBotClient") as client_cls, mock.patch(
-                    "apps.max_bot.views.download_photo", return_value=b"image-bytes"
+                    "apps.max_bot.views.download_photo", return_value=good_photo_bytes()
                 ):
                     client = client_cls.return_value
                     response = self._post(

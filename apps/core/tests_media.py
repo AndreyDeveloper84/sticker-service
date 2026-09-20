@@ -8,6 +8,7 @@ from django.urls import reverse
 
 from apps.core.models import ChannelIdentity, Order, OrderPhoto, Product, Style, User
 from apps.core.services.media import MediaService
+from apps.core.tests_photo_gate import good_photo_bytes
 
 
 class MediaServiceTests(TestCase):
@@ -29,20 +30,20 @@ class MediaServiceTests(TestCase):
         self.tmp = TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
 
-    def _file(self, name="photo.jpg", content=b"image-bytes", content_type="image/jpeg"):
-        return SimpleUploadedFile(name, content, content_type=content_type)
+    def _file(self, name="photo.jpg", content=None, content_type="image/jpeg"):
+        return SimpleUploadedFile(name, good_photo_bytes() if content is None else content, content_type=content_type)
 
-    @override_settings(ORDER_PHOTO_MAX_BYTES=1024)
+    @override_settings(ORDER_PHOTO_MAX_BYTES=5 * 1024 * 1024)
     def test_saves_original_and_creates_order_photo(self):
         with override_settings(MEDIA_ROOT=self.tmp.name):
             photo = MediaService().save_order_photo(order=self.order, file=self._file())
 
         self.assertEqual(photo.order, self.order)
         self.assertEqual(photo.mime_type, "image/jpeg")
-        self.assertEqual(photo.size_bytes, len(b"image-bytes"))
+        self.assertEqual(photo.size_bytes, len(good_photo_bytes()))
         self.assertTrue(photo.storage_key.startswith(f"orders/{self.order.pk}/source/"))
 
-    @override_settings(ORDER_PHOTO_MAX_BYTES=1024)
+    @override_settings(ORDER_PHOTO_MAX_BYTES=5 * 1024 * 1024)
     def test_repeated_upload_creates_distinct_photo(self):
         with override_settings(MEDIA_ROOT=self.tmp.name):
             first = MediaService().save_order_photo(order=self.order, file=self._file())
@@ -51,7 +52,7 @@ class MediaServiceTests(TestCase):
         self.assertNotEqual(first.storage_key, second.storage_key)
         self.assertEqual(OrderPhoto.objects.filter(order=self.order).count(), 2)
 
-    @override_settings(ORDER_PHOTO_MAX_BYTES=1024)
+    @override_settings(ORDER_PHOTO_MAX_BYTES=5 * 1024 * 1024)
     def test_rejects_unsupported_mime_type(self):
         with override_settings(MEDIA_ROOT=self.tmp.name):
             with self.assertRaises(ValidationError):
@@ -70,7 +71,7 @@ class MediaServiceTests(TestCase):
 
         self.assertFalse(OrderPhoto.objects.exists())
 
-    @override_settings(ORDER_PHOTO_MAX_BYTES=1024)
+    @override_settings(ORDER_PHOTO_MAX_BYTES=5 * 1024 * 1024)
     def test_staff_can_retrieve_saved_file_through_admin(self):
         with override_settings(MEDIA_ROOT=self.tmp.name):
             photo = MediaService().save_order_photo(order=self.order, file=self._file())
@@ -84,4 +85,4 @@ class MediaServiceTests(TestCase):
             body = b"".join(response.streaming_content)
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(body, b"image-bytes")
+        self.assertEqual(body, good_photo_bytes())

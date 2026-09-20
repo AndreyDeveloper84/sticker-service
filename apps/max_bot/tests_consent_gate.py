@@ -19,6 +19,7 @@ from apps.core.services.channel_order_flow import (
     ChannelOrderFlowService,
 )
 from apps.max_bot.payments import CheckoutSession, MaxExternalPaymentAdapter, MaxPaymentError
+from apps.core.tests_photo_gate import good_photo_bytes
 
 WEBHOOK_URL = "/max/webhook/"
 USER_ID = 7101
@@ -86,7 +87,7 @@ class MaxConsentWebhookFlowTests(TestCase):
         self._post(_callback("style:single-sticker:comic"))
         with tempfile.TemporaryDirectory() as media_root:
             with override_settings(MEDIA_ROOT=Path(media_root)):
-                with mock.patch("apps.max_bot.views.download_photo", return_value=b"image-bytes"):
+                with mock.patch("apps.max_bot.views.download_photo", return_value=good_photo_bytes()):
                     self.assertEqual(self._post(_photo_message()).status_code, 200)
         order = Order.objects.get()
         self.assertEqual(order.status, Order.Status.AWAITING_PHOTOS)

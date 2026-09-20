@@ -3,12 +3,9 @@ from django.db import transaction
 from django.utils import timezone
 
 from apps.core.models import ChannelIdentity, Order, Product, Style, User
+from apps.core.services.flow_errors import ChannelFlowError  # noqa: F401 — re-export (bots, tests)
 from apps.core.services.media import MediaService
 from apps.core.services.order_state import OrderStateService
-
-
-class ChannelFlowError(ValueError):
-    pass
 
 
 # Identifier of the customer consent text shown before checkout. Bump it when
