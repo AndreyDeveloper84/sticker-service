@@ -342,9 +342,12 @@ class EconomicsRulesTests(EconomicsFixture):
         order.save(update_fields=["status"])
         self.generation.generate_revision(order=order)
         eco = OrderEconomics.compute(order)
-        self.assertEqual(eco["ai"]["revision"], {"calls": 1, "known_cost_minor": TARIFF, "known_count": 1,
-                                                  "possibly_billable_count": 0, "unknown_price_count": 0,
-                                                  "not_billable_count": 0})
+        revision = eco["ai"]["revision"]
+        self.assertEqual({k: revision[k] for k in ("calls", "known_cost_minor", "known_count", "possibly_billable_count",
+                                                   "unknown_price_count", "not_billable_count")},
+                         {"calls": 1, "known_cost_minor": TARIFF, "known_count": 1, "possibly_billable_count": 0,
+                          "unknown_price_count": 0, "not_billable_count": 0})
+        self.assertEqual(revision["estimated_count"], 0)
         self.assertIn("правки: 1 вызов(ов), 7,42 ₽", self._block(self._card(order)))
 
     def test_no_confirmed_payment(self):

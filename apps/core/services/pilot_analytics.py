@@ -68,6 +68,7 @@ EXPORT_COLUMNS = (
     "generation_calls", "preview_cost", "revision_cost", "full_cost", "regeneration_cost", "ai_total",
     "manual_minutes", "manual_cost", "payment_fee", "known_variable_cost", "known_contribution",
     "unknown_cost_components",
+    "ai_usd_estimate",  # token pricing (2026-09-20): USD sum of the ESTIMATED billable calls, else empty
 )
 
 
@@ -329,7 +330,8 @@ class PilotAnalyticsService:
             agg = Counter()
             for r in rows:
                 item = r["eco"]["ai"][stage]
-                for key in ("calls", "known_cost_minor", "known_count", "possibly_billable_count",
+                for key in ("calls", "known_cost_minor", "known_config_minor", "known_estimated_minor", "known_count",
+                            "estimated_count", "possibly_billable_count",
                             "unknown_price_count", "not_billable_count"):
                     agg[key] += item[key]
             stages[stage] = dict(agg)
@@ -580,4 +582,5 @@ def export_row(r: dict) -> dict:
         "known_variable_cost": known_variable,
         "known_contribution": None if contribution == NOT_COMPUTABLE else _rub(contribution),
         "unknown_cost_components": ";".join(eco["unknown_components"]),
+        "ai_usd_estimate": f"{ai['total']['usd_estimate_total']:.6f}" if ai["total"]["usd_known_count"] else None,
     }

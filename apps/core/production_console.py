@@ -34,7 +34,7 @@ from .console_text import (
 from .image_providers import get_image_provider
 from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Payment, Product, Revision
 from .services.budget import BudgetConfigError, BudgetError, BudgetExceeded, BudgetOverride, BudgetService
-from .services.generation_cost import format_known_cost
+from .services.generation_cost import format_ai_total, format_known_cost, format_tokens
 from .services.order_economics import (
     NOT_COMPUTABLE,
     PROVIDER_CONFIRMED,
@@ -787,12 +787,12 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         if not order or not order.pk:
             return "—"
         costs = BudgetService().order_costs(order)
+        # the cost itself lives in «Экономика заказа» (one block, owner wording)
         parts = [
             f"вызовов: {costs['calls']} (превью {costs['preview']} / правки {costs['revision']} / "
             f"производство {costs['full']})",
             f"токенов: {costs['tokens']}",
         ]
-        parts.append(f"стоимость: {format_known_cost(costs['cost'])}")
         possibly = costs["cost"]["possibly_billable_count"]
         if possibly:
             parts.append(f"возможно платных: {possibly}")
@@ -833,7 +833,11 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             item = ai[stage]
             if not item["calls"]:
                 return f"{STAGE_TITLES[stage]}: нет вызовов"
-            text = f"{STAGE_TITLES[stage]}: {item['calls']} вызов(ов), {format_known_cost(item)}"
+            text = f"{STAGE_TITLES[stage]}: {item['calls']} вызов(ов), "
+            tokens = format_tokens(item.get("tokens"))
+            if tokens:
+                text += f"{tokens}, "
+            text += format_known_cost(item)
             if item["possibly_billable_count"]:
                 text += f", возможно платных: {item['possibly_billable_count']}"
             return text
@@ -848,12 +852,15 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             title = "Слоты" if stage == STAGE_FULL else "Перегенерации"
             parts = []
             for row in slots:
-                cost = money(row["cost_minor"]) if row["cost_minor"] is not None else (
-                    "0 ₽ (не принят)" if row["billable"] is False else "неизвестна"
-                )
+                if row["cost_minor"] is not None:
+                    cost = ("≈ " if row.get("estimated") else "") + money(row["cost_minor"])
+                else:
+                    cost = "0 ₽ (не принят)" if row["billable"] is False else "неизвестна"
                 parts.append(f"{row['title'] or row['slot_key']} #{row['attempt']} — {cost}")
             lines.append(f"{title}: " + "; ".join(parts))
-        lines.append(f"AI всего: {format_known_cost(ai['total'])}")
+        lines.append(f"AI всего: {format_ai_total(ai['total'])}")
+        if ai.get("pricing_caption"):
+            lines.append(ai["pricing_caption"])
 
         manual = eco["manual"]
         if manual["rate_source"] == RATE_SOURCE_CONFIG_SNAPSHOT:

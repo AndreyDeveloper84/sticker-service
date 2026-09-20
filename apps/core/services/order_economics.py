@@ -138,6 +138,9 @@ def _slot_row(order: Order, job: GenerationJob) -> dict:
         "billing_outcome": (cost or {}).get("billing_outcome"),
         "billable": (cost or {}).get("billable"),
         "cost_minor": cost["cost_minor"] if generation_cost.is_known(cost) else None,
+        "estimated": generation_cost.is_estimated(cost),
+        "usd_estimate": (cost or {}).get("usd_estimate"),
+        "tokens": (cost or {}).get("tokens"),
     }
 
 
@@ -233,7 +236,13 @@ class OrderEconomics:
             item = {
                 "calls": summary["jobs"],
                 "known_cost_minor": summary["known_cost_minor"],
+                "known_config_minor": summary["known_config_minor"],
+                "known_estimated_minor": summary["known_estimated_minor"],
                 "known_count": summary["known_count"],
+                "estimated_count": summary["estimated_count"],
+                "usd_estimate_total": summary["usd_estimate_total"],
+                "usd_known_count": summary["usd_known_count"],
+                "tokens": summary["tokens"],
                 "possibly_billable_count": summary["possibly_billable_count"],
                 "unknown_price_count": summary["unknown_price_count"],
                 "not_billable_count": summary["not_billable_count"],
@@ -245,6 +254,7 @@ class OrderEconomics:
                 ]
             stages[stage] = item
         stages["total"] = generation_cost.aggregate(job.input_metadata for job in jobs)
+        stages["pricing_caption"] = generation_cost.pricing_caption(job.input_metadata for job in jobs)
         return stages
 
     @staticmethod

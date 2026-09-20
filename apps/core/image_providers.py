@@ -50,10 +50,30 @@ def _usage_metadata(usage) -> dict:
         return {}
     result = {}
     for key in ("input_tokens", "output_tokens", "total_tokens"):
-        value = usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
-        if isinstance(value, int) and not isinstance(value, bool):
+        value = _usage_value(usage, key)
+        if _is_int(value):
             result[key] = value
+    # token pricing (owner GO 2026-09-20): text and image input tokens are
+    # priced differently, so the split is kept when the provider reports it;
+    # absent → not invented (the cost then stays UNKNOWN for that job).
+    details = _usage_value(usage, "input_tokens_details")
+    if details is not None:
+        split = {}
+        for key in ("text_tokens", "image_tokens"):
+            value = _usage_value(details, key)
+            if _is_int(value):
+                split[key] = value
+        if split:
+            result["input_tokens_details"] = split
     return result
+
+
+def _usage_value(usage, key):
+    return usage.get(key) if isinstance(usage, dict) else getattr(usage, key, None)
+
+
+def _is_int(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool)
 
 
 MODERATION_BLOCKED_CODE = "moderation_blocked"

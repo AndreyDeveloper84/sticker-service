@@ -303,7 +303,8 @@ class ConsoleCostFiguresTests(BudgetFixture):
         self.assertContains(response, "Расходы")
         self.assertContains(response, "вызовов: 4 (превью 1 / правки 1 / производство 2)")
         self.assertContains(response, "токенов: 3000")
-        self.assertContains(response, "стоимость: неизвестна")
+        self.assertContains(response, "AI всего: неизвестна")  # cost only in «Экономика заказа»
+        self.assertNotContains(response, "стоимость: неизвестна")
         self.assertContains(response, "возможно платных: 4")
         self.assertNotContains(response, "50 ₽")
         self.assertContains(response, "попыток на слот: max 2 / без лимита")
