@@ -77,6 +77,7 @@ EXTRA_EVENT_TYPES = (
     (OrderEvent.BUDGET_OVERRIDE, "Бюджет: лимит переопределён"),
     (OrderEvent.BUDGET_ALERT, "Бюджет: алерт"),
     (OrderEvent.PAYMENT_REFUNDED, "Платёж возвращён"),
+    (OrderEvent.MEDIA_PURGED, "Медиа удалены"),
 )
 
 

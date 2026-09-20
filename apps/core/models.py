@@ -379,6 +379,7 @@ class OrderEvent(models.Model):
     BUDGET_OVERRIDE = "budget.override"
     BUDGET_ALERT = "budget.alert"
     PAYMENT_REFUNDED = "payment.refunded"
+    MEDIA_PURGED = "media.purged"  # DRF-2170: counts / bytes / rule only, no PII
 
     class Actor(models.TextChoices):
         SYSTEM = "system", "System"
