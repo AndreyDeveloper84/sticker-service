@@ -1,4 +1,6 @@
-# OWNER ACTION — staging `.env.staging`: background worker flag + token pricing (prepared 2026-09-20, NOT applied)
+# OWNER ACTION — staging `.env.staging`: background worker flag + token pricing (prepared 2026-09-20, applied (see STATUS banner))
+> **STATUS: COMPLETED / SUPERSEDED (2026-09-20).** Block 1 (GENERATION_WORKER_ENABLED=true) applied by Agent A at 10:07:29 UTC (owner GO); Block 2 (gpt-image-2 token rates + FX 84.1975 / 2026-09-19 / CBR) applied at 10:15:27 UTC (OWNER FX DECISION). Both survived the deploys of 69cfc79 and 43b3d2d (verified). Keep this file only as the rollback / re-apply procedure — the live state is in the staging runbook and docs/reports/PILOT-AUTOMATION-BASELINE-2026-09-20.md.
+
 
 Prepared by Agent A after verifying dev `5c1ff38` on staging (worker container up, idle, healthy;
 backend still inline). Nothing below has been applied. Two independent blocks — each can be
