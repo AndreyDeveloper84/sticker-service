@@ -66,6 +66,7 @@
         <tr><td colspan="5">Подтверждённых платежей нет</td></tr>
       {% endfor %}
       <tr><th colspan="3">Итого</th><td colspan="2">{{ revenue_totals }}</td></tr>
+      {% if revenue_refunded %}<tr><th colspan="3">Возвращено (в выручку не входит)</th><td colspan="2">{{ revenue_refunded }}</td></tr>{% endif %}
     </table>
   </div>
 

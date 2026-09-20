@@ -27,7 +27,13 @@
           </p>
         {% endif %}
       {% endif %}
-      <input type="submit" value="Подтвердить">
+      {% if reason_input %}
+        <p>
+          <label for="reason">Причина возврата (обязательно):</label>
+          <input type="text" id="reason" name="reason" value="{{ reason_value }}" size="60" required>
+        </p>
+      {% endif %}
+      <input type="submit" value="{{ submit_label|default:"Подтвердить" }}">
       <a href="{% url 'admin:core_order_change' order.pk %}">Отмена</a>
     </form>
   </div>

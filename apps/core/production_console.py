@@ -32,7 +32,7 @@ from .console_text import (
     slot_title,
 )
 from .image_providers import get_image_provider
-from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Product, Revision
+from .models import ChannelIdentity, GeneratedAsset, GenerationJob, Order, OrderPhoto, Payment, Product, Revision
 from .services.budget import BudgetConfigError, BudgetError, BudgetExceeded, BudgetOverride, BudgetService
 from .services.generation_cost import format_known_cost
 from .services.order_economics import (
@@ -56,6 +56,8 @@ from .services.qc import QcError, QcService
 from .storage import LocalMediaStorage
 from apps.max_bot.client import MaxBotClient
 from apps.max_bot.production_notice import notify_customer_production_started
+from apps.telegram_bot.client import TelegramBotClient
+from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
 
 # Status colour of the list badge: the operator scans for "needs me now".
 STATUS_COLORS = {
@@ -196,6 +198,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             "style",
             "status_title",
             "customer_block",
+            "payment_block",
             "custom_phrases_block",
             "customer_notes",
             "revision_request",
@@ -219,6 +222,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                     "fields": (
                         "status_title",
                         "customer_block",
+                        "payment_block",
                         "product",
                         "style",
                         "custom_phrases_block",
@@ -308,6 +312,42 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             lines.append(format_html("Контакт для связи: в этом чате — <strong>{}</strong>", chat_contact(identity)))
         elif (order.product.config or {}).get("requires_customer_contact"):
             lines.append("Контакт для связи: ещё не указан")
+        return lines_html(lines)
+
+    @admin.display(description="Оплата")
+    def payment_block(self, order):
+        """The customer's payment and, for a confirmed Telegram Stars payment,
+        the operator refund action (owner GO 2026-09-20). A refunded payment
+        is shown as such; the order status is the operator's separate call."""
+        if not order or not order.pk:
+            return "—"
+        payments = sorted(order.payments.all(), key=lambda p: (p.confirmed_at or p.created_at, p.pk))
+        made = [p for p in payments if p.status in (Payment.Status.CONFIRMED, Payment.Status.REFUNDED)]
+        if not made:
+            pending = [p for p in payments if p.status == Payment.Status.PENDING]
+            if not pending:
+                return "Платежей нет."
+            return "Ожидается: " + ", ".join(f"{money(p.amount_minor, p.currency)} ({p.provider})" for p in pending)
+        payment = made[-1]
+        if payment.status == Payment.Status.REFUNDED:
+            refund = (payment.metadata or {}).get("refund") or {}
+            moment = str(refund.get("refunded_at") or "")[:16].replace("T", " ")
+            return lines_html([
+                format_html(
+                    "<strong>Оплата возвращена</strong>: {} ({}) · {} · {} · причина: {}",
+                    money(payment.amount_minor, payment.currency), payment.provider, moment or "—",
+                    refund.get("actor_ref") or "—", refund.get("reason") or "—",
+                ),
+                "Статус заказа не менялся автоматически — решение по заказу за оператором.",
+            ])
+        lines = [f"Оплачено: {money(payment.amount_minor, payment.currency)} ({payment.provider})"]
+        if payment.provider == TelegramStarsPaymentAdapter.provider:
+            lines.append(format_html(
+                '<a class="button" href="{}">Вернуть звёзды</a> — возврат {} клиенту '
+                "(только суперпользователь, с указанием причины)",
+                reverse("admin:core_order_refund_stars", args=[order.pk]),
+                money(payment.amount_minor, payment.currency),
+            ))
         return lines_html(lines)
 
     @admin.display(description="Фразы для стикеров")
@@ -777,6 +817,12 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         revenue = eco["revenue"]
         if revenue is None:
             lines.append("Выручка: нет подтверждённого платежа")
+        elif eco["refund"]:
+            refund = eco["refund"]
+            lines.append(
+                f"Выручка: {money(0, revenue['currency'])} — возврат "
+                f"(возвращено: {money(refund['amount_minor'], refund['currency'])}, {eco['payment']['provider']})"
+            )
         else:
             provider = eco["payment"]["provider"]
             lines.append(f"Выручка: {money(revenue['amount_minor'], revenue['currency'])} ({provider})")
@@ -947,6 +993,11 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 name="core_order_generate_preview",
             ),
             path(
+                "<int:order_id>/refund-stars/",
+                self.admin_site.admin_view(self.refund_stars_view),
+                name="core_order_refund_stars",
+            ),
+            path(
                 "<int:order_id>/regenerate-preview/",
                 self.admin_site.admin_view(self.regenerate_preview_view),
                 name="core_order_regenerate_preview",
@@ -1055,6 +1106,72 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         return f"Производство: {summary}{hint}"
 
     # ------------------------------------------------------------- views
+
+    @staticmethod
+    def refundable_stars_payment(order):
+        """The CONFIRMED Telegram Stars payment of the order, or None."""
+        return (
+            order.payments.filter(provider=TelegramStarsPaymentAdapter.provider, status=Payment.Status.CONFIRMED)
+            .order_by("-confirmed_at", "-pk")
+            .first()
+        )
+
+    def refund_stars_view(self, request, order_id):
+        """«Вернуть звёзды»: refundStarPayment for the confirmed Telegram
+        Stars payment — superuser only, with a mandatory reason; at most
+        once per payment (PaymentService.refund)."""
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        change_url = reverse("admin:core_order_change", args=[order.pk])
+        if not request.user.is_superuser:
+            self.message_user(request, "Возврат звёзд может выполнить только суперпользователь.", level=messages.ERROR)
+            return redirect(change_url)
+        payment = self.refundable_stars_payment(order)
+        if payment is None:
+            self.message_user(
+                request,
+                "Нет подтверждённого платежа Telegram Stars для возврата (или он уже возвращён).",
+                level=messages.ERROR,
+            )
+            return redirect(change_url)
+        action_url = reverse("admin:core_order_refund_stars", args=[order.pk])
+        amount = money(payment.amount_minor, payment.currency)
+        reason = " ".join(str(request.POST.get("reason") or "").split()) if request.method == "POST" else ""
+        if request.method != "POST" or not reason:
+            if request.method == "POST":
+                self.message_user(request, "Укажите причину возврата.", level=messages.ERROR)
+            return self._confirmation(
+                request,
+                order=order,
+                title="Вернуть звёзды",
+                action_url=action_url,
+                detail=(
+                    f"Клиенту будут возвращены {amount} (платёж #{payment.pk}, {payment.provider}). "
+                    "Возврат выполняется один раз и не отменяется; статус заказа не меняется — "
+                    "решение по заказу примите отдельно."
+                ),
+                warning="Telegram возвращает звёзды только по платежам этого бота.",
+                reason_input=True,
+                reason_value=reason,
+                submit_label=f"Вернуть {amount}",
+            )
+        adapter = TelegramStarsPaymentAdapter()
+        client = TelegramBotClient(os.getenv("TELEGRAM_BOT_TOKEN", ""))
+        try:
+            refunded = adapter.refund(
+                payment=payment, client=client, actor_ref=request.user.get_username(), reason=reason,
+            )
+        except TelegramPaymentError as exc:
+            self.message_user(request, f"Возврат не выполнен: {exc}", level=messages.ERROR)
+            return redirect(change_url)
+        self.message_user(
+            request,
+            f"Возвращено {money(refunded.amount_minor, refunded.currency)} клиенту (платёж #{refunded.pk}). "
+            "Статус заказа не менялся.",
+            level=messages.SUCCESS,
+        )
+        return redirect(change_url)
 
     def generate_preview_view(self, request, order_id):
         order = self.get_object(request, str(order_id))

@@ -246,6 +246,16 @@ class TelegramBotClient:
             },
         )
 
+    def refund_star_payment(self, *, user_id, telegram_payment_charge_id: str):
+        """refundStarPayment — returns the Stars of one successful payment of
+        THIS bot to the user (Telegram allows it for the bot's own charges
+        only). Provider refusals surface as TelegramAPIError with Telegram's
+        description."""
+        return self._post(
+            "refundStarPayment",
+            {"user_id": user_id, "telegram_payment_charge_id": telegram_payment_charge_id},
+        )
+
     def answer_pre_checkout_query(self, *, pre_checkout_query_id, ok, error_message=None):
         payload = {"pre_checkout_query_id": pre_checkout_query_id, "ok": ok}
         if error_message:

@@ -5,6 +5,8 @@ into one read-only structure for the console — no provider calls, no
 arithmetic in templates, no conversions and no defaults:
 
 - revenue: the confirmed payment's amount, in ITS currency (XTR stays XTR);
+  a REFUNDED payment is a proven 0 — revenue 0 with ``refund`` naming the
+  returned amount (UNKNOWN != 0: a refund is evidence, so 0 is allowed);
 - payment_fee: ``Payment.metadata["fee"]`` written at confirmation from the
   provider's own ``income_amount`` (YooKassa); anything else is UNKNOWN;
 - ai: ``generation_cost`` snapshots by stage — PREVIEW / REVISION / FULL
@@ -150,8 +152,17 @@ class OrderEconomics:
         ]
 
         payment = cls._revenue_payment(payments)
+        refund = None
+        if payment is not None and payment.status == Payment.Status.REFUNDED:
+            details = (payment.metadata or {}).get("refund") or {}
+            refund = {
+                "amount_minor": payment.amount_minor,
+                "currency": payment.currency,
+                "refunded_at": details.get("refunded_at"),
+                "reason": str(details.get("reason") or ""),
+            }
         revenue = (
-            {"amount_minor": payment.amount_minor, "currency": payment.currency}
+            {"amount_minor": 0 if refund else payment.amount_minor, "currency": payment.currency}
             if payment is not None else None
         )
         fee = payment_fee(payment)
@@ -192,6 +203,7 @@ class OrderEconomics:
                 if payment is not None else None
             ),
             "revenue": revenue,
+            "refund": refund,
             "payment_fee": fee,
             "ai": ai,
             "manual": manual,
@@ -203,10 +215,12 @@ class OrderEconomics:
 
     @staticmethod
     def _revenue_payment(payments) -> Payment | None:
-        confirmed = [p for p in payments if p.status == Payment.Status.CONFIRMED]
-        if not confirmed:
+        """The payment the customer made: CONFIRMED, or REFUNDED (it was
+        confirmed once — the refund is reported, not hidden)."""
+        made = [p for p in payments if p.status in (Payment.Status.CONFIRMED, Payment.Status.REFUNDED)]
+        if not made:
             return None
-        return max(confirmed, key=lambda p: (p.confirmed_at or timezone.now(), p.pk))
+        return max(made, key=lambda p: (p.confirmed_at or timezone.now(), p.pk))
 
     @staticmethod
     def _ai(order: Order, jobs) -> dict:

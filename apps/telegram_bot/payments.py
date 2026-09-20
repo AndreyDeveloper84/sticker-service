@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from apps.core.models import ChannelIdentity, Order, Payment, Product
 from apps.core.services.payment import PaymentError, PaymentService
+from apps.telegram_bot.client import TelegramAPIError
 
 logger = logging.getLogger(__name__)
 
@@ -117,6 +118,30 @@ class TelegramStarsPaymentAdapter:
                     "provider_payment_charge_id": successful_payment.get("provider_payment_charge_id") or "",
                 },
             )
+        except PaymentError as exc:
+            raise TelegramPaymentError(str(exc)) from exc
+
+    def refund(self, *, payment: Payment, client, actor_ref: str, reason: str) -> Payment:
+        """Operator refund through the domain service; the Bot API call is
+        made inside the payment lock (at-most-once) with the charge id saved
+        at confirmation."""
+
+        def provider_refund(locked_payment: Payment):
+            charge_id = str(
+                (locked_payment.metadata or {}).get("telegram_payment_charge_id")
+                or locked_payment.external_payment_id
+                or ""
+            )
+            if not charge_id:
+                raise TelegramPaymentError("Payment has no telegram_payment_charge_id")
+            user_id = locked_payment.order.channel_identity.external_user_id
+            try:
+                return client.refund_star_payment(user_id=user_id, telegram_payment_charge_id=charge_id)
+            except TelegramAPIError as exc:
+                raise TelegramPaymentError(f"Telegram refused the refund: {exc.description or exc}") from exc
+
+        try:
+            return PaymentService.refund(payment=payment, actor_ref=actor_ref, reason=reason, provider_refund=provider_refund)
         except PaymentError as exc:
             raise TelegramPaymentError(str(exc)) from exc
 

@@ -153,7 +153,9 @@ def _delivered_at(order: Order):
 
 
 def _paid_at(order: Order):
-    moments = [p.confirmed_at for p in order.payments.all() if p.status == Payment.Status.CONFIRMED and p.confirmed_at]
+    # a refunded payment was confirmed once: the order did reach "paid"
+    made = (Payment.Status.CONFIRMED, Payment.Status.REFUNDED)
+    moments = [p.confirmed_at for p in order.payments.all() if p.status in made and p.confirmed_at]
     return min(moments) if moments else None
 
 
@@ -289,9 +291,17 @@ class PilotAnalyticsService:
     def _revenue(rows) -> dict:
         cells = {}
         totals = {}
+        refunded = {}
         for r in rows:
             revenue = r["eco"]["revenue"]
             if revenue is None:
+                continue
+            refund = r["eco"]["refund"]
+            if refund:
+                # proven 0: not a revenue cell, listed apart as «возвращено»
+                cell = refunded.setdefault(refund["currency"], {"currency": refund["currency"], "orders": 0, "amount_minor": 0})
+                cell["orders"] += 1
+                cell["amount_minor"] += refund["amount_minor"]
                 continue
             key = (r["order"].product.code, r["eco"]["channel"], revenue["currency"])
             cell = cells.setdefault(key, {
@@ -305,6 +315,7 @@ class PilotAnalyticsService:
         return {
             "cells": [cells[key] for key in sorted(cells)],
             "totals": [totals[key] for key in sorted(totals)],
+            "refunded": [refunded[key] for key in sorted(refunded)],
         }
 
     # -- AI COST --------------------------------------------------------------
