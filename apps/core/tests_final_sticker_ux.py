@@ -274,13 +274,20 @@ class StickerSetConsoleTests(DeliveryFixture):
         self.assertContains(response, "Набор создаётся после полной доставки заказа в Telegram.")
         self.bot.upload_sticker_file.assert_not_called()
 
-    def test_missing_bot_token_is_a_warning_not_a_crash(self):
+    def test_without_a_bot_token_the_set_is_skipped_silently(self):
+        """No TELEGRAM_BOT_TOKEN (tests, non-Telegram deployments): the set is
+        not attempted and the operator sees only the delivery message — a
+        real Telegram delivery has already used the same token."""
         p1, _p2 = self._patched()
-        with p1, override_settings(TELEGRAM_BOT_TOKEN=""), mock.patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": ""}):
+        with p1, override_settings(TELEGRAM_BOT_TOKEN=""), mock.patch.dict("os.environ", {"TELEGRAM_BOT_TOKEN": ""}), \
+                self.assertLogs("apps.core.final_delivery_console", "INFO") as logs:
             response = self.client.post(reverse("admin:core_order_deliver_final", args=[self.order.pk]), follow=True)
-        self.assertContains(response, "Набор стикеров Telegram не создан")
+        self.assertNotContains(response, "Набор стикеров Telegram не создан")
+        self.assertNotContains(response, "Набор стикеров Telegram готов")
+        self.assertTrue(any("sticker_set.skipped" in line for line in logs.output))
         self.order.refresh_from_db()
         self.assertEqual(self.order.status, Order.Status.DELIVERED)
+        self.assertContains(response, "Создать набор повторно")  # the operator can still create it once the token is there
 
 
 class MaxSummaryTextTests(DeliveryFixture):

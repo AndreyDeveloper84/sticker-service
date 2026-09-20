@@ -1,3 +1,4 @@
+import logging
 import os
 
 from django.contrib import admin, messages
@@ -27,6 +28,8 @@ from apps.core.models import ChannelIdentity
 from apps.telegram_bot.client import TelegramBotClient
 from apps.telegram_bot.final_delivery import TelegramFinalDeliveryAdapter
 from apps.telegram_bot.sticker_set import StickerSetError, TelegramStickerSetService, sticker_set_record
+
+logger = logging.getLogger(__name__)
 
 # One synchronous console request sends at most this many stickers so a
 # 9-item pack cannot outlive the worker timeout; the operator re-runs
@@ -67,7 +70,13 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
     # ------------------------------------------------ Telegram sticker set (DRF-2163)
 
     def get_sticker_set_service(self):
-        return TelegramStickerSetService(client=TelegramBotClient(os.getenv("TELEGRAM_BOT_TOKEN", "")))
+        """None when no bot token is configured (tests / non-Telegram
+        deployments): the set is then not attempted and nothing is said —
+        a real Telegram delivery already used the same token."""
+        token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+        if not token:
+            return None
+        return TelegramStickerSetService(client=TelegramBotClient(token))
 
     def _after_delivery(self, request, order, plan):
         """A completed Telegram delivery → the customer's sticker set + the
@@ -80,9 +89,13 @@ class FinalDeliveryOrderAdmin(QcOrderAdmin):
         self._ensure_sticker_set(request, order)
 
     def _ensure_sticker_set(self, request, order):
+        service = self.get_sticker_set_service()
+        if service is None:
+            logger.info("telegram.sticker_set.skipped order=%s reason=no_bot_token", order.pk)
+            return None
         try:
-            record = self.get_sticker_set_service().ensure(order, actor_ref=request.user.get_username())
-        except (StickerSetError, FinalDeliveryError, ValueError) as exc:  # ValueError: no bot token configured
+            record = service.ensure(order, actor_ref=request.user.get_username())
+        except (StickerSetError, FinalDeliveryError) as exc:
             self.message_user(request, f"Набор стикеров Telegram не создан: {exc}", level=messages.WARNING)
             return None
         if record.get("status") == "done":
