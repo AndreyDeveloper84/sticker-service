@@ -11,10 +11,19 @@ from django.utils import timezone
 from django.utils.html import format_html, format_html_join
 from PIL import Image
 
+from .console_generation import (
+    active_jobs,
+    dequeue_candidates,
+    last_result_text,
+    latest_finished,
+    queue_wait_text,
+    waiting_headline,
+    worker_health,
+)
 from .console_html import LINE_BREAK, lines_html
 from .pilot_analytics_console import PilotAnalyticsViews
 from .console_text import (
-    GENERATION_WAIT,
+    generation_wait,
     JOB_STATUSES,
     JOB_TASKS,
     PAID_CALL_ONE,
@@ -50,7 +59,8 @@ from .services.order_economics import (
     unknown_component_text,
 )
 from .services.full_production import FullProductionError, FullProductionService
-from .services.generation import GenerationError, GenerationService
+from .services import generation_queue
+from .services.generation import GenerationError, GenerationService, reap_stale
 from .services.order_state import InvalidOrderTransition, OrderStateService
 from .services.qc import QcError, QcService
 from .storage import LocalMediaStorage
@@ -173,6 +183,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
     )
     list_filter = (RussianStatusFilter, RussianChannelFilter, RussianProductFilter, "style")
     change_list_template = "admin/core/order/change_list.html"
+    change_form_template = "admin/core/order/change_form.html"
     search_fields = (
         "=id",
         "channel_identity__external_user_id",
@@ -397,11 +408,57 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         except FullProductionError:
             return []
 
+    # ------------------------------------------------- background jobs
+
+    def active_jobs(self, order):
+        """Queued / running attempts the card must wait for (D-1)."""
+        if not order or not order.pk:
+            return []
+        return active_jobs(order)
+
+    def _refuse_if_generating(self, request, order) -> bool:
+        """Server-side twin of the hidden buttons: while an attempt is queued
+        or running, every action that would create a job, move the order or
+        send anything to the customer is refused with one Russian message.
+        The services guard too (ALREADY_RUNNING / QUEUED); this keeps the
+        wording uniform and costs no service call."""
+        jobs = self.active_jobs(order)
+        if not jobs:
+            return False
+        headline, _explanation = waiting_headline(order, jobs)
+        self.message_user(
+            request,
+            f"{headline} — дождитесь результата, действия пока недоступны.",
+            level=messages.ERROR,
+        )
+        return True
+
+    def changeform_view(self, request, object_id=None, form_url="", extra_context=None):
+        generating = False
+        if object_id:
+            order = self.get_object(request, object_id)
+            if order is not None:
+                # A RUNNING job older than the stale limit is failed closed
+                # right here (worker gone), so the operator sees «неоднозначно»
+                # now, not after the next paid click.
+                if any(job.status == GenerationJob.Status.RUNNING for job in order.generation_jobs.all()):
+                    if reap_stale(order):
+                        order = self.get_object(request, object_id)
+                generating = bool(self.active_jobs(order))
+        extra_context = {**(extra_context or {}), "generation_active": generating}
+        return super().changeform_view(request, object_id, form_url, extra_context=extra_context)
+
     def next_step_for(self, order):
         """(headline, explanation, button label, url, warning) for the status.
 
         Exactly one main button per status; everything else lives in the
         «Дополнительно» block (secondary_links)."""
+        jobs = self.active_jobs(order)
+        if jobs:
+            # queued / running attempt: the card is the waiting screen — no
+            # button at all until the worker has written the outcome
+            headline, explanation = waiting_headline(order, jobs)
+            return (headline, explanation, "", "", "")
         status = order.status
         if status in {Order.Status.PAID, Order.Status.PREVIEW_GENERATING}:
             return (
@@ -409,7 +466,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 "Оплата получена. Запустите превью — клиент увидит его после вашей проверки.",
                 "Сгенерировать превью",
                 reverse("admin:core_order_generate_preview", args=[order.pk]),
-                f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                f"{generation_wait()} {PAID_CALL_ONE}",
             )
         if status == Order.Status.INTERNAL_PREVIEW_REVIEW:
             approved = self._approved_preview_to_send(order)
@@ -428,7 +485,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                     "Успешного превью нет — перегенерируйте его.",
                     "Перегенерировать превью",
                     reverse("admin:core_order_regenerate_preview", args=[order.pk]),
-                    f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                    f"{generation_wait()} {PAID_CALL_ONE}",
                 )
             return (
                 "Проверьте превью и одобрите",
@@ -447,7 +504,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                     "повторяйте, пока все слоты не будут готовы.",
                     "Запустить производство",
                     reverse("admin:core_order_start_full_production", args=[order.pk]),
-                    f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+                    f"{generation_wait()} {PAID_CALL_PER_SLOT}",
                 )
             return (
                 "Ожидаем ответ клиента",
@@ -463,7 +520,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 "Сгенерируйте новое превью с учётом правки.",
                 "Сгенерировать правку",
                 reverse("admin:core_order_generate_revision", args=[order.pk]),
-                f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                f"{generation_wait()} {PAID_CALL_ONE}",
             )
         if status == Order.Status.PACK_GENERATING:
             return self._production_next_step(order)
@@ -519,7 +576,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 "остальные стикеры сохраняются.",
                 f"Перегенерировать слот {names}",
                 reverse("admin:core_order_regenerate_slots", args=[order.pk]) + "?slots=" + ",".join(pending),
-                f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+                f"{generation_wait()} {PAID_CALL_PER_SLOT}",
             )
         plan = self._production_plan_safe(order)
         pending_slots = any(s.status == "pending" for s in plan)
@@ -532,7 +589,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 f"Слоты {names} завершились ошибкой. Повторите генерацию (по одному за нажатие).",
                 "Повторить неудавшиеся слоты",
                 reverse("admin:core_order_retry_failed_production", args=[order.pk]),
-                f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+                f"{generation_wait()} {PAID_CALL_PER_SLOT}",
             )
         if blocked and not pending_slots:
             names = ", ".join(slot_title(order, s.slot_key) for s in blocked)
@@ -553,7 +610,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             "после последнего заказ перейдёт на контроль качества.",
             "Запустить производство",
             reverse("admin:core_order_start_full_production", args=[order.pk]),
-            f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+            f"{generation_wait()} {PAID_CALL_PER_SLOT}",
         )
 
     def _qc_next_step(self, order):
@@ -579,7 +636,32 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             )
         if warning:
             parts.append(format_html('<em style="color:#8a5a00">{}</em>', warning))
+        jobs = self.active_jobs(order)
+        if jobs:
+            parts.extend(self._generation_status_lines(order, jobs))
+        else:
+            last = latest_finished(order)
+            if last is not None:
+                parts.append(format_html("<span>{}</span>", last_result_text(order, last)))
         return lines_html(parts)
+
+    def _generation_status_lines(self, order, jobs):
+        """Worker health + «ждёт worker'а» + «Снять из очереди» (D-1)."""
+        lines = []
+        health = worker_health()
+        if health is not None:
+            color = "#1d6f42" if health.alive else "#a12622"
+            lines.append(format_html('<span style="color:{}">{}</span>', color, health.text))
+        for job in dequeue_candidates(jobs):
+            lines.append(
+                format_html(
+                    '<span style="color:#a12622">{}</span> <a class="button" href="{}">Снять из очереди job #{}</a>',
+                    queue_wait_text(job),
+                    reverse("admin:core_order_dequeue_job", args=[order.pk, job.pk]),
+                    job.pk,
+                )
+            )
+        return lines
 
     # ------------------------------------------------- secondary actions
 
@@ -592,7 +674,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 (
                     "Перегенерировать превью",
                     reverse("admin:core_order_regenerate_preview", args=[order.pk]),
-                    f"Новая попытка превью, старые сохраняются. {GENERATION_WAIT} {PAID_CALL_ONE}",
+                    f"Новая попытка превью, старые сохраняются. {generation_wait()} {PAID_CALL_ONE}",
                 )
             )
         if status == Order.Status.PACK_GENERATING:
@@ -626,6 +708,8 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
     def secondary_actions(self, order):
         if not order or not order.pk:
             return "—"
+        if self.active_jobs(order):
+            return "Пока идёт генерация, дополнительных действий нет."
         links = self.secondary_links(order)
         if not links:
             return "Для текущего статуса дополнительных действий нет."
@@ -695,10 +779,13 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             asset.pk: asset for asset in order.generated_assets.filter(kind=GeneratedAsset.Kind.FINAL)
         }
         pending_retry = set(self.pending_retry_slots(order))
+        generating = bool(self.active_jobs(order))
         rows = []
         for slot in plan:
             action = ""
-            if order.status == Order.Status.PACK_GENERATING:
+            if generating:
+                pass  # no slot buttons while an attempt is queued / running
+            elif order.status == Order.Status.PACK_GENERATING:
                 if slot.slot_key in pending_retry:
                     action = format_html(
                         ' · на доработке после QC · <a class="button" href="{}">Перегенерировать</a>',
@@ -755,6 +842,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 order.status == Order.Status.INTERNAL_PREVIEW_REVIEW
                 and not approved
                 and not self._preview_sent(asset)
+                and not self.active_jobs(order)
             ):
                 approve_url = reverse("admin:core_order_approve_preview", args=[order.pk, asset.pk])
                 approve_link = format_html(
@@ -995,6 +1083,11 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 name="core_order_pilot_metrics_export_json",
             ),
             path(
+                "<int:order_id>/dequeue-job/<int:job_id>/",
+                self.admin_site.admin_view(self.dequeue_job_view),
+                name="core_order_dequeue_job",
+            ),
+            path(
                 "<int:order_id>/generate-preview/",
                 self.admin_site.admin_view(self.generate_preview_view),
                 name="core_order_generate_preview",
@@ -1180,11 +1273,74 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         )
         return redirect(change_url)
 
+    def _report_job(self, request, job, success):
+        """Outcome of a request_* call: with the inline executor the job is
+        finished on return (today's messages); with the background worker it
+        is queued and the card shows the progress."""
+        job.refresh_from_db()
+        if job.status == GenerationJob.Status.SUCCEEDED:
+            asset_id = (job.output_metadata or {}).get("asset_id")
+            self.message_user(request, success(asset_id, job), level=messages.SUCCESS)
+        elif job.status == GenerationJob.Status.FAILED:
+            error = GenerationError(job.error or f"Job #{job.pk} failed")
+            error.failure = {
+                key: value
+                for key, value in (job.output_metadata or {}).items()
+                if key != generation_queue.WORKER_KEY
+            }
+            self._fail(request, error)
+        else:
+            self.message_user(
+                request,
+                f"Поставлено в очередь: {label(JOB_TASKS, job.task_type)}, попытка {job.attempt} (job #{job.pk}). "
+                "Страница обновится сама.",
+                level=messages.SUCCESS,
+            )
+
+    def dequeue_job_view(self, request, order_id, job_id):
+        """«Снять из очереди» (decision C-2): a PENDING job no worker picked
+        up for QUEUE_WAIT_WARN_AFTER is failed as queue_lost — explicit
+        operator action, never automatic."""
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        try:
+            job = order.generation_jobs.get(pk=job_id)
+        except GenerationJob.DoesNotExist as exc:
+            raise Http404 from exc
+        action_url = reverse("admin:core_order_dequeue_job", args=[order.pk, job.pk])
+        if request.method != "POST":
+            return self._confirmation(
+                request,
+                order=order,
+                title=f"Снять из очереди job #{job.pk}",
+                action_url=action_url,
+                detail=(
+                    f"Job #{job.pk} ({label(JOB_TASKS, job.task_type)}, попытка {job.attempt}) ждёт worker'а и не был "
+                    "взят в работу. Он будет помечен как неудавшийся без вызова провайдера (не оплачен); "
+                    "после этого генерацию можно запустить заново."
+                ),
+                warning="Снимайте только если worker действительно не работает (см. индикатор в «Следующий шаг»).",
+            )
+        try:
+            generation_queue.dequeue(job)
+        except generation_queue.DequeueError as exc:
+            self.message_user(request, str(exc), level=messages.ERROR)
+        else:
+            self.message_user(
+                request,
+                f"Job #{job.pk} снят из очереди — провайдер не вызывался. Можно запускать генерацию заново.",
+                level=messages.SUCCESS,
+            )
+        return redirect(reverse("admin:core_order_change", args=[order.pk]))
+
     def generate_preview_view(self, request, order_id):
         order = self.get_object(request, str(order_id))
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_generate_preview", args=[order.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -1192,11 +1348,11 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 title="Сгенерировать превью",
                 action_url=action_url,
                 detail="Будет запущена новая попытка превью через настроенного провайдера изображений.",
-                warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                warning=f"{generation_wait()} {PAID_CALL_ONE}",
                 **self._budget_context(request, order, "preview"),
             )
         try:
-            asset = self.get_generation_service().generate_preview(
+            job = self.get_generation_service().request_preview(
                 order=order, budget_override=self._budget_override(request)
             )
         except BudgetError as exc:
@@ -1204,10 +1360,9 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         except GenerationError as exc:
             self._fail(request, exc)
         else:
-            self.message_user(
-                request,
-                f"Превью #{asset.pk} сгенерировано — проверьте его и одобрите.",
-                level=messages.SUCCESS,
+            self._report_job(
+                request, job,
+                lambda asset_id, _job: f"Превью #{asset_id} сгенерировано — проверьте его и одобрите.",
             )
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
@@ -1222,6 +1377,8 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_generate_revision", args=[order.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -1232,7 +1389,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                     "Будет сгенерировано новое превью по запросу клиента (см. блок «Правка клиента»). "
                     "Предыдущие превью сохранятся; после успеха заказ вернётся на внутреннюю проверку."
                 ),
-                warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                warning=f"{generation_wait()} {PAID_CALL_ONE}",
                 **self._budget_context(request, order, "revision"),
             )
         if order.status not in {Order.Status.REVISION_REQUESTED, Order.Status.REVISION_GENERATING}:
@@ -1243,7 +1400,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             )
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
-            asset = self.get_generation_service().generate_revision(
+            job = self.get_generation_service().request_revision(
                 order=order, budget_override=self._budget_override(request)
             )
         except BudgetError as exc:
@@ -1251,11 +1408,12 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         except (InvalidOrderTransition, GenerationError) as exc:
             self._fail(request, exc)
         else:
-            self.message_user(
-                request,
-                f"Превью с правкой #{asset.pk} сгенерировано (генерация #{asset.job_id}) — "
-                "проверьте и одобрите; предыдущие превью сохранены.",
-                level=messages.SUCCESS,
+            self._report_job(
+                request, job,
+                lambda asset_id, job_: (
+                    f"Превью с правкой #{asset_id} сгенерировано (генерация #{job_.pk}) — "
+                    "проверьте и одобрите; предыдущие превью сохранены."
+                ),
             )
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
@@ -1264,6 +1422,8 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_regenerate_preview", args=[order.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -1271,7 +1431,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                 title="Перегенерировать превью",
                 action_url=action_url,
                 detail="Предыдущие превью сохранятся. Будет создана новая попытка генерации.",
-                warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                warning=f"{generation_wait()} {PAID_CALL_ONE}",
                 **self._budget_context(request, order, "preview"),
             )
         if order.status != Order.Status.INTERNAL_PREVIEW_REVIEW:
@@ -1282,7 +1442,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             )
             return redirect(reverse("admin:core_order_change", args=[order.pk]))
         try:
-            asset = self.get_generation_service().restart_preview(
+            job = self.get_generation_service().request_preview_restart(
                 order=order, budget_override=self._budget_override(request)
             )
         except BudgetError as exc:
@@ -1290,10 +1450,9 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         except (InvalidOrderTransition, GenerationError) as exc:
             self._fail(request, exc)
         else:
-            self.message_user(
-                request,
-                f"Новое превью #{asset.pk} сгенерировано; предыдущие сохранены.",
-                level=messages.SUCCESS,
+            self._report_job(
+                request, job,
+                lambda asset_id, _job: f"Новое превью #{asset_id} сгенерировано; предыдущие сохранены.",
             )
         return redirect(reverse("admin:core_order_change", args=[order.pk]))
 
@@ -1309,6 +1468,8 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
             raise Http404 from exc
 
         action_url = reverse("admin:core_order_approve_preview", args=[order.pk, asset.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -1364,6 +1525,8 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_start_full_production", args=[order.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -1375,7 +1538,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                     "Готовые стикеры не перегенерируются; слоты с ошибкой повторяются "
                     "через «Повторить неудавшиеся слоты»."
                 ),
-                warning=f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+                warning=f"{generation_wait()} {PAID_CALL_PER_SLOT}",
                 **self._budget_context(request, order, "full_start", slot_keys=self.pending_retry_slots(order) or None),
             )
         service = self.get_full_production_service()
@@ -1414,6 +1577,8 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_retry_failed_production", args=[order.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -1424,7 +1589,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                     "Повторяется только слот со статусом «ошибка» (один за нажатие). "
                     "Заблокированные слоты не затрагиваются."
                 ),
-                warning=f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+                warning=f"{generation_wait()} {PAID_CALL_PER_SLOT}",
                 **self._budget_context(request, order, "retry", slot_keys=self._retry_slots(order)),
             )
         service = self.get_full_production_service()
@@ -1449,6 +1614,8 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_regenerate_slots", args=[order.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         slot_keys_value = request.POST.get("slot_keys", request.GET.get("slots", ""))
         if request.method != "POST" and not slot_keys_value.strip():
             # Prefill from the latest FAILED QC report's pending retry_slots.
@@ -1464,7 +1631,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                     "новый стикер заменит текущий, старый сохранится для истории. "
                     "Остальные слоты не затрагиваются."
                 ),
-                warning=f"{GENERATION_WAIT} {PAID_CALL_PER_SLOT}",
+                warning=f"{generation_wait()} {PAID_CALL_PER_SLOT}",
                 slot_input=True,
                 slot_keys_value=slot_keys_value,
                 slot_options=[
@@ -1495,6 +1662,8 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_force_retry_slot", args=[order.pk, slot_key])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -1507,7 +1676,7 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
                     "завершилась и НЕ была оплачена — иначе возможен дубль "
                     "платной генерации."
                 ),
-                warning=f"{GENERATION_WAIT} {PAID_CALL_ONE}",
+                warning=f"{generation_wait()} {PAID_CALL_ONE}",
                 **self._budget_context(request, order, "force_retry", slot_keys=[slot_key]),
             )
         service = self.get_full_production_service()

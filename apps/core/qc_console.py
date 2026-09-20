@@ -109,6 +109,7 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
             and order.status == Order.Status.QUALITY_CONTROL
         )
         retried = {slot.get("slot_key") for slot in (report.retry_slots or [])} if report else set()
+        generating = bool(self.active_jobs(order))
         for asset in assets:
             slot_key = str(asset.slot_key)
             open_url = reverse("admin:core_preview_asset_file", args=[asset.pk])
@@ -125,7 +126,9 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
             else:
                 state = "автопроверки ещё не выполнялись"
             retry = ""
-            if retryable:
+            if retryable and generating:
+                retry = " · генерация выполняется"
+            elif retryable:
                 if slot_key in retried:
                     retry = " · ДОРАБОТКА запрошена"
                 else:
@@ -235,6 +238,8 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_qc_start", args=[order.pk])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,
@@ -311,6 +316,8 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
         order = self.get_object(request, str(order_id))
         if order is None:
             raise Http404
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         report = self._open_report(order)
         if report is None:
             self.message_user(request, "Нет открытого QC-отчёта.", level=messages.ERROR)
@@ -367,6 +374,8 @@ class QcOrderAdmin(PreviewDeliveryOrderAdmin):
         if order is None:
             raise Http404
         action_url = reverse("admin:core_order_qc_retry", args=[order.pk, slot_key])
+        if self._refuse_if_generating(request, order):
+            return redirect(reverse("admin:core_order_change", args=[order.pk]))
         if request.method != "POST":
             return self._confirmation(
                 request,

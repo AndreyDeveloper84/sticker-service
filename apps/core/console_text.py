@@ -17,6 +17,18 @@ from apps.core.models import GenerationJob, Order, Payment, QcReport, Revision
 # --- time / cost warnings shown on confirmation pages ---------------------
 
 GENERATION_WAIT = "Генерация занимает ~1–1.5 мин, не закрывайте страницу."
+# Background worker (GENERATION_WORKER_ENABLED=true): the click only queues
+# the attempt; the order card shows the progress and refreshes itself.
+GENERATION_WAIT_ASYNC = (
+    "Генерация выполняется в фоне (~1–1.5 мин, в редких случаях до 9 мин); "
+    "страницу можно закрыть — результат появится в карточке заказа."
+)
+
+
+def generation_wait() -> str:
+    from apps.core.services.generation_queue import worker_enabled
+
+    return GENERATION_WAIT_ASYNC if worker_enabled() else GENERATION_WAIT
 PAID_CALL_ONE = "1 платный вызов провайдера изображений."
 PAID_CALL_PER_SLOT = "~60–90 с и 1 платный вызов на каждый слот."
 

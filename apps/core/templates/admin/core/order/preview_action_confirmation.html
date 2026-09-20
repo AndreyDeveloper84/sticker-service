@@ -11,7 +11,7 @@
         {% if budget_can_override %}Действие заблокировано; суперпользователь может переопределить лимит один раз — это будет записано в журнал.{% else %}Действие заблокировано. Переопределить лимит может только суперпользователь.{% endif %}
       </p>
     {% endif %}
-    <form method="post" action="{{ action_url }}">
+    <form method="post" action="{{ action_url }}" onsubmit="var b=this.querySelector('[type=submit]');if(b){b.disabled=true;b.value='Отправляем…';}">
       {% csrf_token %}
       {% if budget_blocked and budget_can_override %}
         <p><label><input type="checkbox" name="force" value="1"{% if budget_force_checked %} checked{% endif %}> Переопределить лимит (записывается в журнал)</label></p>

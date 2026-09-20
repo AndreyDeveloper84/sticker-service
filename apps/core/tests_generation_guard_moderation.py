@@ -375,6 +375,9 @@ class ConsoleModerationTextTests(TestCase):
         )
         provider = FakeProvider()
         response = self._post_generate(provider)
-        self.assertContains(response, "Генерация уже выполняется, дождитесь завершения")
+        # D-1: the console refuses before the service does (same guard,
+        # console wording: the running attempt and «дождитесь»)
+        self.assertContains(response, "Генерируется превью… job #")
+        self.assertContains(response, "дождитесь результата, действия пока недоступны")
         self.assertEqual(provider.requests, [])
         self.assertEqual(GenerationJob.objects.filter(order=self.order).count(), 1)
