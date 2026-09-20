@@ -31,7 +31,8 @@ from apps.core.services.channel_order_flow import (
     product_emotion_options,
 )
 from apps.core.services.budget import BudgetGuard, BudgetOverride
-from apps.core.services import generation_cost
+from apps.core.services import generation_cost, generation_queue
+from apps.core.services.generation import ALREADY_RUNNING_MESSAGE, QUEUED_MESSAGE, reap_stale
 from apps.core.services.order_state import OrderStateService
 from apps.core.storage import LocalMediaStorage
 
@@ -62,7 +63,7 @@ class SlotState:
 
     slot_key: str
     emotion: str
-    status: str  # "pending" | "running" | "succeeded" | "failed"
+    status: str  # "pending" | "queued" | "running" | "succeeded" | "failed"
     asset_id: int | None
     attempts: int
     retryable: bool
@@ -77,14 +78,21 @@ class FullProductionService:
     which is the first reference image of every slot job.
 
     Cost safety: ambiguous failures (post-submit provider timeout, stale
-    RUNNING jobs at re-entry) are failed closed — never auto-regenerated.
-    The only way past a blocked slot is the explicit operator action
-    force_retry_slot().
+    RUNNING jobs) are failed closed — never auto-regenerated. The only way
+    past a blocked slot is the explicit operator action force_retry_slot().
 
-    All entry points take max_slots (default 1): how many new slot
-    attempts are executed per call, so a synchronous console request stays
-    within the worker timeout. Pass max_slots=None for no limit (tests,
-    future task queue). Re-run until production_plan() is all succeeded.
+    Async C-2 — lazy chain. An entry point creates exactly ONE PENDING slot
+    job (the first candidate) and hands it to the executor
+    (generation_queue). After a slot SUCCEEDS the worker calls
+    continue_chain(): the same _prepare() under the order lock creates the
+    next PENDING slot (Budget Guard per slot) — so an order never has more
+    than one PENDING/RUNNING slot job, and any failed / ambiguous slot stops
+    the chain (fail closed; retry / regenerate / force are operator actions).
+    The whole remaining pack is checked against the budget upfront
+    (BudgetGuard.enforce(planned=N)) before the first job exists.
+
+    max_slots: how many slots this request may produce in total (chain
+    length); None = the whole remaining pack (one click = the pack).
     """
 
     def __init__(self, *, provider: ImageProvider, storage=None):
@@ -156,6 +164,9 @@ class FullProductionService:
                 plan.append(SlotState(slot, slot, "pending", None, 0, True))
             elif latest.status == GenerationJob.Status.RUNNING:
                 plan.append(SlotState(slot, slot, "running", asset_id, attempts, False))
+            elif latest.status == GenerationJob.Status.PENDING:
+                # queued for the worker (async C-2); not retryable while waiting
+                plan.append(SlotState(slot, slot, "queued", asset_id, attempts, False))
             elif latest.status == GenerationJob.Status.FAILED:
                 failure_class = (latest.output_metadata or {}).get("failure_class")
                 plan.append(
@@ -166,21 +177,20 @@ class FullProductionService:
             elif latest.status == GenerationJob.Status.SUCCEEDED:
                 plan.append(SlotState(slot, slot, "succeeded", asset_id, attempts, False))
             else:
-                # Legacy PENDING rows are treated as not started yet.
                 plan.append(SlotState(slot, slot, "pending", asset_id, attempts, True))
         return plan
 
     # ---------------------------------------------------------- entries
 
     def start(
-        self, *, order: Order, max_slots: int | None = 1, budget_override: BudgetOverride | None = None
+        self, *, order: Order, max_slots: int | None = None, budget_override: BudgetOverride | None = None
     ) -> list[SlotState]:
         """Run full production; safe to re-enter (no duplicate assets).
 
-        Pending slots are started (up to max_slots per call). Succeeded
-        slots are preserved. Failed retryable slots are NOT auto-retried
-        here — they go through retry_failed(); ambiguous-blocked slots
-        stay blocked until force_retry_slot().
+        Pending slots are started one after another (lazy chain, up to
+        max_slots). Succeeded slots are preserved. Failed retryable slots
+        are NOT auto-retried here — they go through retry_failed();
+        ambiguous-blocked slots stay blocked until force_retry_slot().
         """
         jobs, _blocked = self._prepare(
             order=order, allow_entry=True, mode="start", max_slots=max_slots,
@@ -190,7 +200,7 @@ class FullProductionService:
         return self._finalize(order=order)
 
     def retry_failed(
-        self, *, order: Order, max_slots: int | None = 1, budget_override: BudgetOverride | None = None
+        self, *, order: Order, max_slots: int | None = None, budget_override: BudgetOverride | None = None
     ) -> list[SlotState]:
         """Selective retry: failed retryable slots only, never succeeded ones.
 
@@ -213,7 +223,7 @@ class FullProductionService:
         return plan
 
     def regenerate_slots(
-        self, *, order: Order, slot_keys, max_slots: int | None = 1,
+        self, *, order: Order, slot_keys, max_slots: int | None = None,
         budget_override: BudgetOverride | None = None,
     ) -> list[SlotState]:
         """Regenerate explicitly requested slots (QC FAIL path, DRF-2052).
@@ -307,18 +317,6 @@ class FullProductionService:
         return locked, preview
 
     @staticmethod
-    def _mark_ambiguous(job: GenerationJob, *, note: str) -> None:
-        """Fail closed: a job whose provider-side outcome is unknown."""
-        job.status = GenerationJob.Status.FAILED
-        job.error = note
-        job.output_metadata = {**(job.output_metadata or {}), "failure_class": "ambiguous"}
-        generation_cost.apply_failure(job, job.output_metadata)
-        job.finished_at = timezone.now()
-        job.save(
-            update_fields=["status", "error", "output_metadata", "input_metadata", "finished_at", "updated_at"]
-        )
-
-    @staticmethod
     def _failure_class(job: GenerationJob) -> str | None:
         return (job.output_metadata or {}).get("failure_class")
 
@@ -340,6 +338,24 @@ class FullProductionService:
         """
         with transaction.atomic():
             locked, preview = self._lock_for_production(order, allow_entry=allow_entry)
+            # Stale RUNNING (worker gone ≥ 15 min) → ambiguous; a FRESH
+            # PENDING / RUNNING slot means the worker is on it: refuse the
+            # re-entry instead of burning the slot (async C-2).
+            reap_stale(locked)
+            active = (
+                GenerationJob.objects.select_for_update()
+                .filter(
+                    order=locked,
+                    task_type=GenerationJob.TaskType.FULL,
+                    status__in=[GenerationJob.Status.PENDING, GenerationJob.Status.RUNNING],
+                )
+                .order_by("pk")
+                .first()
+            )
+            if active is not None:
+                if active.status == GenerationJob.Status.PENDING:
+                    raise FullProductionError(QUEUED_MESSAGE.format(job_id=active.pk))
+                raise FullProductionError(ALREADY_RUNNING_MESSAGE)
             slots = self.expected_slots(locked)
             photo_ids = list(
                 locked.photos.exclude(status=OrderPhoto.Status.REJECTED)
@@ -362,25 +378,15 @@ class FullProductionService:
             else:
                 candidates = slots
 
-            new_jobs = []
+            # First pass: which slots need a new attempt (todo) and which are
+            # blocked. Second: budget for the whole remaining pack, then ONE
+            # PENDING job for the first todo slot; the chain continues from
+            # the worker (continue_chain → _prepare again).
+            todo = []
             blocked = []
             for slot in candidates:
                 slot_jobs = jobs_by_slot.get(slot, [])
                 latest = slot_jobs[-1] if slot_jobs else None
-
-                if latest is not None and latest.status == GenerationJob.Status.RUNNING:
-                    # Crashed/killed worker or double submit: the provider
-                    # may already be generating. Fail closed, never blind
-                    # retry — the slot stays blocked until force_retry_slot.
-                    self._mark_ambiguous(
-                        latest, note="superseded by re-entry (stale running job)"
-                    )
-                    if mode == "force":
-                        pass  # operator explicitly verified; proceed below
-                    else:
-                        blocked.append(slot)
-                        continue
-                    latest = slot_jobs[-1]
 
                 if mode == "force":
                     if (
@@ -405,24 +411,37 @@ class FullProductionService:
                     elif mode == "retry":
                         continue  # untouched slots are start() scope, not retry
 
-                if max_slots is not None and len(new_jobs) >= max_slots:
-                    break
-                # Pilot Budget Guard (DRF-2086): inside the order lock, before
-                # the billable attempt exists. Jobs already created by this
-                # call are visible to the counters (same transaction), so a
-                # multi-slot run is checked cumulatively. Raises → the whole
-                # call rolls back → no job, no provider call.
-                BudgetGuard(override=budget_override).enforce(
-                    locked, GenerationJob.TaskType.FULL, slot_key=slot, action=_BUDGET_ACTIONS[mode]
-                )
-                new_jobs.append(
-                    self._create_attempt(
-                        locked, slot, preview, photo_ids,
-                        cost_mode=_COST_MODES[mode],
-                        qc_attempt=self._qc_retry_attempt(locked, slot) if mode == "regenerate" else None,
-                    )
-                )
-            return new_jobs, blocked
+                todo.append(slot)
+
+            if max_slots is not None:
+                todo = todo[:max_slots]
+            if not todo:
+                return [], blocked
+            guard = BudgetGuard(override=budget_override)
+            # Pilot Budget Guard (DRF-2086): inside the order lock, before the
+            # billable attempt exists. The whole remaining chain is checked
+            # upfront (planned=N) so a pack that cannot be afforded never
+            # starts; the first slot is then checked on its own (per-slot
+            # limits) and every later slot again in continue_chain. Raises →
+            # rollback → no job, no provider call.
+            if len(todo) > 1:
+                guard.enforce(locked, GenerationJob.TaskType.FULL, action=_BUDGET_ACTIONS[mode], planned=len(todo))
+            slot = todo[0]
+            guard.enforce(locked, GenerationJob.TaskType.FULL, slot_key=slot, action=_BUDGET_ACTIONS[mode])
+            chain = {
+                "mode": mode,
+                "requested_slots": list(slot_keys or []) if mode in ("regenerate", "force") else None,
+                # slots this request may still produce after this one
+                "remaining": None if max_slots is None else max_slots - 1,
+                "auto_continue": mode != "force" and (max_slots is None or max_slots > 1),
+            }
+            job = self._create_attempt(
+                locked, slot, preview, photo_ids,
+                cost_mode=_COST_MODES[mode],
+                qc_attempt=self._qc_retry_attempt(locked, slot) if mode == "regenerate" else None,
+                chain=chain,
+            )
+            return [job], blocked
 
     @staticmethod
     def _qc_retry_attempt(locked: Order, slot: str):
@@ -438,7 +457,7 @@ class FullProductionService:
 
     def _create_attempt(
         self, locked: Order, slot: str, preview: GeneratedAsset, photo_ids: list,
-        *, cost_mode: str = generation_cost.MODE_INITIAL, qc_attempt=None,
+        *, cost_mode: str = generation_cost.MODE_INITIAL, qc_attempt=None, chain: dict | None = None,
     ) -> GenerationJob:
         # Attempt numbering stays scoped to (order, task_type) like
         # GenerationService: uniq_generation_attempt holds for FULL
@@ -451,10 +470,12 @@ class FullProductionService:
             ).aggregate(max_attempt=Max("attempt"))["max_attempt"]
             or 0
         ) + 1
+        # PENDING = created, not yet picked up; started_at is set by
+        # generation_queue.claim (PENDING → RUNNING) in the worker.
         return GenerationJob.objects.create(
             order=locked,
             task_type=GenerationJob.TaskType.FULL,
-            status=GenerationJob.Status.RUNNING,
+            status=GenerationJob.Status.PENDING,
             attempt=attempt,
             slot_key=slot,
             provider=self.provider.name,
@@ -473,15 +494,64 @@ class FullProductionService:
                     mode=cost_mode,
                     qc_attempt=qc_attempt,
                 ),
+                "queue": {"requested_at": timezone.now().isoformat()},
+                "chain": chain or {"mode": "start", "requested_slots": None, "remaining": 0, "auto_continue": False},
             },
-            started_at=timezone.now(),
         )
 
     def _run_jobs(self, *, jobs) -> None:
-        # One slot's failure must not abort the others; each job records
-        # its own outcome.
+        # At most one job (the chain head); the executor runs it inline or
+        # in the worker, which continues the chain itself.
         for job in jobs:
-            self._run_slot_job(job=job)
+            generation_queue.dispatch(job, service=self)
+
+    # ------------------------------------------------- worker side (C-2)
+
+    def execute_claimed(self, job: GenerationJob) -> GenerationJob | None:
+        """Worker side: ``job`` is a RUNNING (claimed) FULL slot. Calls the
+        provider once, records the outcome, finalizes the order and, after a
+        success, creates + dispatches the next slot of the chain. Returns the
+        next job or None (chain finished or stopped)."""
+        self._run_slot_job(job=job)
+        order = Order.objects.get(pk=job.order_id)
+        self._finalize(order=order)
+        job.refresh_from_db()
+        if job.status != GenerationJob.Status.SUCCEEDED:
+            return None  # any failure (incl. ambiguous) stops the chain
+        return self.continue_chain(order=order, job=job)
+
+    def continue_chain(self, *, order: Order, job: GenerationJob) -> GenerationJob | None:
+        """Next slot of the chain that ``job`` belongs to: the same _prepare()
+        under the order lock (guards, Budget Guard per slot), one PENDING job,
+        dispatched. None when nothing is left, the chain is exhausted
+        (max_slots) or the mode does not chain (force)."""
+        chain = dict((job.input_metadata or {}).get("chain") or {})
+        if not chain.get("auto_continue"):
+            return None
+        remaining = chain.get("remaining")
+        if remaining is not None and remaining <= 0:
+            return None
+        mode = str(chain.get("mode") or "start")
+        try:
+            jobs, _blocked = self._prepare(
+                order=order,
+                allow_entry=False,
+                mode=mode,
+                slot_keys=chain.get("requested_slots"),
+                max_slots=remaining,
+                # the operator's override (if any) applied to the first slot
+                # only; later slots face the plain budget
+                budget_override=None,
+            )
+        except (FullProductionError, Exception) as exc:  # noqa: BLE001 — chain stop is a recorded fact
+            generation_queue.logger.warning(
+                "generation.chain.stopped order=%s after_job=%s reason=%s", order.pk, job.pk, exc
+            )
+            return None
+        if not jobs:
+            return None
+        self._run_jobs(jobs=jobs)
+        return jobs[0]
 
     def _run_slot_job(self, *, job: GenerationJob) -> None:
         try:
@@ -609,8 +679,9 @@ class FullProductionService:
         )
         locked_job.status = GenerationJob.Status.SUCCEEDED
         # Keep provider metadata (model, usage) next to the asset id, as
-        # GenerationService._complete does — pilot metrics read FULL cost here.
-        locked_job.output_metadata = {"asset_id": asset.pk, **(result.metadata or {})}
+        # GenerationService._complete does — pilot metrics read FULL cost here;
+        # the worker facts written at claim (picked_at, …) are preserved.
+        locked_job.output_metadata = {**(locked_job.output_metadata or {}), "asset_id": asset.pk, **(result.metadata or {})}
         generation_cost.apply_success(locked_job, result.metadata)
         locked_job.finished_at = timezone.now()
         locked_job.save(
@@ -626,7 +697,7 @@ class FullProductionService:
         locked_job.status = GenerationJob.Status.FAILED
         locked_job.error = str(exc)[:4000]
         failure = describe_provider_failure(self.provider, exc)
-        locked_job.output_metadata = failure
+        locked_job.output_metadata = {**(locked_job.output_metadata or {}), **failure}
         generation_cost.apply_failure(locked_job, failure)
         locked_job.finished_at = timezone.now()
         locked_job.save(

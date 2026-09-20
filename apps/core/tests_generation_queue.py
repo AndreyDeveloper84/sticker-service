@@ -243,17 +243,6 @@ class ClaimAndRunJobTests(QueueTestCase):
         self.assertEqual(job.output_metadata["failure_class"], "unknown")
         self.assertTrue(job.output_metadata["worker"]["finished_at"])
 
-    def test_run_job_skips_full_tasks_in_c1(self):
-        job = GenerationJob.objects.create(
-            order=self.order, task_type=GenerationJob.TaskType.FULL, status=GenerationJob.Status.PENDING,
-            attempt=1, slot_key="hello", provider="fake",
-        )
-        service = self.service()
-        run_job(job.pk, service=service)
-        job.refresh_from_db()
-        self.assertEqual(job.status, GenerationJob.Status.PENDING)  # not claimed: nothing left RUNNING
-        self.assertEqual(service.provider.requests, [])
-
 
 class DequeueTests(QueueTestCase):
     def _pending(self, minutes_ago=6):

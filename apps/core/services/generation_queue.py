@@ -218,10 +218,7 @@ def run_job(job_id: int, *, service=None) -> None:
     if job is None:
         logger.warning("generation.worker.skip job=%s reason=missing", job_id)
         return
-    if job.task_type not in (GenerationJob.TaskType.PREVIEW, GenerationJob.TaskType.REVISION):
-        # FULL slots join the queue in C-2 (lazy chain); until then they stay
-        # on the synchronous path and never reach this entry. Not claimed, so
-        # nothing is left RUNNING behind.
+    if job.task_type not in (GenerationJob.TaskType.PREVIEW, GenerationJob.TaskType.REVISION, GenerationJob.TaskType.FULL):
         logger.error("generation.worker.skip job=%s reason=unsupported_task task=%s", job_id, job.task_type)
         return
     reap_stale(job.order)
@@ -232,8 +229,16 @@ def run_job(job_id: int, *, service=None) -> None:
     if service is None:
         from apps.core.image_providers import get_image_provider
 
-        service = GenerationService(provider=get_image_provider(job.provider))
+        provider = get_image_provider(job.provider)
+        if job.task_type == GenerationJob.TaskType.FULL:
+            from apps.core.services.full_production import FullProductionService
+
+            service = FullProductionService(provider=provider)
+        else:
+            service = GenerationService(provider=provider)
     try:
+        # GenerationService (preview / revision) or FullProductionService
+        # (FULL slot, continues the lazy chain after a success)
         service.execute_claimed(job)
     finally:
         _stamp_finished(job)

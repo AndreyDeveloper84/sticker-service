@@ -8,6 +8,7 @@ timeouts.
 """
 
 import tempfile
+from datetime import timedelta
 from io import BytesIO
 from pathlib import Path
 
@@ -285,13 +286,16 @@ class FullProductionTestCase(TestCase):
         self.assertEqual(self._full_jobs(order).count(), 4)
         self.assertEqual(self._final_assets(order).count(), 3)
 
-    def test_one_slot_failure_keeps_order_in_pack_generating(self):
+    def test_one_slot_failure_stops_the_chain_and_keeps_order_in_pack_generating(self):
+        # Async C-2 lazy chain: slots run one after another and ANY failed
+        # slot stops the chain (fail closed) — the slots after it are left
+        # pending, never attempted blindly in the same run.
         order, _preview = self._make_order()
         plan = self._service(FakeProvider(fail_slots={"bye"})).start(order=order, max_slots=None)
 
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.PACK_GENERATING)
-        self.assertEqual(self._final_assets(order).count(), 2)
+        self.assertEqual(self._final_assets(order).count(), 1)
         bye_job = self._full_jobs(order).get(slot_key="bye")
         self.assertEqual(bye_job.status, GenerationJob.Status.FAILED)
         self.assertIn("provider error on bye", bye_job.error)
@@ -299,11 +303,21 @@ class FullProductionTestCase(TestCase):
         self.assertEqual(bye.status, "failed")
         self.assertTrue(bye.retryable)  # FakeProvider has no classifier -> "unknown"
         self.assertEqual(
+            [slot.status for slot in plan], ["succeeded", "failed", "pending"]
+        )
+
+        # Plain re-entry continues the pending slots and does NOT retry bye.
+        plan = self._service(FakeProvider(fail_slots={"bye"})).start(order=order, max_slots=None)
+        self.assertEqual(
             [slot.status for slot in plan], ["succeeded", "failed", "succeeded"]
         )
+        self.assertEqual(self._final_assets(order).count(), 2)
+        self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 1)
 
     def test_retry_failed_regenerates_only_the_failed_slot(self):
         order, _preview = self._make_order()
+        self._service(FakeProvider(fail_slots={"bye"})).start(order=order, max_slots=None)
+        # the chain stopped at bye; a plain re-entry finishes the pending slots
         self._service(FakeProvider(fail_slots={"bye"})).start(order=order, max_slots=None)
         kept_assets = {
             asset.slot_key: asset.pk
@@ -399,9 +413,11 @@ class FullProductionTestCase(TestCase):
 
     def test_retry_skips_ambiguous_slots_but_processes_retryable_ones(self):
         order, _preview = self._make_order()
-        self._service(
-            ClassifyingProvider({"bye": "ambiguous", "thanks": "api"})
-        ).start(order=order, max_slots=None)
+        provider = ClassifyingProvider({"bye": "ambiguous", "thanks": "api"})
+        self._service(provider).start(order=order, max_slots=None)
+        # chain stopped at bye (ambiguous); re-entry runs thanks, which fails "api"
+        self._service(provider).start(order=order, max_slots=None)
+        self.assertEqual(self._full_jobs(order).filter(slot_key="thanks").count(), 1)
 
         with self.assertRaises(FullProductionError) as ctx:
             self._service(FakeProvider()).retry_failed(order=order)
@@ -558,9 +574,10 @@ class FullProductionTestCase(TestCase):
 
     # ------------------------------------- F2: no blind billable retry
 
-    def test_stale_running_slot_is_failed_closed_not_blind_retried(self):
+    def test_fresh_running_slot_refuses_reentry_instead_of_burning_it(self):
+        # Async C-2: a RUNNING slot younger than the stale guard means the
+        # worker is on it — a second click is refused, the job is untouched.
         order, preview = self._make_order()
-        # Simulates a worker killed mid-generation (e.g. gunicorn timeout).
         GenerationJob.objects.create(
             order=order,
             task_type=GenerationJob.TaskType.FULL,
@@ -570,6 +587,45 @@ class FullProductionTestCase(TestCase):
             provider="fake",
             input_metadata={"source_preview_id": preview.pk, "slot_key": "bye"},
             started_at=timezone.now(),
+        )
+        provider = FakeProvider()
+        with self.assertRaises(FullProductionError) as ctx:
+            self._service(provider).start(order=order, max_slots=None)
+        self.assertIn("уже выполняется", str(ctx.exception))
+        self.assertEqual(provider.requests, [])
+        self.assertEqual(self._full_jobs(order).count(), 1)
+        self.assertEqual(self._full_jobs(order).get().status, GenerationJob.Status.RUNNING)
+
+    def test_queued_slot_refuses_reentry(self):
+        order, preview = self._make_order()
+        GenerationJob.objects.create(
+            order=order,
+            task_type=GenerationJob.TaskType.FULL,
+            status=GenerationJob.Status.PENDING,
+            attempt=1,
+            slot_key="bye",
+            provider="fake",
+            input_metadata={"source_preview_id": preview.pk, "slot_key": "bye"},
+        )
+        with self.assertRaises(FullProductionError) as ctx:
+            self._service(FakeProvider()).start(order=order, max_slots=None)
+        self.assertIn("в очередь", str(ctx.exception))
+        plan = self._service(FakeProvider()).production_plan(order)
+        self.assertEqual(next(s for s in plan if s.slot_key == "bye").status, "queued")
+
+    def test_stale_running_slot_is_failed_closed_not_blind_retried(self):
+        order, preview = self._make_order()
+        # Simulates a worker killed mid-generation ≥ 15 min ago (OOM, host
+        # restart): reaped as ambiguous before anything else happens.
+        GenerationJob.objects.create(
+            order=order,
+            task_type=GenerationJob.TaskType.FULL,
+            status=GenerationJob.Status.RUNNING,
+            attempt=1,
+            slot_key="bye",
+            provider="fake",
+            input_metadata={"source_preview_id": preview.pk, "slot_key": "bye"},
+            started_at=timezone.now() - timedelta(minutes=16),
         )
         provider = FakeProvider()
         plan = self._service(provider).start(order=order, max_slots=None)
@@ -598,11 +654,16 @@ class FullProductionTestCase(TestCase):
         plan = self._service(FakeProvider()).force_retry_slot(order=order, slot_key="bye")
 
         order.refresh_from_db()
-        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        # force is a single slot, no chain: thanks (never attempted after the
+        # chain stopped at bye) is still pending → not QC yet
+        self.assertEqual(order.status, Order.Status.PACK_GENERATING)
         bye = next(slot for slot in plan if slot.slot_key == "bye")
         self.assertEqual(bye.status, "succeeded")
         self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 2)
         self.assertTrue(self._final_assets(order).filter(slot_key="bye").exists())
+        self._service(FakeProvider()).start(order=order, max_slots=None)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
 
     def test_force_retry_slot_requires_blocked_slot(self):
         order, _preview = self._make_order()
@@ -617,12 +678,27 @@ class FullProductionTestCase(TestCase):
         self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 1)
         self.assertEqual(self._full_jobs(order).filter(slot_key="hello").count(), 1)
 
+    def test_default_start_runs_the_whole_pack_as_one_chain(self):
+        # Async C-2 / D-4: one click = the whole pack, slot after slot.
+        order, _preview = self._make_order()
+        provider = FakeProvider()
+        plan = self._service(provider).start(order=order)
+        self.assertEqual(len(provider.requests), 3)
+        self.assertTrue(all(slot.status == "succeeded" for slot in plan))
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
+        jobs = list(self._full_jobs(order).order_by("attempt"))
+        # chain facts: head created by the request, the rest by continue_chain
+        self.assertEqual([j.input_metadata["chain"]["mode"] for j in jobs], ["start"] * 3)
+        self.assertTrue(all(j.output_metadata["worker"]["picked_at"] for j in jobs))
+        self.assertTrue(all(j.started_at for j in jobs))
+
     def test_max_slots_batches_one_slot_per_call_until_complete(self):
         order, _preview = self._make_order()
         provider = FakeProvider()
         service = self._service(provider)
 
-        plan = service.start(order=order)  # default max_slots=1
+        plan = service.start(order=order, max_slots=1)
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(
             [slot.status for slot in plan], ["succeeded", "pending", "pending"]
@@ -630,13 +706,13 @@ class FullProductionTestCase(TestCase):
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.PACK_GENERATING)
 
-        plan = service.start(order=order)
+        plan = service.start(order=order, max_slots=1)
         self.assertEqual(len(provider.requests), 2)
         self.assertEqual(
             [slot.status for slot in plan], ["succeeded", "succeeded", "pending"]
         )
 
-        plan = service.start(order=order)
+        plan = service.start(order=order, max_slots=1)
         order.refresh_from_db()
         self.assertEqual(order.status, Order.Status.QUALITY_CONTROL)
         self.assertEqual(self._final_assets(order).count(), 3)
