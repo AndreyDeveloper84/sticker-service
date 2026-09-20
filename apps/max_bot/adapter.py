@@ -71,6 +71,9 @@ class MaxAdapter:
     def customer_contact_complete(self, order):
         return self.flow.customer_contact_complete(order)
 
+    def skip_customer_contact(self, *, identity):
+        return self.flow.skip_customer_contact(identity=identity)
+
     def order_summary(self, order):
         return self.flow.order_summary(order)
 

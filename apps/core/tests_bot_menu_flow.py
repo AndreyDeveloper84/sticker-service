@@ -394,6 +394,49 @@ class MenuFlowScenarios:
         self.say(CONTACT)
         self.assertIn("🧾 Ваш заказ", self.last_text())
 
+    # -- optional contact (owner GO 2026-09-20) -------------------------------------
+
+    def test_contact_can_be_skipped_and_the_order_reaches_payment(self):
+        self.go_to_photos("single-sticker")
+        self.photo("a")
+        self.tap("photos_done")
+        self.assertEqual(self.last_text(), CONTACT_PROMPT)
+        self.assertEqual(self.last_payloads(), ["contact:skip", "back:photos", "menu:main"])
+        self.tap("contact:skip")
+        card = self.last_text()
+        self.assertIn("🧾 Ваш заказ", card)
+        self.assertIn("Связь: в этом чате", card)
+        self.assertNotIn("Контакт:", card)
+        order = self.order()
+        self.assertTrue(order.selection.get("contact_skipped"))
+        self.assertNotIn("contact", order.selection)
+        self.assertNotIn("awaiting_input", order.selection)
+        self.to_payment()
+        summary = [t for t in self.texts() if t and t.startswith("Ваш заказ:")][-1]
+        self.assertIn("Связь: в этом чате", summary)
+        order.refresh_from_db()
+        self.assertEqual(order.status, Order.Status.AWAITING_PAYMENT)
+        self.assertTrue(order.consent_accepted)
+        self.assertTrue(self.payment_started())
+
+    def test_contact_text_still_accepted_and_replaces_a_skip(self):
+        self.go_to_photos("sticker-pack-9")
+        self.photo("a")
+        self.tap("photos_done")
+        self.tap("contact:skip")
+        self.assertIn("Связь: в этом чате", self.last_text())
+        self.tap("back:contact")
+        self.assertEqual(self.last_text(), CONTACT_PROMPT)
+        self.say("ab")  # still validated
+        self.assertIn("не короче 3 символов", self.last_text())
+        self.say(CONTACT)
+        card = self.last_text()
+        self.assertIn(f"Контакт: {CONTACT}", card)
+        self.assertNotIn("Связь: в этом чате", card)
+        order = self.order()
+        self.assertEqual(order.selection.get("contact"), CONTACT)
+        self.assertNotIn("contact_skipped", order.selection)
+
     def test_confirm_without_contact_is_refused(self):
         self.go_to_photos("single-sticker")
         self.photo("a")
@@ -456,7 +499,7 @@ class MenuFlowScenarios:
         self.assertNotIn("awaiting_input", self.order().selection)
         self.tap("photos_done")
         self.say(PHRASES_9)
-        self.assertEqual(self.last_payloads(), ["back:phrases", "menu:main"])
+        self.assertEqual(self.last_payloads(), ["contact:skip", "back:phrases", "menu:main"])
         self.tap("back:phrases")
         self.assertIn("9 фраз", self.last_text())
         self.assertEqual(self.order().selection.get("awaiting_input"), "phrases")

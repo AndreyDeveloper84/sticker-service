@@ -7,7 +7,8 @@ payloads back here, so the dialog is identical in both channels.
 
 Dialog (owner contract): main menu → product → style → [emotions for the
 standard products] → photos → [9 phrases for the captioned pack] → name and
-contact → order card → «✅ Подтвердить заказ» → consent → payment.
+contact (optional: «⏭ Пропустить — свяжемся здесь», owner GO 2026-09-20)
+→ order card → «✅ Подтвердить заказ» → consent → payment.
 Every intermediate step carries «⬅️ Назад» and «🏠 Главное меню».
 
 Navigation without losses (owner GO 2026-09-20): the current step is derived
@@ -50,6 +51,9 @@ PAYLOAD_BACK_EMOTIONS = "back:emotions"
 PAYLOAD_BACK_PHOTOS = "back:photos"
 PAYLOAD_BACK_PHRASES = "back:phrases"
 PAYLOAD_BACK_CONTACT = "back:contact"
+PAYLOAD_CONTACT_SKIP = "contact:skip"
+CONTACT_SKIP_LABEL = "⏭ Пропустить — свяжемся здесь"
+CONTACT_IN_CHAT = "Связь: в этом чате"
 PAYLOAD_PHOTOS_DONE = "photos_done"
 PAYLOAD_CONFIRM_ORDER = "order:confirm"
 PAYLOAD_CONTINUE = "order:continue"
@@ -73,7 +77,8 @@ PHRASES_PROMPT = (
 )
 CONTACT_PROMPT = (
     "Оставьте имя и удобный способ связи — @username, телефон или ссылку. "
-    "Например: «Анна, @anna». Мы напишем только по вашему заказу."
+    "Например: «Анна, @anna». Мы напишем только по вашему заказу. "
+    "Можно пропустить — тогда свяжемся здесь, в этом чате."
 )
 PHOTO_SAVED = "Фото сохранено. Отправьте ещё или нажмите «Фото загружены»."
 STEP_PREFIX = "📍 Вы на шаге: {title}."
@@ -233,6 +238,8 @@ def status_text(order: Order | None, summary: dict | None = None) -> str:
         lines.append(f"{label}: {', '.join(summary['emotions'])}")
     if summary and summary.get("contact"):
         lines.append(f"Контакт: {summary['contact']}")
+    elif summary and summary.get("contact_skipped"):
+        lines.append(CONTACT_IN_CHAT)
     if order.status == Order.Status.AWAITING_PHOTOS:
         lines.append(f"Шаг: {STEP_TITLES[current_step(order)]}")
     else:
@@ -322,7 +329,7 @@ def contact_back_payload(order: Order) -> str:
 
 
 def contact_screen(order: Order):
-    return CONTACT_PROMPT, nav_rows(contact_back_payload(order))
+    return CONTACT_PROMPT, [[(CONTACT_SKIP_LABEL, PAYLOAD_CONTACT_SKIP)]] + nav_rows(contact_back_payload(order))
 
 
 def order_card_text(order: Order, summary: dict, *, telegram: bool) -> str:
@@ -339,6 +346,8 @@ def order_card_text(order: Order, summary: dict, *, telegram: bool) -> str:
         lines.append(f"Эмоции: {', '.join(summary['emotions'])}")
     if summary.get("contact"):
         lines.append(f"Контакт: {summary['contact']}")
+    elif summary.get("contact_skipped"):
+        lines.append(CONTACT_IN_CHAT)
     lines.append(f"Цена: {product_price_label(order.product, telegram=telegram)}")
     lines.append("")
     lines.append("Проверьте данные и нажмите «✅ Подтвердить заказ».")
@@ -553,6 +562,9 @@ class OrderStepper:
             self.contact(identity)
         elif payload == PAYLOAD_PHOTOS_DONE:
             self.photos_done(identity)
+        elif payload == PAYLOAD_CONTACT_SKIP:
+            self.adapter.skip_customer_contact(identity=identity)
+            self.card(identity)
         else:
             return False
         return True

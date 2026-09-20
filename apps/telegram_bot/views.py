@@ -13,7 +13,7 @@ from apps.core.customer_hints import (
     REVISION_TEXT_SAVED_TEXT,
     customer_hint,
 )
-from apps.core.bot_menu import PAYLOAD_CONFIRM_ORDER, OrderStepper
+from apps.core.bot_menu import CONTACT_IN_CHAT, PAYLOAD_CONFIRM_ORDER, OrderStepper
 from apps.core.services.media import ALLOWED_IMAGE_MIME_TYPES
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
@@ -212,6 +212,8 @@ def _summary_text(summary, *, price_stars):
         lines.append(f"{label}: {', '.join(summary['emotions'])}")
     if summary.get("contact"):
         lines.append(f"Контакт: {summary['contact']}")
+    elif summary.get("contact_skipped"):
+        lines.append(CONTACT_IN_CHAT)
     if price_stars:
         lines.append(f"Цена: {price_stars} Stars")
     return "\n".join(lines)

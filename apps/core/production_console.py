@@ -22,8 +22,10 @@ from .console_text import (
     PRODUCTION_SLOT_STATES,
     REVISION_CATEGORIES,
     REVISION_STATUSES,
+    chat_contact,
     custom_phrases,
     customer_contact,
+    customer_contact_skipped,
     humanize_error,
     job_error_text,
     label,
@@ -301,6 +303,9 @@ class ProductionOrderAdmin(PilotAnalyticsViews, admin.ModelAdmin):
         contact = customer_contact(order)
         if contact:
             lines.append(format_html("Контакт для связи: <strong>{}</strong>", contact))
+        elif customer_contact_skipped(order):
+            # the customer chose «свяжемся здесь»: the chat is the contact
+            lines.append(format_html("Контакт для связи: в этом чате — <strong>{}</strong>", chat_contact(identity)))
         elif (order.product.config or {}).get("requires_customer_contact"):
             lines.append("Контакт для связи: ещё не указан")
         return lines_html(lines)

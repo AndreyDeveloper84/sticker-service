@@ -296,16 +296,38 @@ class ChannelOrderFlowService:
             raise ChannelFlowError("A valid contact is required")
         selection = dict(order.selection or {})
         selection["contact"] = contact
+        selection.pop("contact_skipped", None)
+        selection.pop("awaiting_input", None)
+        order.selection = selection
+        order.save(update_fields=["selection", "updated_at"])
+        return order
+
+    @transaction.atomic
+    def skip_customer_contact(self, *, identity) -> Order:
+        """«⏭ Пропустить — свяжемся здесь» (owner GO 2026-09-20): the contact
+        step is optional; the chat the order came from is the contact. A
+        text typed later replaces the skip."""
+        order = self.current_photo_order(identity)
+        selection = dict(order.selection or {})
+        selection.pop("contact", None)
+        selection["contact_skipped"] = True
         selection.pop("awaiting_input", None)
         order.selection = selection
         order.save(update_fields=["selection", "updated_at"])
         return order
 
     @staticmethod
+    def customer_contact_skipped(order: Order) -> bool:
+        return bool((order.selection or {}).get("contact_skipped"))
+
+    @staticmethod
     def customer_contact_complete(order: Order) -> bool:
+        """A contact text, or the explicit skip (the chat is the contact);
+        ``requires_customer_contact`` only decides whether the step is shown."""
         if not product_requires_customer_contact(order.product):
             return True
-        return bool(str((order.selection or {}).get("contact") or "").strip())
+        selection = order.selection or {}
+        return bool(str(selection.get("contact") or "").strip()) or bool(selection.get("contact_skipped"))
 
     def order_summary(self, order: Order) -> dict:
         """Channel-agnostic checkout summary; adapters only format it for display."""
@@ -334,6 +356,7 @@ class ChannelOrderFlowService:
             "emotion_codes": codes,
             "emotions": order_custom_phrases(order) if product_requires_custom_phrases(product) else [labels.get(code, code) for code in codes],
             "contact": str((order.selection or {}).get("contact") or ""),
+            "contact_skipped": bool((order.selection or {}).get("contact_skipped")),
             "captioned": product_requires_custom_phrases(product),
             "price_minor": _price("price_minor"),
             "price_stars": _price("price_stars"),
