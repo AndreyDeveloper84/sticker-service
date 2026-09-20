@@ -108,7 +108,11 @@ class OpenAIProxyPoolFailoverTests(SimpleTestCase):
         with _mock.patch("httpx.Client") as httpx_cls, _mock.patch("openai.OpenAI") as openai_cls:
             OpenAIImageProvider._default_client_factory(self.PROXY_A)
         httpx_cls.assert_called_once_with(proxy=self.PROXY_A)
-        openai_cls.assert_called_once_with(http_client=httpx_cls.return_value)
+        openai_cls.assert_called_once()
+        kwargs = openai_cls.call_args.kwargs
+        self.assertIs(kwargs["http_client"], httpx_cls.return_value)
+        self.assertEqual(kwargs["max_retries"], 0)
+        self.assertEqual(kwargs["timeout"].read, 240.0)
 
     def test_direct_factory_no_proxy(self):
         from unittest import mock as _mock
@@ -116,7 +120,11 @@ class OpenAIProxyPoolFailoverTests(SimpleTestCase):
         with _mock.patch("httpx.Client") as httpx_cls, _mock.patch("openai.OpenAI") as openai_cls:
             OpenAIImageProvider._default_client_factory(None)
         httpx_cls.assert_not_called()
-        openai_cls.assert_called_once_with()
+        openai_cls.assert_called_once()
+        kwargs = openai_cls.call_args.kwargs
+        self.assertNotIn("http_client", kwargs)
+        self.assertEqual(kwargs["max_retries"], 0)
+        self.assertEqual(kwargs["timeout"].connect, 10.0)
 
     def test_geo_block_fails_over_to_second_proxy(self):
         pool = self._pool()
