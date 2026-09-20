@@ -70,7 +70,14 @@ from apps.max_bot.client import MaxBotClient
 from apps.max_bot.production_notice import notify_customer_production_started
 from apps.telegram_bot.client import TelegramBotClient
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
-from .services.media_lifecycle import TERMINAL_STATUSES, MediaLifecycleError, MediaLifecycleService, media_items
+from .services.media_lifecycle import (
+    REASON_CODES,
+    TERMINAL_STATUSES,
+    MediaLifecycleError,
+    MediaLifecycleService,
+    media_items,
+    purge_failed,
+)
 
 # Status colour of the list badge: the operator scans for "needs me now".
 STATUS_COLORS = {
@@ -1276,11 +1283,13 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
             )
             return redirect(change_url)
         action_url = reverse("admin:core_order_purge_media", args=[order.pk])
-        reason = " ".join(str(request.POST.get("reason") or "").split()) if request.method == "POST" else ""
-        if request.method != "POST" or not reason:
+        reason = str(request.POST.get("reason") or "").strip() if request.method == "POST" else ""
+        note = str(request.POST.get("note") or "") if request.method == "POST" else ""
+        if request.method != "POST" or reason not in REASON_CODES:
             if request.method == "POST":
-                self.message_user(request, "Укажите причину удаления.", level=messages.ERROR)
+                self.message_user(request, "Выберите причину удаления.", level=messages.ERROR)
             items = media_items(order)
+            failed = sum(1 for item in items if purge_failed(item.obj))
             return self._confirmation(
                 request,
                 order=order,
@@ -1290,27 +1299,40 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
                     f"Будут удалены с диска {len(items)} файл(ов): исходные фото, превью и готовые стикеры заказа, "
                     "контакт клиента будет стёрт. Платежи, генерации со снапшотами стоимости, события и QC-отчёты "
                     "остаются (accounting trail). Удаление необратимо."
+                    + (f" {failed} файл(ов) не удалось удалить в прошлый раз — будет повторная попытка." if failed else "")
                 ),
-                warning="Действие по запросу клиента; выполняется один раз, повторное нажатие ничего не удалит повторно.",
-                reason_input=True,
+                warning="Свободный комментарий попадёт только в журнал событий (обрезается до 120 символов, "
+                        "e-mail / телефон / @username маскируются) — не пишите в него данные клиента.",
+                reason_options=list(REASON_CODES.items()),
                 reason_value=reason,
+                note_value=note,
                 submit_label="Удалить медиа",
             )
         try:
-            result = MediaLifecycleService().purge_order(order, reason=reason, actor_ref=request.user.get_username())
+            result = MediaLifecycleService().purge_order(
+                order, reason=reason, note=note, actor_ref=request.user.get_username(),
+            )
         except MediaLifecycleError as exc:
             self.message_user(request, f"Медиа не удалены: {exc}", level=messages.ERROR)
             return redirect(change_url)
         counts = result["counts"]
-        self.message_user(
-            request,
-            f"Медиа клиента удалены: фото {counts['source_photos']}, превью {counts['previews']}, "
-            f"финалы {counts['finals']} ({result['files']} файл(ов), {result['bytes']} байт)"
+        summary = (
+            f"фото {counts['source_photos']}, превью {counts['previews']}, финалы {counts['finals']} "
+            f"({result['files']} файл(ов), {result['bytes']} байт)"
             + (", контакт стёрт" if result["contact_cleared"] else "")
-            + (f"; ошибок файловой системы: {result['errors']} — см. лог" if result["errors"] else "")
-            + ". Платежи и генерации сохранены.",
-            level=messages.SUCCESS,
         )
+        if result["remaining"]:
+            self.message_user(
+                request,
+                f"Медиа клиента удалены частично: {summary}; осталось {result['remaining']} файл(ов) — "
+                f"ошибка файловой системы ({result['errors']}), см. лог; повторите действие. "
+                "Платежи и генерации сохранены.",
+                level=messages.WARNING,
+            )
+        else:
+            self.message_user(
+                request, f"Медиа клиента удалены: {summary}. Платежи и генерации сохранены.", level=messages.SUCCESS,
+            )
         return redirect(change_url)
 
     def refund_stars_view(self, request, order_id):

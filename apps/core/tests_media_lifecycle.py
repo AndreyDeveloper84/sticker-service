@@ -28,9 +28,15 @@ from apps.core.services.media_lifecycle import (
     KIND_FINAL,
     KIND_PREVIEW,
     KIND_SOURCE,
+    REASON_CUSTOMER_REQUEST,
+    REASON_LEGAL,
     MediaLifecycleError,
     MediaLifecycleService,
+    error_text,
     is_purged,
+    mask_note,
+    media_items,
+    purge_failed,
     retention_policy,
 )
 from apps.core.tests_final_delivery import FinalDeliveryTestCase
@@ -163,20 +169,24 @@ class RetentionPolicyTests(LifecycleFixture):
             service = MediaLifecycleService(storage=self.storage)
             report = service.apply_retention(service.retention_plan())
         self.assertEqual(report, {"orders": 1, "files": 2, "bytes": len(b"final-normalized"), "errors": 0,
+                                  "remaining": 0, "status": "complete",
                                   "counts": {KIND_SOURCE: 0, KIND_PREVIEW: 0, KIND_FINAL: 1}})
         self.assertEqual(self.files_present(), [True, True, False, False], "final + its provider original")
         self.final.refresh_from_db()
         purged = self.final.metadata["purged"]
         self.assertEqual(purged["rule"], "retention")
+        self.assertEqual(purged["attempts"], 1)
+        self.assertNotIn("reason", purged, "free text never lands in the row")
         self.assertTrue(purged["at"])
         self.assertTrue(is_purged(self.final))
         self.assertIn("normalized_from", self.final.metadata, "audit metadata stays")
         event = OrderEvent.objects.get(order=self.order, event_type=OrderEvent.MEDIA_PURGED)
         self.assertEqual(event.actor_kind, OrderEvent.Actor.SYSTEM)
-        self.assertEqual(event.payload, {"rule": "retention", "reason": "retention policy",
+        self.assertEqual(event.payload, {"rule": "retention", "reason": "retention", "reason_note": "",
+                                         "status": "complete",
                                          "counts": {KIND_SOURCE: 0, KIND_PREVIEW: 0, KIND_FINAL: 1},
                                          "files": 2, "bytes": len(b"final-normalized"), "errors": 0,
-                                         "contact_cleared": False})
+                                         "remaining": 0, "contact_cleared": False})
         for pii in ("photo.jpg", "Анна", "anna", "storage_key"):
             self.assertNotIn(pii, str(event.payload))
         self.order.refresh_from_db()
@@ -209,7 +219,12 @@ class RetentionPolicyTests(LifecycleFixture):
 
 class CustomerRequestTests(LifecycleFixture):
     def test_purge_order_deletes_all_media_clears_contact_and_keeps_accounting(self):
-        result = MediaLifecycleService(storage=self.storage).purge_order(self.order, reason="запрос клиента в чате", actor_ref="root")
+        result = MediaLifecycleService(storage=self.storage).purge_order(
+            self.order, reason=REASON_CUSTOMER_REQUEST, note="написала в чате anna@example.com, +7 900 000-00-00",
+            actor_ref="root",
+        )
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["remaining"], 0)
         self.assertEqual(result["counts"], {KIND_SOURCE: 1, KIND_PREVIEW: 1, KIND_FINAL: 1})
         self.assertEqual(result["files"], 4)
         self.assertTrue(result["contact_cleared"])
@@ -220,47 +235,114 @@ class CustomerRequestTests(LifecycleFixture):
         self.assertEqual(self.order.status, Order.Status.DELIVERED)
         self.photo.refresh_from_db()
         self.assertEqual(self.photo.metadata["purged"]["rule"], "customer_request")
-        self.assertEqual(self.photo.metadata["purged"]["reason"], "запрос клиента в чате")
+        self.assertEqual(self.photo.metadata["purged"]["reason_ref"], "customer_request")
+        self.assertNotIn("reason", self.photo.metadata["purged"])
+        self.assertEqual(self.photo.original_filename, "", "the customer's file name goes with the file")
+        self.assertEqual(self.photo.storage_key, self.photo_key, "the key stays: idempotency + audit")
         event = OrderEvent.objects.get(order=self.order, event_type=OrderEvent.MEDIA_PURGED)
         self.assertEqual(event.actor_kind, OrderEvent.Actor.OPERATOR)
         self.assertEqual(event.actor_ref, "root")
         self.assertEqual(event.payload["rule"], "customer_request")
+        self.assertEqual(event.payload["reason"], "customer_request")
+        self.assertEqual(event.payload["reason_note"], "написала в чате ***, ***", "the note is masked, event-only")
+        self.assertEqual(event.payload["status"], "complete")
         self.assertTrue(event.payload["contact_cleared"])
+        for pii in ("anna@", "+7 900", "photo.jpg", "storage_key"):
+            self.assertNotIn(pii, str(event.payload))
         self.assert_accounting_intact()
-        # idempotent: nothing to delete twice, no second event
-        again = MediaLifecycleService(storage=self.storage).purge_order(self.order, reason="повтор", actor_ref="root")
+        # nothing to delete twice: no second event
+        again = MediaLifecycleService(storage=self.storage).purge_order(self.order, reason=REASON_LEGAL, actor_ref="root")
         self.assertEqual(again["files"], 0)
         self.assertEqual(OrderEvent.objects.filter(order=self.order, event_type=OrderEvent.MEDIA_PURGED).count(), 1)
 
     def test_file_system_error_on_one_file_does_not_roll_back_the_others(self):
-        """D's finding on PR #96: PermissionError from unlink() used to escape
-        the atomic purge — files already gone, rows unmarked, no event, a 500
-        in the console. Now the error is logged and counted; the run goes on."""
+        """Owner review of #96: a file that could not be deleted must NEVER be
+        marked purged (it stayed on disk, left every future plan, and the
+        operator was told «удалено»). Now: purge_failed on the row, the object
+        stays in the plan, the run is «partial», the next run retries it."""
         real_delete = self.storage.delete
+        broken = {self.preview_key}
 
         def flaky_delete(key):
-            if key == self.preview_key:
-                raise PermissionError(13, "Permission denied")
+            if key in broken:
+                raise PermissionError(13, "Permission denied", "/srv/media/" + key)
             return real_delete(key)
 
         service = MediaLifecycleService(storage=self.storage)
         with mock.patch.object(self.storage, "delete", side_effect=flaky_delete), \
                 self.assertLogs("apps.core.services.media_lifecycle", "WARNING") as logs:
-            result = service.purge_order(self.order, reason="запрос клиента", actor_ref="root")
+            result = service.purge_order(self.order, reason=REASON_CUSTOMER_REQUEST, actor_ref="root")
+        self.assertEqual(result["status"], "partial")
         self.assertEqual(result["files"], 3)
         self.assertEqual(result["errors"], 1)
-        self.assertEqual(result["counts"], {KIND_SOURCE: 1, KIND_PREVIEW: 1, KIND_FINAL: 1})
+        self.assertEqual(result["remaining"], 1)
+        self.assertEqual(result["counts"], {KIND_SOURCE: 1, KIND_PREVIEW: 0, KIND_FINAL: 1})
         self.assertEqual(self.files_present(), [False, True, False, False])
-        self.assertTrue(any("file delete failed (PermissionError)" in line for line in logs.output))
-        for obj in (self.photo, self.preview, self.final):
+        self.assertTrue(any("file delete failed (PermissionError) — will be retried" in line for line in logs.output))
+        self.preview.refresh_from_db()
+        self.assertFalse(is_purged(self.preview), "a file still on disk is never «purged»")
+        failed = purge_failed(self.preview)
+        self.assertEqual(failed["attempts"], 1)
+        self.assertEqual(failed["last_error"], "PermissionError: Permission denied")
+        self.assertNotIn("/srv", failed["last_error"])
+        self.assertNotIn(self.preview_key, str(failed))
+        self.assertEqual(failed["rule"], "customer_request")
+        self.assertTrue(failed["last_attempt_at"])
+        for obj in (self.photo, self.final):
             obj.refresh_from_db()
-            self.assertTrue(is_purged(obj), f"{obj} is marked even though one unlink failed")
-        event = OrderEvent.objects.get(order=self.order, event_type=OrderEvent.MEDIA_PURGED)
-        self.assertEqual(event.payload["errors"], 1)
-        self.assertEqual(event.payload["files"], 3)
+            self.assertTrue(is_purged(obj))
+        self.assertEqual([i.obj.pk for i in media_items(self.order)], [self.preview.pk], "still in the plan")
+        events = list(OrderEvent.objects.filter(order=self.order, event_type=OrderEvent.MEDIA_PURGED).order_by("pk"))
+        self.assertEqual(len(events), 1)
+        self.assertEqual(events[0].payload["status"], "partial")
+        self.assertEqual(events[0].payload["remaining"], 1)
+        self.assertEqual(events[0].payload["errors"], 1)
         self.order.refresh_from_db()
         self.assertEqual(self.order.selection["contact"], "")
         self.assert_accounting_intact()
+
+        # the retry (file system healed) deletes it → purged with attempts=2, a new complete event
+        broken.clear()
+        result = service.purge_order(self.order, reason=REASON_CUSTOMER_REQUEST, actor_ref="root")
+        self.assertEqual(result["status"], "complete")
+        self.assertEqual(result["files"], 1)
+        self.assertEqual(result["remaining"], 0)
+        self.assertEqual(result["counts"], {KIND_SOURCE: 0, KIND_PREVIEW: 1, KIND_FINAL: 0})
+        self.assertEqual(self.files_present(), [False, False, False, False])
+        self.preview.refresh_from_db()
+        self.assertTrue(is_purged(self.preview))
+        self.assertIsNone(purge_failed(self.preview))
+        self.assertEqual(self.preview.metadata["purged"]["attempts"], 2)
+        self.assertEqual(media_items(self.order), [])
+        events = list(OrderEvent.objects.filter(order=self.order, event_type=OrderEvent.MEDIA_PURGED).order_by("pk"))
+        self.assertEqual([e.payload["status"] for e in events], ["partial", "complete"])
+
+    def test_retention_retries_a_failed_file_on_the_next_run(self):
+        self.age(400)
+        real_delete = self.storage.delete
+        with cfg(MEDIA_RETENTION_ENABLED="true", MEDIA_RETENTION_SOURCE_PHOTOS_DAYS=1), env_off():
+            service = MediaLifecycleService(storage=self.storage)
+            with mock.patch.object(self.storage, "delete", side_effect=OSError(5, "I/O error")):
+                report = service.apply_retention(service.retention_plan())
+            self.assertEqual((report["status"], report["remaining"], report["files"]), ("partial", 1, 0))
+            self.assertTrue(self.storage.exists(self.photo_key))
+            plan = service.retention_plan()
+            self.assertEqual([i.obj.pk for i in plan.items], [self.photo.pk], "planned again")
+            report = service.apply_retention(plan)
+            self.assertEqual((report["status"], report["remaining"], report["files"]), ("complete", 0, 1))
+        self.assertFalse(self.storage.exists(self.photo_key))
+        self.photo.refresh_from_db()
+        self.assertEqual(self.photo.metadata["purged"]["attempts"], 2)
+        self.assertEqual(self.photo.original_filename, "")
+
+    def test_note_masking_and_error_text_carry_no_pii(self):
+        self.assertEqual(mask_note("Анна anna@example.com +7 900 000-00-00 @anna_ivanova"), "Анна *** *** ***")
+        self.assertEqual(len(mask_note("x" * 300)), 120)
+        self.assertEqual(mask_note("  a   b  "), "a b")
+        self.assertEqual(error_text(PermissionError(13, "Permission denied", "D:\\media\\orders\\1\\photo.jpg")),
+                         "PermissionError: Permission denied")
+        self.assertEqual(error_text(OSError("[Errno 13] Permission denied: '/srv/media/orders/1/photo.jpg'")),
+                         "OSError: [Errno 13] Permission denied: <path>")
 
     def test_storage_delete_refuses_empty_keys_directories_and_escapes(self):
         for key in ("", "   ", ".", "orders", f"orders/{self.order.pk}/source", "../outside"):
@@ -273,11 +355,12 @@ class CustomerRequestTests(LifecycleFixture):
         self.assertFalse(self.storage.exists(self.photo_key))
 
     def test_open_orders_and_empty_reasons_are_refused(self):
-        with self.assertRaisesMessage(MediaLifecycleError, "reason is required"):
-            MediaLifecycleService(storage=self.storage).purge_order(self.order, reason="  ", actor_ref="root")
+        for reason in ("", "  ", "запрос клиента в чате"):
+            with self.assertRaisesMessage(MediaLifecycleError, "reason code is required"):
+                MediaLifecycleService(storage=self.storage).purge_order(self.order, reason=reason, actor_ref="root")
         open_order = self.make_order(quantity=1, status=Order.Status.PREVIEW_REVIEW)
         with self.assertRaisesMessage(MediaLifecycleError, "never deleted"):
-            MediaLifecycleService(storage=self.storage).purge_order(open_order, reason="x", actor_ref="root")
+            MediaLifecycleService(storage=self.storage).purge_order(open_order, reason=REASON_LEGAL, actor_ref="root")
         self.assertEqual(self.files_present(), [True, True, True, True])
 
 
@@ -304,28 +387,68 @@ class ConsoleActionTests(LifecycleFixture):
         with override_settings(MEDIA_ROOT=self.storage.root):
             page = self.client.get(self.url)
             self.assertContains(page, "Будут удалены с диска 3 файл(ов)")
-            self.assertContains(page, 'name="reason"')
-            response = self.client.post(self.url, {"reason": " "})
-            self.assertContains(response, "Укажите причину удаления.")
+            self.assertContains(page, '<select id="reason" name="reason" required>')
+            self.assertContains(page, '<option value="customer_request">запрос клиента</option>')
+            self.assertContains(page, 'name="note"')
+            for bad in (" ", "клиент попросил удалить фото"):
+                response = self.client.post(self.url, {"reason": bad})
+                self.assertContains(response, "Выберите причину удаления.")
             self.assertEqual(self.files_present(), [True, True, True, True])
-            response = self.client.post(self.url, {"reason": "клиент попросил удалить фото"}, follow=True)
+            response = self.client.post(self.url, {"reason": "customer_request", "note": "написала @anna_ivanova"}, follow=True)
         self.assertContains(response, "Медиа клиента удалены: фото 1, превью 1, финалы 1 (4 файл(ов)")
         self.assertContains(response, "контакт стёрт")
+        self.assertNotContains(response, "частично")
         self.assertEqual(self.files_present(), [False, False, False, False])
         self.assert_accounting_intact()
         event = OrderEvent.objects.get(order=self.order, event_type=OrderEvent.MEDIA_PURGED)
         self.assertEqual(event.actor_ref, "root")
+        self.assertEqual(event.payload["reason_note"], "написала ***")
+
+    def test_partial_purge_is_a_warning_and_the_retry_completes_it(self):
+        self.client.force_login(self.superuser)
+        real_delete = self.storage.delete
+        broken = {self.final.storage_key}
+
+        def flaky_delete(key):
+            if key in broken:
+                raise PermissionError(13, "Permission denied")
+            return real_delete(key)
+
+        with override_settings(MEDIA_ROOT=self.storage.root), \
+                mock.patch("apps.core.production_console.MediaLifecycleService",
+                           return_value=MediaLifecycleService(storage=self.storage)), \
+                mock.patch.object(self.storage, "delete", side_effect=flaky_delete):
+            response = self.client.post(self.url, {"reason": "customer_request"}, follow=True)
+            self.assertContains(response, "Медиа клиента удалены частично")
+            self.assertContains(response, "осталось 1 файл(ов)")
+            self.assertContains(response, "повторите действие")
+            self.assertNotContains(response, "Медиа клиента удалены:")
+            self.assertContains(response, "Удалить медиа клиента…")  # the action stays offered
+            self.assertContains(response, "1 файл(ов)")  # 1 remaining in the explanation
+            page = self.client.get(self.url)
+            self.assertContains(page, "1 файл(ов) не удалось удалить в прошлый раз — будет повторная попытка")
+        self.assertTrue(self.storage.exists(self.final.storage_key))
+        self.final.refresh_from_db()
+        self.assertFalse(is_purged(self.final))
+        with override_settings(MEDIA_ROOT=self.storage.root), \
+                mock.patch("apps.core.production_console.MediaLifecycleService",
+                           return_value=MediaLifecycleService(storage=self.storage)):
+            response = self.client.post(self.url, {"reason": "customer_request"}, follow=True)
+        self.assertContains(response, "Медиа клиента удалены: фото 0, превью 0, финалы 1 (1 файл(ов)")  # the original went in run 1
+        self.assertEqual(self.files_present(), [False, False, False, False])
+        statuses = [e.payload["status"] for e in OrderEvent.objects.filter(order=self.order, event_type=OrderEvent.MEDIA_PURGED).order_by("pk")]
+        self.assertEqual(statuses, ["partial", "complete"])
 
     def test_staff_without_superuser_is_refused(self):
         self.client.force_login(self.staff)
-        response = self.client.post(self.url, {"reason": "x"}, follow=True)
+        response = self.client.post(self.url, {"reason": "customer_request"}, follow=True)
         self.assertContains(response, "только суперпользователь")
         self.assertEqual(self.files_present(), [True, True, True, True])
 
     def test_open_order_is_refused_in_the_console(self):
         self.client.force_login(self.superuser)
         open_order = self.make_order(quantity=1, status=Order.Status.PAID)
-        response = self.client.post(reverse("admin:core_order_purge_media", args=[open_order.pk]), {"reason": "x"}, follow=True)
+        response = self.client.post(reverse("admin:core_order_purge_media", args=[open_order.pk]), {"reason": "customer_request"}, follow=True)
         self.assertContains(response, "только у завершённых заказов")
 
 

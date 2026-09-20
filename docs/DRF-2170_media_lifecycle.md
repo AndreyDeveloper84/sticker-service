@@ -33,9 +33,11 @@ MEDIA_RETENTION_FINALS_DAYS=             # owner decision; пусто = хран
 - отсчёт — от момента, когда заказ стал **терминальным** (последний `order.status_changed` в DELIVERED / FAILED / CANCELLED; без события — `updated_at`);
 - удаляются **только** медиа терминальных заказов; незавершённые не трогаются никогда;
 - `Payment` / `GenerationJob` (со снапшотом стоимости) / `OrderEvent` / `QcReport` / `FinalDelivery` не удаляются;
-- в `OrderPhoto.metadata` / `GeneratedAsset.metadata` остаётся `purged = {at, rule, reason, size_bytes, actor_ref}` — «файл удалён <когда> <по правилу>»; файл на диске удаляется (для финала — и provider-оригинал);
+- в `OrderPhoto.metadata` / `GeneratedAsset.metadata` остаётся `purged = {at, rule, reason_ref, attempts, size_bytes, actor_ref}` — «файл удалён <когда> <по правилу>»; файл на диске удаляется (для финала — и provider-оригинал); у `OrderPhoto` после успешного удаления стирается `original_filename` (имя файла клиента — не accounting);
+- **файл, который не удалось удалить (ошибка ФС), никогда не помечается `purged`**: строка получает `purge_failed = {attempts, last_error («Класс: сообщение» без путей/PII, ≤200), last_attempt_at, rule, reason_ref}`, остаётся в `media_items()` / следующем плане retention и повторяется следующим запуском (команда или консоль); успех → `purged` (с `attempts`), `purge_failed` снимается;
 - невалидное/отрицательное значение срока → вид хранится (warning в лог), никакого срока по умолчанию;
-- на каждый заказ — одно событие `OrderEvent media.purged` `{rule, reason, counts{source_photos, previews, finals}, files, bytes, contact_cleared}` — без имён файлов и контактов.
+- на каждый запуск по заказу — событие `OrderEvent media.purged` `{rule, reason (код), reason_note (маскированный текст), status: complete|partial, counts{source_photos, previews, finals}, files, errors, remaining, bytes, contact_cleared}` — без имён файлов и контактов; при повторной попытке — новое событие (нужна истина, не at-most-once).
+- отчёт оператору/команде — «успех» только когда все файлы удалены; иначе «частично: осталось N файлов, повторите» (консоль — WARNING).
 
 ## 3. Команда
 
@@ -47,11 +49,20 @@ manage.py media_retention --apply    # удаляет по плану; отка�
 
 ## 4. Запрос клиента на удаление
 
-`MediaLifecycleService.purge_order(order, reason=…, actor_ref=…)` и консольное действие **«Удалить медиа клиента…»**
-(блок «Дополнительно» карточки заказа; только суперпользователь; обязательная причина; только терминальные заказы):
-удаляет фото / превью / финалы (+ оригиналы) сразу, независимо от возраста, стирает `selection.contact`; accounting
-остаётся; событие `media.purged` с `rule=customer_request`. Идемпотентно: повторное действие ничего не удаляет повторно
-и не пишет второе событие.
+`MediaLifecycleService.purge_order(order, reason=<код>, note=…, actor_ref=…)` и консольное действие **«Удалить медиа
+клиента…»** (блок «Дополнительно» карточки заказа; только суперпользователь; только терминальные заказы): причина —
+из фиксированного словаря (`customer_request` / `legal` / `operator_other`), свободный комментарий необязателен,
+обрезается до 120 символов, e-mail / телефон / @username маскируются `***` и хранится **только в событии**, не в
+metadata. Удаляет фото / превью / финалы (+ оригиналы) сразу, независимо от возраста, стирает `selection.contact`;
+accounting остаётся; событие `media.purged` с `rule=customer_request`. Уже удалённые объекты пропускаются; объекты с
+`purge_failed` повторяются; пока остаются файлы — статус `partial` и предупреждение оператору.
+
+### Что остаётся в БД после удаления и почему
+- `OrderPhoto` / `GeneratedAsset` строки с `storage_key` — идемпотентность (по ключу видно, что удалять больше нечего),
+  аудит размеров/форматов (`normalized_from`, `size_bytes`) и связь с `GenerationJob` (accounting); сам ключ — путь
+  вида `orders/<id>/source/<uuid>.jpg`, без имени клиента;
+- `original_filename` у `OrderPhoto` — **стирается** при успешном удалении (реализовано; owner decision — оставить так);
+- `actor_ref` в событии/metadata — username **оператора**, не клиента.
 
 ## 5. Owner decisions (не решены в коде)
 
@@ -60,3 +71,5 @@ manage.py media_retention --apply    # удаляет по плану; отка�
 3. Шаблон ответа клиенту на запрос удаления (что сообщаем: удалены фото/превью/стикеры и контакт; платёжные данные
    хранятся по требованиям учёта; идентификатор чата остаётся для связи по заказу).
 4. Судьба `ChannelIdentity` (id/username) после удаления медиа — сейчас сохраняется.
+5. Очищать ли `original_filename` при purge — реализовано как «да» (стирается после успешного удаления файла);
+   подтвердить или отменить.

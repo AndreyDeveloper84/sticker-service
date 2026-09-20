@@ -5,8 +5,19 @@ What is deleted and when — and what never is:
 - media: ``OrderPhoto`` source files, ``GeneratedAsset`` previews and finals
   (plus the provider original a QC normalization kept under
   ``metadata["normalized_from"]["storage_key"]``); the file leaves the
-  disk, the row stays with ``metadata["purged"] = {at, rule, reason,
-  size_bytes}`` — «файл удалён <когда> <по правилу>»;
+  disk, the row stays with ``metadata["purged"] = {at, rule, attempts,
+  size_bytes, actor_ref}`` — «файл удалён <когда> <по правилу>» — and an
+  OrderPhoto loses its ``original_filename``. A file that could NOT be
+  deleted (file system error) is never marked purged: the row gets
+  ``metadata["purge_failed"] = {attempts, last_error, last_attempt_at, rule,
+  reason_ref}``, stays in every future plan and is retried by the next
+  run; the operator is told «частично: осталось N файлов»;
+- PII in the trail: the reason is a code from a fixed vocabulary
+  (customer_request / legal / operator_other / retention); a free-text
+  note is truncated to 120 characters, e-mails / phones / @usernames are
+  masked, and it lives in the ``media.purged`` event only — never in the
+  row metadata. ``actor_ref`` is the OPERATOR's username (never the
+  customer's);
 - contact: ``Order.selection["contact"]`` is cleared on a customer request
   (``contact_purged_at`` is written instead);
 - never: Payment, GenerationJob (with its cost snapshot), OrderEvent,
@@ -33,6 +44,7 @@ and bytes — no file names, no contact, no PII.
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import timedelta
 
@@ -47,6 +59,7 @@ logger = logging.getLogger(__name__)
 
 MEDIA_PURGED = OrderEvent.MEDIA_PURGED
 PURGED_KEY = "purged"
+PURGE_FAILED_KEY = "purge_failed"
 TERMINAL_STATUSES = (Order.Status.DELIVERED, Order.Status.FAILED, Order.Status.CANCELLED)
 
 KIND_SOURCE = "source_photos"
@@ -61,9 +74,44 @@ RETENTION_SETTINGS = {
 RULE_RETENTION = "retention"
 RULE_CUSTOMER_REQUEST = "customer_request"
 
+# Fixed vocabulary of reasons (what is stored); the free text is a note.
+REASON_CUSTOMER_REQUEST = "customer_request"
+REASON_LEGAL = "legal"
+REASON_OPERATOR_OTHER = "operator_other"
+REASON_RETENTION = "retention"
+REASON_CODES = {
+    REASON_CUSTOMER_REQUEST: "запрос клиента",
+    REASON_LEGAL: "юридическое требование",
+    REASON_OPERATOR_OTHER: "другое (оператор)",
+}
+NOTE_MAX_LENGTH = 120
+_PII_PATTERNS = (
+    re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+"),  # e-mail
+    re.compile(r"(?<![\w@])@[\w]{3,}"),  # @username
+    re.compile(r"\+?\d[\d\s().-]{6,}\d"),  # phone-like digit runs
+)
+STATUS_COMPLETE = "complete"
+STATUS_PARTIAL = "partial"
+
 
 class MediaLifecycleError(ValueError):
     pass
+
+
+def mask_note(note: str) -> str:
+    """Free text for the event only: ≤ 120 characters, e-mails / phones /
+    @usernames replaced by «***»."""
+    text = " ".join(str(note or "").split())[:NOTE_MAX_LENGTH]
+    for pattern in _PII_PATTERNS:
+        text = pattern.sub("***", text)
+    return text
+
+
+def error_text(exc: Exception) -> str:
+    """«<ExceptionClass>: <message>» with any path-like token dropped, ≤ 200."""
+    message = str(getattr(exc, "strerror", "") or exc)
+    message = re.sub(r"['\"]?(?:[A-Za-z]:)?[\\/][^\s'\"]*['\"]?", "<path>", message)
+    return f"{type(exc).__name__}: {message}"[:200]
 
 
 # ------------------------------------------------------------- config
@@ -112,6 +160,10 @@ def closed_at(order: Order):
 
 def is_purged(obj) -> bool:
     return bool((obj.metadata or {}).get(PURGED_KEY))
+
+
+def purge_failed(obj) -> dict | None:
+    return (obj.metadata or {}).get(PURGE_FAILED_KEY) or None
 
 
 @dataclass
@@ -199,39 +251,42 @@ class MediaLifecycleService:
     def apply_retention(self, plan: PurgePlan, *, actor_ref: str = "media_retention") -> dict:
         if not retention_enabled():
             raise MediaLifecycleError("MEDIA_RETENTION_ENABLED is not true — nothing was deleted")
-        report = {"orders": 0, "files": 0, "bytes": 0, "errors": 0, "counts": {kind: 0 for kind in KINDS}}
+        report = {"orders": 0, "files": 0, "bytes": 0, "errors": 0, "remaining": 0,
+                  "counts": {kind: 0 for kind in KINDS}}
         for order in plan.orders:
             items = [item for item in plan.items if item.order.pk == order.pk]
-            result = self._purge(order, items, rule=RULE_RETENTION, reason="retention policy", actor_ref=actor_ref,
-                                 clear_contact=False)
+            result = self._purge(order, items, rule=RULE_RETENTION, reason=REASON_RETENTION, note="",
+                                 actor_ref=actor_ref, clear_contact=False)
             report["orders"] += 1
-            report["files"] += result["files"]
-            report["bytes"] += result["bytes"]
-            report["errors"] += result["errors"]
+            for key in ("files", "bytes", "errors", "remaining"):
+                report[key] += result[key]
             for kind in KINDS:
                 report["counts"][kind] += result["counts"][kind]
+        report["status"] = STATUS_COMPLETE if not report["remaining"] else STATUS_PARTIAL
         return report
 
     # -- customer request --
 
-    def purge_order(self, order: Order, *, reason: str, actor_ref: str) -> dict:
+    def purge_order(self, order: Order, *, reason: str, actor_ref: str, note: str = "") -> dict:
         """Delete every media of a terminal order now and clear the contact;
-        the accounting trail stays. Idempotent: already purged objects are
-        skipped, the event is written for what was deleted this time."""
-        reason = " ".join(str(reason or "").split())
-        if not reason:
-            raise MediaLifecycleError("A reason is required")
+        the accounting trail stays. ``reason`` is a REASON_CODES key; ``note``
+        is free text kept (masked, truncated) in the event only. Objects
+        already purged are skipped; a file that failed before is retried —
+        every run tells the truth: complete or «partial: N remaining»."""
+        reason = str(reason or "").strip()
+        if reason not in REASON_CODES:
+            raise MediaLifecycleError(f"A reason code is required: {', '.join(REASON_CODES)}")
         if order.status not in TERMINAL_STATUSES:
             raise MediaLifecycleError(
                 f"Order #{order.pk} is not terminal ({order.status}) — media of an open order is never deleted"
             )
-        return self._purge(order, media_items(order), rule=RULE_CUSTOMER_REQUEST, reason=reason,
+        return self._purge(order, media_items(order), rule=RULE_CUSTOMER_REQUEST, reason=reason, note=note,
                            actor_ref=actor_ref, clear_contact=True)
 
     # -- internals --
 
     @transaction.atomic
-    def _purge(self, order: Order, items: list[PurgeItem], *, rule: str, reason: str, actor_ref: str,
+    def _purge(self, order: Order, items: list[PurgeItem], *, rule: str, reason: str, note: str, actor_ref: str,
                clear_contact: bool) -> dict:
         locked = Order.objects.select_for_update().get(pk=order.pk)
         if locked.status not in TERMINAL_STATUSES:
@@ -240,23 +295,43 @@ class MediaLifecycleService:
         counts = {kind: 0 for kind in KINDS}
         files = 0
         errors = 0
+        remaining = 0
         total = 0
         for item in items:
             obj = type(item.obj).objects.select_for_update().get(pk=item.obj.pk)
             if is_purged(obj):
                 continue
+            metadata = dict(obj.metadata or {})
+            previous = metadata.get(PURGE_FAILED_KEY) or {}
+            attempts = int(previous.get("attempts") or 0) + 1
+            failure = ""
             for key in item.storage_keys:
-                deleted = self._delete_file(key)
-                if deleted is None:
-                    errors += 1  # a file system error: the row is still marked, the run goes on
+                deleted, error = self._delete_file(key)
+                if error:
+                    errors += 1
+                    failure = failure or error
                 elif deleted:
                     files += 1
-            obj.metadata = {
-                **(obj.metadata or {}),
-                PURGED_KEY: {"at": moment.isoformat(), "rule": rule, "reason": reason,
-                             "size_bytes": item.size_bytes, "actor_ref": actor_ref},
-            }
-            obj.save(update_fields=["metadata", "updated_at"])
+            if failure:
+                # the file is still on disk: NOT purged — the object stays in
+                # every future plan and the next run retries it
+                remaining += 1
+                metadata[PURGE_FAILED_KEY] = {"attempts": attempts, "last_error": failure,
+                                              "last_attempt_at": moment.isoformat(), "rule": rule,
+                                              "reason_ref": reason}
+                obj.metadata = metadata
+                obj.save(update_fields=["metadata", "updated_at"])
+                continue
+            metadata.pop(PURGE_FAILED_KEY, None)
+            metadata[PURGED_KEY] = {"at": moment.isoformat(), "rule": rule, "reason_ref": reason,
+                                    "attempts": attempts, "size_bytes": item.size_bytes,
+                                    "actor_ref": str(actor_ref or "")}
+            obj.metadata = metadata
+            update_fields = ["metadata", "updated_at"]
+            if isinstance(obj, OrderPhoto) and obj.original_filename:
+                obj.original_filename = ""  # the customer's file name is not accounting
+                update_fields.append("original_filename")
+            obj.save(update_fields=update_fields)
             counts[item.kind] += 1
             total += item.size_bytes
         contact_cleared = False
@@ -268,28 +343,32 @@ class MediaLifecycleService:
                 locked.selection = selection
                 locked.save(update_fields=["selection", "updated_at"])
                 contact_cleared = True
-        if sum(counts.values()) or contact_cleared:
+        status = STATUS_COMPLETE if not remaining else STATUS_PARTIAL
+        if sum(counts.values()) or remaining or contact_cleared:
             OrderEvent.objects.create(
                 order=locked,
                 event_type=MEDIA_PURGED,
                 actor_kind=OrderEvent.Actor.OPERATOR if rule == RULE_CUSTOMER_REQUEST else OrderEvent.Actor.SYSTEM,
                 actor_ref=str(actor_ref or ""),
-                payload={"rule": rule, "reason": reason, "counts": counts, "files": files, "bytes": total,
-                         "errors": errors, "contact_cleared": contact_cleared},
+                payload={"rule": rule, "reason": reason, "reason_note": mask_note(note), "status": status,
+                         "counts": counts, "files": files, "bytes": total, "errors": errors,
+                         "remaining": remaining, "contact_cleared": contact_cleared},
             )
-        logger.info("media_lifecycle.purged order=%s rule=%s files=%s errors=%s bytes=%s",
-                    order.pk, rule, files, errors, total)
-        return {"counts": counts, "files": files, "bytes": total, "errors": errors, "contact_cleared": contact_cleared}
+        logger.info("media_lifecycle.purged order=%s rule=%s status=%s files=%s errors=%s remaining=%s bytes=%s",
+                    order.pk, rule, status, files, errors, remaining, total)
+        return {"status": status, "counts": counts, "files": files, "bytes": total, "errors": errors,
+                "remaining": remaining, "contact_cleared": contact_cleared}
 
-    def _delete_file(self, key: str) -> bool | None:
-        """True: deleted; False: was not there / invalid key; None: a file
-        system error (logged, counted as ``errors``) — never an exception,
-        so one bad file cannot roll back the marks of the others."""
+    def _delete_file(self, key: str) -> tuple[bool, str]:
+        """(deleted, error): (True, "") deleted; (False, "") was not there or
+        an invalid key; (False, "<Class: message>") a file system error —
+        logged, never raised, so one bad file cannot roll back the others,
+        and never a purged mark for a file that is still on disk."""
         try:
-            return self.storage.delete(key)
+            return self.storage.delete(key), ""
         except ValueError:
             logger.warning("media_lifecycle: invalid storage key skipped")
-            return False
+            return False, ""
         except OSError as exc:
-            logger.warning("media_lifecycle: file delete failed (%s) — counted as an error", type(exc).__name__)
-            return None
+            logger.warning("media_lifecycle: file delete failed (%s) — will be retried", type(exc).__name__)
+            return False, error_text(exc)
