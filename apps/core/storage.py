@@ -30,3 +30,11 @@ class LocalMediaStorage:
 
     def exists(self, key):
         return self._path(key).exists()
+
+    def delete(self, key) -> bool:
+        """Remove the file; True when it existed (DRF-2170 media lifecycle)."""
+        path = self._path(key)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True

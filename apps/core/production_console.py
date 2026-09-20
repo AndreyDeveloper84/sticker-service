@@ -70,6 +70,7 @@ from apps.max_bot.client import MaxBotClient
 from apps.max_bot.production_notice import notify_customer_production_started
 from apps.telegram_bot.client import TelegramBotClient
 from apps.telegram_bot.payments import TelegramPaymentError, TelegramStarsPaymentAdapter
+from .services.media_lifecycle import TERMINAL_STATUSES, MediaLifecycleError, MediaLifecycleService, media_items
 
 # Status colour of the list badge: the operator scans for "needs me now".
 STATUS_COLORS = {
@@ -671,6 +672,20 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
         """(label, url, explanation) triples; console layers extend this."""
         links = []
         status = order.status
+        if status in TERMINAL_STATUSES:
+            remaining = len(media_items(order))
+            links.append(
+                (
+                    "Удалить медиа клиента…",
+                    reverse("admin:core_order_purge_media", args=[order.pk]),
+                    (
+                        f"По запросу клиента (DRF-2170): фото, превью и финалы ({remaining} файл(ов)) удаляются с диска, "
+                        "контакт стирается; платежи, генерации и события остаются. Только суперпользователь, с причиной."
+                        if remaining else
+                        "По запросу клиента (DRF-2170): медиа уже удалены; действие сотрёт контакт, если он ещё есть."
+                    ),
+                )
+            )
         if status == Order.Status.INTERNAL_PREVIEW_REVIEW:
             links.append(
                 (
@@ -1120,6 +1135,11 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
                 name="core_order_refund_stars",
             ),
             path(
+                "<int:order_id>/purge-media/",
+                self.admin_site.admin_view(self.purge_media_view),
+                name="core_order_purge_media",
+            ),
+            path(
                 "<int:order_id>/regenerate-preview/",
                 self.admin_site.admin_view(self.regenerate_preview_view),
                 name="core_order_regenerate_preview",
@@ -1237,6 +1257,59 @@ class ProductionOrderAdmin(AttentionViews, PilotAnalyticsViews, admin.ModelAdmin
             .order_by("-confirmed_at", "-pk")
             .first()
         )
+
+    def purge_media_view(self, request, order_id):
+        """«Удалить медиа клиента…» (DRF-2170): a customer's deletion request —
+        superuser only, mandatory reason, terminal orders only; the
+        accounting trail stays."""
+        order = self.get_object(request, str(order_id))
+        if order is None:
+            raise Http404
+        change_url = reverse("admin:core_order_change", args=[order.pk])
+        if not request.user.is_superuser:
+            self.message_user(request, "Удалить медиа клиента может только суперпользователь.", level=messages.ERROR)
+            return redirect(change_url)
+        if order.status not in TERMINAL_STATUSES:
+            self.message_user(
+                request, "Медиа удаляются только у завершённых заказов (доставлен / ошибка / отменён).",
+                level=messages.ERROR,
+            )
+            return redirect(change_url)
+        action_url = reverse("admin:core_order_purge_media", args=[order.pk])
+        reason = " ".join(str(request.POST.get("reason") or "").split()) if request.method == "POST" else ""
+        if request.method != "POST" or not reason:
+            if request.method == "POST":
+                self.message_user(request, "Укажите причину удаления.", level=messages.ERROR)
+            items = media_items(order)
+            return self._confirmation(
+                request,
+                order=order,
+                title="Удалить медиа клиента",
+                action_url=action_url,
+                detail=(
+                    f"Будут удалены с диска {len(items)} файл(ов): исходные фото, превью и готовые стикеры заказа, "
+                    "контакт клиента будет стёрт. Платежи, генерации со снапшотами стоимости, события и QC-отчёты "
+                    "остаются (accounting trail). Удаление необратимо."
+                ),
+                warning="Действие по запросу клиента; выполняется один раз, повторное нажатие ничего не удалит повторно.",
+                reason_input=True,
+                reason_value=reason,
+                submit_label="Удалить медиа",
+            )
+        try:
+            result = MediaLifecycleService().purge_order(order, reason=reason, actor_ref=request.user.get_username())
+        except MediaLifecycleError as exc:
+            self.message_user(request, f"Медиа не удалены: {exc}", level=messages.ERROR)
+            return redirect(change_url)
+        counts = result["counts"]
+        self.message_user(
+            request,
+            f"Медиа клиента удалены: фото {counts['source_photos']}, превью {counts['previews']}, "
+            f"финалы {counts['finals']} ({result['files']} файл(ов), {result['bytes']} байт)"
+            + (", контакт стёрт" if result["contact_cleared"] else "") + ". Платежи и генерации сохранены.",
+            level=messages.SUCCESS,
+        )
+        return redirect(change_url)
 
     def refund_stars_view(self, request, order_id):
         """«Вернуть звёзды»: refundStarPayment for the confirmed Telegram
