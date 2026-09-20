@@ -21,10 +21,14 @@ and measures:
   whole frame and on the central 60 % (where the face usually is); the
   larger of the two must reach the threshold. Calibrated on synthetic
   portraits: sharp ≈ 400–1000, JPEG q70 unchanged, Gaussian r=2 ≈ 120,
-  r=3 ≈ 25, r≥4 < 10, flat colour = 0. 30 rejects only clearly blurred
-  frames; the measured values are stored in OrderPhoto.metadata so the
-  threshold can be tuned on live evidence (no real photos were available
-  offline — treat the default as provisional).
+  r=3 ≈ 25, r≥4 < 10, flat colour = 0. The threshold was calibrated on
+  synthetic portraits only (no real photos offline), so it is NOT enforced
+  by default: PHOTO_BLUR_MODE=observe (default) accepts the photo, stores
+  the metric in OrderPhoto.metadata and logs ``photo_gate.blur_observed``
+  when it falls below the threshold; PHOTO_BLUR_MODE=enforce rejects.
+  Decision rule: after >= 20 live photos, pick the threshold from
+  metadata.gate.blur_variance* and switch to enforce. Decode, min side,
+  aspect and the bomb guard are always enforced.
 
 Face count is NOT implemented: there is no light-weight face detector in
 Pillow, and OpenCV / mediapipe are heavy dependencies the pilot does not
@@ -79,11 +83,21 @@ def gate_enabled() -> bool:
     return bool(_setting("PHOTO_GATE_ENABLED", True))
 
 
+BLUR_MODE_OBSERVE = "observe"
+BLUR_MODE_ENFORCE = "enforce"
+
+
+def blur_mode() -> str:
+    mode = str(_setting("PHOTO_BLUR_MODE", BLUR_MODE_OBSERVE)).strip().lower()
+    return BLUR_MODE_ENFORCE if mode == BLUR_MODE_ENFORCE else BLUR_MODE_OBSERVE
+
+
 def thresholds() -> dict:
     return {
         "min_side": int(_setting("PHOTO_MIN_SIDE", 512)),
         "max_aspect": float(_setting("PHOTO_MAX_ASPECT", 2.5)),
         "blur_min_variance": float(_setting("PHOTO_BLUR_MIN_VARIANCE", 30.0)),
+        "blur_mode": blur_mode(),
     }
 
 
@@ -168,7 +182,14 @@ def inspect_photo(content: bytes) -> dict:
     whole, center = blur_metrics(image)
     metrics.update({"blur_variance": whole, "blur_variance_center": center})
     if max(whole, center) < limits["blur_min_variance"]:
-        raise PhotoRejected("Photo is too blurry", HINT_BLURRY, metrics)
+        if limits["blur_mode"] == BLUR_MODE_ENFORCE:
+            raise PhotoRejected("Photo is too blurry", HINT_BLURRY, metrics)
+        # observe: accept, keep the evidence, make the miss visible
+        metrics["blur_below_threshold"] = True
+        logger.warning(
+            "photo_gate.blur_observed variance=%s center=%s threshold=%s size=%sx%s",
+            whole, center, limits["blur_min_variance"], width, height,
+        )
 
     metrics["checked_at"] = timezone.now().isoformat()
     return metrics

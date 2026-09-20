@@ -66,7 +66,11 @@ class InspectPhotoTests(SimpleTestCase):
         self.assertEqual(metrics["min_side"], 1200)
         self.assertEqual(metrics["aspect"], 1.33)
         self.assertGreater(metrics["blur_variance_center"], 100)
-        self.assertEqual(metrics["thresholds"], {"min_side": 512, "max_aspect": 2.5, "blur_min_variance": 30.0})
+        self.assertEqual(
+            metrics["thresholds"],
+            {"min_side": 512, "max_aspect": 2.5, "blur_min_variance": 30.0, "blur_mode": "observe"},
+        )
+        self.assertNotIn("blur_below_threshold", metrics)
         self.assertIn("checked_at", metrics)
 
     def test_png_and_webp_pass(self):
@@ -116,7 +120,22 @@ class InspectPhotoTests(SimpleTestCase):
         with self.assertRaises(PhotoRejected):
             inspect_photo(encode(portrait_image((2000, 600))))  # landscape strip 3.33
 
-    def test_blurred_is_rejected_light_blur_and_jpeg_compression_pass(self):
+    def test_blur_observe_default_accepts_and_flags_below_threshold(self):
+        # default mode: the metric is provisional -> accept, record, warn
+        blurred = encode(portrait_image().filter(ImageFilter.GaussianBlur(4)))
+        with self.assertLogs("apps.core.services.photo_gate", level="WARNING") as logs:
+            metrics = inspect_photo(blurred)
+        self.assertLess(metrics["blur_variance"], 30)
+        self.assertTrue(metrics["blur_below_threshold"])
+        self.assertEqual(metrics["thresholds"]["blur_mode"], "observe")
+        self.assertTrue(any("photo_gate.blur_observed variance=" in line for line in logs.output))
+        # a sharp photo is not flagged and logs nothing
+        with self.assertNoLogs("apps.core.services.photo_gate", level="WARNING"):
+            sharp = inspect_photo(good_photo_bytes())
+        self.assertNotIn("blur_below_threshold", sharp)
+
+    @override_settings(PHOTO_BLUR_MODE="enforce")
+    def test_blur_enforce_rejects_blurred_light_blur_and_jpeg_compression_pass(self):
         sharp = portrait_image()
         self.assertGreater(inspect_photo(encode(sharp, quality=60))["blur_variance_center"], 100)
         self.assertGreater(inspect_photo(encode(sharp.filter(ImageFilter.GaussianBlur(2))))["blur_variance_center"], 30)
@@ -125,17 +144,27 @@ class InspectPhotoTests(SimpleTestCase):
         self.assertEqual(ctx.exception.reason, "Photo is too blurry")
         self.assertEqual(ctx.exception.hint, HINT_BLURRY)
         self.assertLess(ctx.exception.metrics["blur_variance"], 30)
+        self.assertEqual(ctx.exception.metrics["thresholds"]["blur_mode"], "enforce")
 
-    def test_flat_colour_is_rejected_as_blurry(self):
+    @override_settings(PHOTO_BLUR_MODE="enforce")
+    def test_flat_colour_is_rejected_as_blurry_in_enforce(self):
         with self.assertRaises(PhotoRejected) as ctx:
             inspect_photo(encode(Image.new("RGB", (1000, 1000), (180, 180, 180))))
         self.assertEqual(ctx.exception.reason, "Photo is too blurry")
         self.assertEqual(ctx.exception.metrics["blur_variance"], 0.0)
 
-    @override_settings(PHOTO_BLUR_MIN_VARIANCE=0)
+    @override_settings(PHOTO_BLUR_MODE="enforce", PHOTO_BLUR_MIN_VARIANCE=0)
     def test_blur_threshold_zero_disables_the_blur_check(self):
         metrics = inspect_photo(encode(Image.new("RGB", (1000, 1000), (180, 180, 180))))
         self.assertEqual(metrics["blur_variance"], 0.0)
+
+    @override_settings(PHOTO_BLUR_MODE="ENFORCE ")
+    def test_blur_mode_parsing_is_tolerant_and_unknown_means_observe(self):
+        from apps.core.services.photo_gate import blur_mode
+
+        self.assertEqual(blur_mode(), "enforce")
+        with override_settings(PHOTO_BLUR_MODE="strict"):
+            self.assertEqual(blur_mode(), "observe")
 
     def test_blur_metric_is_resolution_independent(self):
         small = blur_metrics(portrait_image((600, 800)))
@@ -172,6 +201,21 @@ class MediaServiceGateTests(TestCase):
         return MediaService().save_order_photo(
             order=self.order, file=SimpleUploadedFile(name, content, content_type=content_type)
         )
+
+    def test_blurry_photo_is_saved_in_observe_mode_with_the_flag(self):
+        blurred = encode(portrait_image().filter(ImageFilter.GaussianBlur(4)))
+        with self.assertLogs("apps.core.services.photo_gate", level="WARNING"):
+            photo = self._upload(blurred)
+        self.assertTrue(photo.metadata["gate"]["blur_below_threshold"])
+        self.assertEqual(OrderPhoto.objects.filter(order=self.order).count(), 1)
+
+    @override_settings(PHOTO_BLUR_MODE="enforce")
+    def test_blurry_photo_is_rejected_in_enforce_mode(self):
+        blurred = encode(portrait_image().filter(ImageFilter.GaussianBlur(4)))
+        with self.assertRaises(PhotoRejected) as ctx:
+            self._upload(blurred)
+        self.assertEqual(ctx.exception.reason, "Photo is too blurry")
+        self.assertFalse(OrderPhoto.objects.filter(order=self.order).exists())
 
     def test_good_photo_saved_with_gate_metrics_and_real_mime(self):
         photo = self._upload(good_photo_bytes("PNG"), name="photo", content_type="image/jpeg")  # MAX guessed jpeg

@@ -78,6 +78,9 @@ PHOTO_GATE_ENABLED = os.getenv("PHOTO_GATE_ENABLED", "true").strip().lower() in 
 PHOTO_MIN_SIDE = int(os.getenv("PHOTO_MIN_SIDE", "512"))
 PHOTO_MAX_ASPECT = float(os.getenv("PHOTO_MAX_ASPECT", "2.5"))
 PHOTO_BLUR_MIN_VARIANCE = float(os.getenv("PHOTO_BLUR_MIN_VARIANCE", "30"))
+# observe (default): a blurry photo is accepted, the metric is stored and a
+# warning logged; enforce: rejected. Switch after >= 20 live photos are measured.
+PHOTO_BLUR_MODE = os.getenv("PHOTO_BLUR_MODE", "observe").strip().lower()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
 # Telegram outbound transport (DRF-1870): defaults are production-compatible
