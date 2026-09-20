@@ -246,6 +246,30 @@ class TelegramBotClient:
             },
         )
 
+    # ----------------------------------------------------- sticker sets (DRF-2163)
+
+    def get_sticker_set(self, *, name: str):
+        return self._post("getStickerSet", {"name": name})
+
+    def upload_sticker_file(self, *, user_id, content: bytes, filename: str):
+        """uploadStickerFile (static PNG) → File with the file_id to put into a set."""
+        return self._post_multipart(
+            "uploadStickerFile",
+            fields={"user_id": user_id, "sticker_format": "static"},
+            file_field="sticker",
+            filename=filename,
+            content=content,
+            mime_type="image/png",
+        )
+
+    def create_new_sticker_set(self, *, user_id, name: str, title: str, stickers: list):
+        """createNewStickerSet with InputSticker dicts
+        ({"sticker": file_id, "format": "static", "emoji_list": [...]})."""
+        return self._post("createNewStickerSet", {"user_id": user_id, "name": name, "title": title, "stickers": stickers})
+
+    def add_sticker_to_set(self, *, user_id, name: str, sticker: dict):
+        return self._post("addStickerToSet", {"user_id": user_id, "name": name, "sticker": sticker})
+
     def refund_star_payment(self, *, user_id, telegram_payment_charge_id: str):
         """refundStarPayment — returns the Stars of one successful payment of
         THIS bot to the user (Telegram allows it for the bot's own charges

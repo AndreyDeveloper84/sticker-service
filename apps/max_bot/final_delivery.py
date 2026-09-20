@@ -1,6 +1,16 @@
 from apps.core.models import ChannelIdentity
 from apps.max_bot.client import created_message_id
+from apps.core.services.final_delivery import SUMMARY_TEXT
 from apps.core.services.preview_delivery import DeliveryResult
+
+# DRF-2163: MAX has no bot API for sticker sets — the customer builds the
+# set from the delivered PNGs in the «Стикеры в MAX» bot.
+MAX_STICKERS_INSTRUCTION = (
+    "Как сделать из них стикеры. Файл прозрачный — белый фон только в превью. "
+    "Сохраните файл → бот «Стикеры в MAX» → «Создать набор» → загрузите PNG "
+    "(нужен Цифровой ID)."
+)
+MAX_SUMMARY_TEXT = f"{SUMMARY_TEXT}\n\n{MAX_STICKERS_INSTRUCTION}"
 
 
 def _message_id(response) -> str:
@@ -16,6 +26,7 @@ class MaxFinalDeliveryAdapter:
     untouched."""
 
     channel = ChannelIdentity.Channel.MAX
+    summary_text = MAX_SUMMARY_TEXT
 
     def __init__(self, *, client):
         self.client = client
