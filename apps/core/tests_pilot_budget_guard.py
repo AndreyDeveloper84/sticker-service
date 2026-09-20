@@ -234,9 +234,10 @@ class BudgetGuardServiceTests(BudgetFixture):
     # cumulative check inside one multi-slot call
     @override_settings(PILOT_MAX_IMAGE_CALLS_PER_ORDER=2)
     def test_multi_slot_run_is_checked_cumulatively(self):
-        # fixture preview = 1 call; limit 2 → the first slot fits, the second
-        # does not → the WHOLE call rolls back: no job, no provider call.
-        with self.assertRaisesMessage(BudgetExceeded, "вызовов на заказ исчерпан: 2/2"):
+        # fixture preview = 1 call; limit 2; the pack needs 3 more → the whole
+        # chain is refused UPFRONT (planned=3 against 1/2, async C-2): no job,
+        # no provider call, nothing rolls forward.
+        with self.assertRaisesMessage(BudgetExceeded, "вызовов на заказ исчерпан: 1/2"):
             self.production.start(order=self.order, max_slots=None)
         self.assertEqual(self.provider.calls, 0)
         self.assertFalse(GenerationJob.objects.filter(task_type=GenerationJob.TaskType.FULL).exists())

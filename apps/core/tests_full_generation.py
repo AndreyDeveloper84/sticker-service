@@ -435,6 +435,8 @@ class FullProductionTestCase(TestCase):
         plan = self._service(ClassifyingProvider({"bye": "api"})).start(order=order, max_slots=None)
         bye = next(slot for slot in plan if slot.slot_key == "bye")
         self.assertTrue(bye.retryable)
+        # the chain stopped at bye; plain re-entry finishes the pending slots
+        self._service(ClassifyingProvider({"bye": "api"})).start(order=order, max_slots=None)
 
         plan = self._service(FakeProvider()).retry_failed(order=order)
         order.refresh_from_db()
@@ -678,11 +680,12 @@ class FullProductionTestCase(TestCase):
         self.assertEqual(self._full_jobs(order).filter(slot_key="bye").count(), 1)
         self.assertEqual(self._full_jobs(order).filter(slot_key="hello").count(), 1)
 
-    def test_default_start_runs_the_whole_pack_as_one_chain(self):
-        # Async C-2 / D-4: one click = the whole pack, slot after slot.
+    def test_start_without_max_slots_runs_the_whole_pack_as_one_chain(self):
+        # Async C-2 / D-4: max_slots=None → the whole pack, slot after slot,
+        # never more than one job in flight (the console passes it in D-2).
         order, _preview = self._make_order()
         provider = FakeProvider()
-        plan = self._service(provider).start(order=order)
+        plan = self._service(provider).start(order=order, max_slots=None)
         self.assertEqual(len(provider.requests), 3)
         self.assertTrue(all(slot.status == "succeeded" for slot in plan))
         order.refresh_from_db()
@@ -698,7 +701,7 @@ class FullProductionTestCase(TestCase):
         provider = FakeProvider()
         service = self._service(provider)
 
-        plan = service.start(order=order, max_slots=1)
+        plan = service.start(order=order)  # default max_slots=1: one slot per request
         self.assertEqual(len(provider.requests), 1)
         self.assertEqual(
             [slot.status for slot in plan], ["succeeded", "pending", "pending"]

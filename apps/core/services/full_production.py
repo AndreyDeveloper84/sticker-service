@@ -92,7 +92,9 @@ class FullProductionService:
     (BudgetGuard.enforce(planned=N)) before the first job exists.
 
     max_slots: how many slots this request may produce in total (chain
-    length); None = the whole remaining pack (one click = the pack).
+    length). Default 1 = one slot per request (today's console contract);
+    None = the whole remaining pack in one chain (console D-2 passes it for
+    «Запустить производство» = the pack; tests use it throughout).
     """
 
     def __init__(self, *, provider: ImageProvider, storage=None):
@@ -183,7 +185,7 @@ class FullProductionService:
     # ---------------------------------------------------------- entries
 
     def start(
-        self, *, order: Order, max_slots: int | None = None, budget_override: BudgetOverride | None = None
+        self, *, order: Order, max_slots: int | None = 1, budget_override: BudgetOverride | None = None
     ) -> list[SlotState]:
         """Run full production; safe to re-enter (no duplicate assets).
 
@@ -200,7 +202,7 @@ class FullProductionService:
         return self._finalize(order=order)
 
     def retry_failed(
-        self, *, order: Order, max_slots: int | None = None, budget_override: BudgetOverride | None = None
+        self, *, order: Order, max_slots: int | None = 1, budget_override: BudgetOverride | None = None
     ) -> list[SlotState]:
         """Selective retry: failed retryable slots only, never succeeded ones.
 
@@ -223,7 +225,7 @@ class FullProductionService:
         return plan
 
     def regenerate_slots(
-        self, *, order: Order, slot_keys, max_slots: int | None = None,
+        self, *, order: Order, slot_keys, max_slots: int | None = 1,
         budget_override: BudgetOverride | None = None,
     ) -> list[SlotState]:
         """Regenerate explicitly requested slots (QC FAIL path, DRF-2052).
@@ -509,16 +511,23 @@ class FullProductionService:
 
     def execute_claimed(self, job: GenerationJob) -> GenerationJob | None:
         """Worker side: ``job`` is a RUNNING (claimed) FULL slot. Calls the
-        provider once, records the outcome, finalizes the order and, after a
-        success, creates + dispatches the next slot of the chain. Returns the
-        next job or None (chain finished or stopped)."""
+        provider once, records the outcome and, after a success, creates +
+        dispatches the next slot of the chain. The order is finalized
+        (→ QUALITY_CONTROL when every slot's latest attempt succeeded) only
+        when the chain ends — a regenerate chain must not bounce the order
+        to QC while its remaining slots still carry the old asset. Returns
+        the next job or None (chain finished or stopped)."""
         self._run_slot_job(job=job)
         order = Order.objects.get(pk=job.order_id)
-        self._finalize(order=order)
         job.refresh_from_db()
-        if job.status != GenerationJob.Status.SUCCEEDED:
-            return None  # any failure (incl. ambiguous) stops the chain
-        return self.continue_chain(order=order, job=job)
+        next_job = None
+        if job.status == GenerationJob.Status.SUCCEEDED:
+            next_job = self.continue_chain(order=order, job=job)
+        # any failure (incl. ambiguous) stops the chain; the order stays
+        # PACK_GENERATING because the failed slot's latest attempt is FAILED
+        if next_job is None:
+            self._finalize(order=order)
+        return next_job
 
     def continue_chain(self, *, order: Order, job: GenerationJob) -> GenerationJob | None:
         """Next slot of the chain that ``job`` belongs to: the same _prepare()
@@ -532,12 +541,18 @@ class FullProductionService:
         if remaining is not None and remaining <= 0:
             return None
         mode = str(chain.get("mode") or "start")
+        requested = chain.get("requested_slots")
+        if requested is not None:
+            # regenerate: the slot just produced is done — never pick it again
+            requested = [key for key in requested if key != job.slot_key]
+            if not requested:
+                return None
         try:
             jobs, _blocked = self._prepare(
                 order=order,
                 allow_entry=False,
                 mode=mode,
-                slot_keys=chain.get("requested_slots"),
+                slot_keys=requested,
                 max_slots=remaining,
                 # the operator's override (if any) applied to the first slot
                 # only; later slots face the plain budget

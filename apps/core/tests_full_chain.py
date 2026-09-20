@@ -29,7 +29,7 @@ class LazyChainTests(FullProductionTestCase):
         provider = FakeProvider()
         service = self._service(provider)
         with use_executor(RecordingExecutor()) as executor:
-            plan = service.start(order=order)
+            plan = service.start(order=order, max_slots=None)
             self.assertEqual(self._full_jobs(order).count(), 1)
             head = self._full_jobs(order).get()
             self.assertEqual(head.status, GenerationJob.Status.PENDING)
@@ -48,7 +48,7 @@ class LazyChainTests(FullProductionTestCase):
         provider = FakeProvider()
         service = self._service(provider)
         with use_executor(RecordingExecutor()) as executor:
-            service.start(order=order)
+            service.start(order=order, max_slots=None)
             for expected_done in (1, 2, 3):
                 self.assertEqual(len(executor.dispatched), 1)
                 self.assertLessEqual(self._active(order).count(), 1)
@@ -68,7 +68,7 @@ class LazyChainTests(FullProductionTestCase):
         provider = ClassifyingProvider({"bye": "ambiguous"})
         service = self._service(provider)
         with use_executor(RecordingExecutor()) as executor:
-            service.start(order=order)
+            service.start(order=order, max_slots=None)
             executor.run_all(service=service)  # hello ok → bye queued
             executor.run_all(service=service)  # bye ambiguous → stop
             self.assertEqual(executor.dispatched, [])
@@ -83,9 +83,9 @@ class LazyChainTests(FullProductionTestCase):
         order, _preview = self._make_order()
         service = self._service(FakeProvider())
         with use_executor(RecordingExecutor()):
-            service.start(order=order)
+            service.start(order=order, max_slots=None)
             with self.assertRaises(FullProductionError) as ctx:
-                service.start(order=order)
+                service.start(order=order, max_slots=None)
             self.assertIn("в очередь", str(ctx.exception))
             self.assertEqual(self._full_jobs(order).count(), 1)
 
@@ -94,7 +94,7 @@ class LazyChainTests(FullProductionTestCase):
         provider = FakeProvider()
         service = self._service(provider)
         with use_executor(RecordingExecutor()) as executor:
-            service.start(order=order)
+            service.start(order=order, max_slots=None)
             head = executor.dispatched[0]
             run_job(head, service=service)
             run_job(head, service=service)  # duplicate message
@@ -110,7 +110,7 @@ class LazyChainTests(FullProductionTestCase):
 
         with mock.patch("apps.core.services.full_production.BudgetGuard.enforce", fake_enforce):
             with use_executor(RecordingExecutor()):
-                service.start(order=order)
+                service.start(order=order, max_slots=None)
         # pack of 3: planned=3 without slot, then the head slot on its own
         self.assertEqual(calls[0], ("", "full_start", 3))
         self.assertEqual(calls[1], ("hello", "full_start", 1))
@@ -124,7 +124,7 @@ class LazyChainTests(FullProductionTestCase):
         ):
             with use_executor(RecordingExecutor()) as executor:
                 with self.assertRaises(FullProductionError):
-                    service.start(order=order)
+                    service.start(order=order, max_slots=None)
                 self.assertEqual(executor.dispatched, [])
         self.assertEqual(self._full_jobs(order).count(), 0)
         order.refresh_from_db()
@@ -132,7 +132,7 @@ class LazyChainTests(FullProductionTestCase):
 
     def test_force_retry_is_a_single_slot_without_chain(self):
         order, _preview = self._make_order()
-        self._service(ClassifyingProvider({"bye": "ambiguous"})).start(order=order)
+        self._service(ClassifyingProvider({"bye": "ambiguous"})).start(order=order, max_slots=None)
         service = self._service(FakeProvider())
         with use_executor(RecordingExecutor()) as executor:
             service.force_retry_slot(order=order, slot_key="bye")
@@ -146,7 +146,7 @@ class LazyChainTests(FullProductionTestCase):
         order, _preview = self._make_order()
         service = self._service(FakeProvider())
         with use_executor(RecordingExecutor()) as executor:
-            service.start(order=order)
+            service.start(order=order, max_slots=None)
             head = executor.dispatched[0]
         claim(head)
         from datetime import timedelta
