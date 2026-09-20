@@ -245,6 +245,21 @@ class NavigationScenarios:
         self.assertIn("Сейчас: ждём оплату", text)
         self.assertEqual(self.last_payloads(), ["menu:main"])
 
+    def test_where_am_i_and_continue_after_a_skipped_contact(self):
+        self.start_single()
+        self.tap("emotion:bye")
+        self.photo("a")
+        self.tap("photos_done")
+        self.tap("contact:skip")
+        self.tap("menu:where")
+        self.assertIn("Связь: в этом чате", self.last_text())
+        self.assertIn("Шаг: проверка заказа", self.last_text())
+        self.tap("order:continue")
+        self.assertIn("🧾 Ваш заказ", self.last_text())
+        self.assertIn("Связь: в этом чате", self.last_text())
+        self.say("?")
+        self.assertTrue(self.last_text().startswith(self.step_prefix("card")))
+
     # -- 5. photos ------------------------------------------------------------------
 
     def test_photo_sent_as_a_file_is_saved_and_the_done_button_is_shown(self):

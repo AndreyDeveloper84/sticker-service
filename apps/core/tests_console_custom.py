@@ -191,6 +191,24 @@ class OrderCardTests(CustomConsoleTestCase):
         for phrase in PHRASES:
             self.assertIn(f"<li>{phrase}</li>", content)
 
+    def test_card_with_a_skipped_contact_names_the_chat(self):
+        """Owner GO 2026-09-20: the contact step is optional; a skipped
+        contact shows where the customer can actually be reached — the chat
+        (Telegram @username, else the channel id), no other PII."""
+        self.order.selection = {**self.order.selection, "contact_skipped": True}
+        self.order.selection.pop("contact", None)
+        self.order.save(update_fields=["selection"])
+        content = self.change_page()
+        self.assertIn("Контакт для связи: в этом чате — <strong>чат Telegram @anna</strong>", content)
+        self.assertNotIn("ещё не указан", content)
+        max_identity = ChannelIdentity.objects.create(
+            user=self.identity.user, channel=ChannelIdentity.Channel.MAX, external_user_id="9001", display_name="Иван",
+        )
+        self.order.channel_identity = max_identity
+        self.order.save(update_fields=["channel_identity"])
+        content = self.change_page()
+        self.assertIn("Контакт для связи: в этом чате — <strong>чат MAX id 9001</strong>", content)
+
     def test_card_without_phrases_or_contact_says_so(self):
         self.order.selection = {"emotions": ["custom-1", "custom-2", "custom-3"]}
         self.order.save(update_fields=["selection"])

@@ -123,6 +123,20 @@ def customer_contact(order: Order) -> str:
     return str((order.selection or {}).get("contact") or "").strip()
 
 
+def customer_contact_skipped(order: Order) -> bool:
+    return bool((order.selection or {}).get("contact_skipped"))
+
+
+def chat_contact(identity) -> str:
+    """Where the operator can reach a customer who skipped the contact step:
+    the chat the order came from — Telegram @username when there is one,
+    otherwise the channel and the customer id (no other PII)."""
+    channel = identity.get_channel_display()
+    if identity.username:
+        return f"чат {channel} @{identity.username}"
+    return f"чат {channel} id {identity.external_user_id}"
+
+
 def custom_phrases(order: Order) -> list[str]:
     return [str(value) for value in (order.selection or {}).get("custom_phrases") or []]
 
