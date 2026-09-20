@@ -328,6 +328,7 @@ class QcOrderStateTests(TestCase):
             {
                 Order.Status.READY_FOR_DELIVERY,
                 Order.Status.PACK_GENERATING,
+                Order.Status.CANCELLED,  # operator «Закрыть заказ» (OrderCloseService)
                 Order.Status.FAILED,
             },
         )

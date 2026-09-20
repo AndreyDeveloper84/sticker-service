@@ -16,6 +16,23 @@
       {% if budget_blocked and budget_can_override %}
         <p><label><input type="checkbox" name="force" value="1"{% if budget_force_checked %} checked{% endif %}> Переопределить лимит (записывается в журнал)</label></p>
       {% endif %}
+      {% if close_form %}
+        {% for error in close_errors %}<p style="color:#a30000"><strong>{{ error }}</strong></p>{% endfor %}
+        {% if payments %}
+          <p>Платежи: {% for p in payments %}#{{ p.pk }} {{ p.provider }} {{ p.status }} {{ p.amount_minor }} {{ p.currency }}{% if not forloop.last %}; {% endif %}{% endfor %}</p>
+        {% endif %}
+        <p>
+          <label for="reason">Причина закрытия (обязательно):</label><br>
+          <textarea id="reason" name="reason" rows="3" cols="60" required>{{ close_reason }}</textarea>
+        </p>
+        <p>
+          <label for="payment_note">Оплата:</label>
+          <select id="payment_note" name="payment_note" required>
+            <option value="">— выберите —</option>
+            {% for code, text in close_payment_notes %}<option value="{{ code }}"{% if close_payment_note == code %} selected{% endif %}>{{ text }}</option>{% endfor %}
+          </select>
+        </p>
+      {% endif %}
       {% if slot_input %}
         <p>
           <label for="slot_keys">Слоты для перегенерации (коды эмоций через запятую):</label>
