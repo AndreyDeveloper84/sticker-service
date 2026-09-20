@@ -52,3 +52,11 @@ jobs:
 
       - name: Test deploy-ref resolution
         run: bash deploy/scripts/test-resolve-deploy-ref.sh
+
+      - name: Validate staging compose file
+        # env_file is optional in the compose file, so this validates the
+        # service graph (backend + worker share one image, healthchecks,
+        # limits) without secrets
+        run: |
+          docker compose -f docker-compose.staging.yml config -q
+          bash -n deploy/scripts/deploy.sh
