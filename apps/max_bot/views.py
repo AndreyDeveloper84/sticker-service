@@ -22,6 +22,7 @@ from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.media import ALLOWED_IMAGE_MIME_TYPES
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
+from apps.core.webhook_auth import webhook_secret_ok
 from apps.max_bot.adapter import MaxAdapter, MaxFlowError
 from apps.max_bot.checkout import start_checkout
 from apps.max_bot.client import MaxAPIError, MaxBotClient
@@ -39,8 +40,11 @@ def webhook(request):
     if request.method != "POST":
         return HttpResponse(status=405)
 
-    secret = os.getenv("MAX_WEBHOOK_SECRET", "")
-    if secret and request.headers.get("X-Max-Bot-Api-Secret") != secret:
+    if not webhook_secret_ok(
+        os.getenv("MAX_WEBHOOK_SECRET", ""),
+        request.headers.get("X-Max-Bot-Api-Secret"),
+        channel="max",
+    ):
         return HttpResponse(status=403)
 
     try:

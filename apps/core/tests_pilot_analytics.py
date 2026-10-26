@@ -304,6 +304,13 @@ class PageAndExportTests(ThreeProductsFixture):
         response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=custom&start=bad")
         self.assertEqual(response.context["period"].preset, "30d")
 
+    def test_page_renders_for_a_period_without_orders(self):
+        # A period before any fixture: the AI-cost stages are empty, and the
+        # page used to crash on item["calls"] (KeyError).
+        response = self.client.get(reverse("admin:core_order_pilot_metrics") + "?preset=custom&start=2020-01-01&end=2020-01-31")
+        self.assertEqual(response.status_code, 200)
+        self.assertContains(response, "нет вызовов")
+
     def test_export_csv_columns_unknown_empty_no_pii(self):
         response = self.client.get(reverse("admin:core_order_pilot_metrics_export_csv") + "?preset=today")
         self.assertEqual(response.status_code, 200)

@@ -83,6 +83,9 @@ PHOTO_BLUR_MIN_VARIANCE = float(os.getenv("PHOTO_BLUR_MIN_VARIANCE", "30"))
 PHOTO_BLUR_MODE = os.getenv("PHOTO_BLUR_MODE", "observe").strip().lower()
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_WEBHOOK_SECRET = os.getenv("TELEGRAM_WEBHOOK_SECRET", "")
+# An empty TELEGRAM_/MAX_WEBHOOK_SECRET rejects every update (fail-closed).
+# Only local settings (dev + tests) opt into accepting unsigned updates.
+WEBHOOK_ALLOW_UNSIGNED = False
 # Telegram outbound transport (DRF-1870): defaults are production-compatible
 # direct api.telegram.org; set a Bot API relay and/or proxy on restricted
 # networks. Credentials only via env, never in code.
