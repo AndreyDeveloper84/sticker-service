@@ -18,6 +18,7 @@ from apps.core.services.media import ALLOWED_IMAGE_MIME_TYPES
 from apps.core.models import Order, Revision
 from apps.core.services.channel_order_flow import PILOT_CONSENT_BUTTON_LABEL, PILOT_CONSENT_TEXT
 from apps.core.services.preview_feedback import PreviewFeedbackError, PreviewFeedbackService
+from apps.core.webhook_auth import webhook_secret_ok
 from apps.telegram_bot.adapter import TelegramAdapter, TelegramFlowError
 from apps.telegram_bot.client import TelegramAPIError, TelegramBotClient
 from apps.telegram_bot.paid_notice import notify_customer_paid
@@ -31,8 +32,11 @@ def webhook(request):
     if request.method != "POST":
         return HttpResponse(status=405)
 
-    secret = settings.TELEGRAM_WEBHOOK_SECRET
-    if secret and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != secret:
+    if not webhook_secret_ok(
+        settings.TELEGRAM_WEBHOOK_SECRET,
+        request.headers.get("X-Telegram-Bot-Api-Secret-Token"),
+        channel="telegram",
+    ):
         return HttpResponse(status=403)
 
     try:
