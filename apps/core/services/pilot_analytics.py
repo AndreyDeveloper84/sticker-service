@@ -326,15 +326,17 @@ class PilotAnalyticsService:
         jobs = [job.input_metadata for r in rows for job in r["order"].generation_jobs.all() if job.started_at]
         total = generation_cost.aggregate(jobs)
         stages = {}
+        keys = ("calls", "known_cost_minor", "known_config_minor", "known_estimated_minor", "known_count",
+                "estimated_count", "possibly_billable_count", "unknown_price_count", "not_billable_count")
         for stage in STAGES:
             agg = Counter()
             for r in rows:
                 item = r["eco"]["ai"][stage]
-                for key in ("calls", "known_cost_minor", "known_config_minor", "known_estimated_minor", "known_count",
-                            "estimated_count", "possibly_billable_count",
-                            "unknown_price_count", "not_billable_count"):
+                for key in keys:
                     agg[key] += item[key]
-            stages[stage] = dict(agg)
+            # every key present even for a period without orders: the page
+            # reads item["calls"] and crashed on an empty period
+            stages[stage] = {key: agg[key] for key in keys}
         # DRF-2111 C1: only paid orders with at least one provider call whose
         # cost is fully known take part — an order without calls is not
         # evidence of a 0 ₽ generation cost
